@@ -1,0 +1,377 @@
+package admin
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/store"
+)
+
+type Service struct {
+	db  *store.DB
+	cfg *config.Config
+}
+
+func NewService(db *store.DB, cfg *config.Config) *Service {
+	return &Service{db: db, cfg: cfg}
+}
+
+func RegisterRoutes(r chi.Router, s *Service) {
+	// Settings
+	r.Get("/admin/settings",  s.GetSettings)
+	r.Patch("/admin/settings", s.UpdateSettings)
+
+	// Stats
+	r.Get("/admin/stats", s.GetStats)
+
+	// User management
+	r.Get("/admin/users",                    s.ListUsers)
+	r.Patch("/admin/users/{userID}/role",    s.SetRole)
+	r.Delete("/admin/users/{userID}",        s.DeleteUser)
+
+	// Invite codes
+	r.Get("/admin/invites",        s.ListInvites)
+	r.Post("/admin/invites",       s.CreateInvite)
+	r.Delete("/admin/invites/{id}", s.RevokeInvite)
+
+	// Audit log
+	r.Get("/admin/audit-log", s.GetAuditLog)
+
+	// Federation
+	r.Get("/admin/federation/instances",               s.ListInstances)
+	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
+	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`SELECT key, value FROM instance_settings ORDER BY key`)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	settings := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		rows.Scan(&k, &v)
+		// Redact SMTP password in response
+		if k == "smtp_password" && v != "" {
+			v = "••••••••"
+		}
+		settings[k] = v
+	}
+	writeJSON(w, 200, settings)
+}
+
+func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	actorID := auth.UserIDFromCtx(r.Context())
+	var updates map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+
+	allowed := map[string]bool{
+		"instance_name": true, "instance_description": true, "registration_mode": true,
+		"federation_enabled": true, "deletion_grace_days": true, "logo_url": true,
+		"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
+		"smtp_from": true, "smtp_enabled": true,
+	}
+
+	for k, v := range updates {
+		if !allowed[k] {
+			continue
+		}
+		// Don't overwrite password if placeholder sent
+		if k == "smtp_password" && v == "••••••••" {
+			continue
+		}
+		s.db.Exec(`
+			INSERT INTO instance_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+			ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
+		`, k, v)
+	}
+
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, details) VALUES ($1, 'update_settings', 'settings', '')`, actorID)
+
+	writeJSON(w, 200, map[string]string{"message": "settings updated"})
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+
+func (s *Service) GetStats(w http.ResponseWriter, r *http.Request) {
+	var totalUsers, postsToday, activeUsers7d, pendingReports int
+
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false`).Scan(&totalUsers)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE created_at > NOW() - INTERVAL '1 day' AND deleted_at IS NULL`).Scan(&postsToday)
+	s.db.QueryRow(`
+		SELECT COUNT(DISTINCT author_id) FROM posts
+		WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL
+	`).Scan(&activeUsers7d)
+	s.db.QueryRow(`SELECT COUNT(*) FROM reports WHERE status = 'pending'`).Scan(&pendingReports)
+
+	writeJSON(w, 200, map[string]int{
+		"total_users":      totalUsers,
+		"posts_today":      postsToday,
+		"active_users_7d":  activeUsers7d,
+		"pending_reports":  pendingReports,
+	})
+}
+
+// ── User management ───────────────────────────────────────────────────────────
+
+func (s *Service) ListUsers(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	var rows interface {
+		Next() bool
+		Scan(...any) error
+		Close() error
+	}
+	var err error
+
+	if q != "" {
+		rows, err = s.db.Query(`
+			SELECT id, username, email, display_name, role, is_suspended, email_verified, created_at
+			FROM users
+			WHERE is_remote = false
+			  AND (username ILIKE '%'||$1||'%' OR email ILIKE '%'||$1||'%' OR display_name ILIKE '%'||$1||'%')
+			ORDER BY created_at DESC LIMIT 100
+		`, q)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, username, email, display_name, role, is_suspended, email_verified, created_at
+			FROM users WHERE is_remote = false
+			ORDER BY created_at DESC LIMIT 100
+		`)
+	}
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type User struct {
+		ID            string `json:"id"`
+		Username      string `json:"username"`
+		Email         string `json:"email"`
+		DisplayName   string `json:"display_name"`
+		Role          string `json:"role"`
+		IsSuspended   bool   `json:"is_suspended"`
+		EmailVerified bool   `json:"email_verified"`
+		CreatedAt     string `json:"created_at"`
+	}
+	var users []User
+	for rows.Next() {
+		var u User
+		rows.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Role, &u.IsSuspended, &u.EmailVerified, &u.CreatedAt)
+		users = append(users, u)
+	}
+	if users == nil { users = []User{} }
+	writeJSON(w, 200, map[string]any{"users": users})
+}
+
+func (s *Service) SetRole(w http.ResponseWriter, r *http.Request) {
+	actorID := auth.UserIDFromCtx(r.Context())
+	userID := chi.URLParam(r, "userID")
+	var req struct{ Role string `json:"role"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	if req.Role != "user" && req.Role != "moderator" && req.Role != "admin" {
+		writeError(w, 400, "invalid role")
+		return
+	}
+	s.db.Exec(`UPDATE users SET role = $1 WHERE id = $2`, req.Role, userID)
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'set_role', 'user', $2, $3)`,
+		actorID, userID, req.Role)
+	writeJSON(w, 200, map[string]string{"message": "role updated"})
+}
+
+func (s *Service) DeleteUser(w http.ResponseWriter, r *http.Request) {
+	actorID := auth.UserIDFromCtx(r.Context())
+	userID := chi.URLParam(r, "userID")
+
+	var username string
+	s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+	if username == "admin" {
+		writeError(w, 403, "cannot delete the admin account")
+		return
+	}
+
+	s.db.Exec(`DELETE FROM users WHERE id = $1`, userID)
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'delete_user', 'user', $2, $3)`,
+		actorID, userID, username)
+
+	writeJSON(w, 200, map[string]string{"message": "user deleted"})
+}
+
+// ── Invites ───────────────────────────────────────────────────────────────────
+
+func (s *Service) ListInvites(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT i.id, i.code, i.created_at, i.expires_at, i.used_at,
+		       creator.username,
+		       used.username
+		FROM invite_codes i
+		JOIN users creator ON creator.id = i.created_by
+		LEFT JOIN users used ON used.id = i.used_by
+		ORDER BY i.created_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type Invite struct {
+		ID              string  `json:"id"`
+		Code            string  `json:"code"`
+		CreatedAt       string  `json:"created_at"`
+		ExpiresAt       *string `json:"expires_at"`
+		UsedAt          *string `json:"used_at"`
+		CreatedByUsername string `json:"created_by_username"`
+		UsedByUsername  *string `json:"used_by_username"`
+	}
+	var invites []Invite
+	for rows.Next() {
+		var inv Invite
+		rows.Scan(&inv.ID, &inv.Code, &inv.CreatedAt, &inv.ExpiresAt, &inv.UsedAt,
+			&inv.CreatedByUsername, &inv.UsedByUsername)
+		invites = append(invites, inv)
+	}
+	if invites == nil { invites = []Invite{} }
+	writeJSON(w, 200, map[string]any{"invites": invites})
+}
+
+func (s *Service) CreateInvite(w http.ResponseWriter, r *http.Request) {
+	creatorID := auth.UserIDFromCtx(r.Context())
+	var req struct{ ExpiresAt *string `json:"expires_at"` }
+	json.NewDecoder(r.Body).Decode(&req)
+
+	b := make([]byte, 16)
+	rand.Read(b)
+	code := hex.EncodeToString(b)
+
+	var id string
+	err := s.db.QueryRow(`
+		INSERT INTO invite_codes (code, created_by, expires_at)
+		VALUES ($1, $2, $3) RETURNING id
+	`, code, creatorID, req.ExpiresAt).Scan(&id)
+	if err != nil {
+		writeError(w, 500, "could not create invite")
+		return
+	}
+	writeJSON(w, 201, map[string]string{"id": id, "code": code})
+}
+
+func (s *Service) RevokeInvite(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s.db.Exec(`DELETE FROM invite_codes WHERE id = $1 AND used_by IS NULL`, id)
+	writeJSON(w, 200, map[string]string{"message": "invite revoked"})
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT a.id, a.action, a.target_type, a.target_id, a.details, a.created_at,
+		       u.username
+		FROM audit_log a
+		LEFT JOIN users u ON u.id = a.actor_id
+		ORDER BY a.created_at DESC
+		LIMIT 200
+	`)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type Entry struct {
+		ID         string  `json:"id"`
+		Action     string  `json:"action"`
+		TargetType string  `json:"target_type"`
+		TargetID   string  `json:"target_id"`
+		Details    string  `json:"details"`
+		CreatedAt  string  `json:"created_at"`
+		Actor      *string `json:"actor_username"`
+	}
+	var entries []Entry
+	for rows.Next() {
+		var e Entry
+		rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Details, &e.CreatedAt, &e.Actor)
+		entries = append(entries, e)
+	}
+	if entries == nil { entries = []Entry{} }
+	writeJSON(w, 200, map[string]any{"entries": entries})
+}
+
+// ── Federation ────────────────────────────────────────────────────────────────
+
+func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT id, domain, name, instance_url, status, last_seen_at, created_at
+		FROM federated_instances
+		ORDER BY last_seen_at DESC
+	`)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type Instance struct {
+		ID          string `json:"id"`
+		Domain      string `json:"domain"`
+		Name        string `json:"name"`
+		InstanceURL string `json:"instance_url"`
+		Status      string `json:"status"`
+		LastSeenAt  string `json:"last_seen_at"`
+		CreatedAt   string `json:"created_at"`
+	}
+	var instances []Instance
+	for rows.Next() {
+		var inst Instance
+		rows.Scan(&inst.ID, &inst.Domain, &inst.Name, &inst.InstanceURL,
+			&inst.Status, &inst.LastSeenAt, &inst.CreatedAt)
+		instances = append(instances, inst)
+	}
+	if instances == nil { instances = []Instance{} }
+	writeJSON(w, 200, map[string]any{"instances": instances})
+}
+
+func (s *Service) BlockInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actorID := auth.UserIDFromCtx(r.Context())
+	s.db.Exec(`UPDATE federated_instances SET status = 'blocked' WHERE id = $1`, id)
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'block_instance', 'instance', $2)`, actorID, id)
+	writeJSON(w, 200, map[string]string{"message": "instance blocked"})
+}
+
+func (s *Service) UnblockInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s.db.Exec(`UPDATE federated_instances SET status = 'active' WHERE id = $1`, id)
+	writeJSON(w, 200, map[string]string{"message": "instance unblocked"})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+var _ = strings.Contains

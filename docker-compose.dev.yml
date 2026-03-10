@@ -1,0 +1,82 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    environment:
+      - DATABASE_URL=postgres://agora:agoradev@postgres:5432/agora?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=dev-secret-change-in-production
+      - INSTANCE_DOMAIN=http://localhost:3000
+      - INSTANCE_NAME=Agora Dev
+      - STORAGE_PATH=/data/uploads
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+      - uploads:/data/uploads
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host"
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=agora
+      - POSTGRES_USER=agora
+      - POSTGRES_PASSWORD=agoradev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agora"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  migration:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.migration
+    environment:
+      - DATABASE_URL=postgres://agora:agoradev@postgres:5432/agora?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data_dev:
+  uploads:

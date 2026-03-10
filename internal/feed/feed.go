@@ -1,0 +1,485 @@
+package feed
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/media"
+	"github.com/agora-social/agora/internal/notifications"
+	"github.com/agora-social/agora/internal/store"
+)
+
+type Service struct {
+	db    *store.DB
+	notif *notifications.Service
+	media *media.Service
+}
+
+func NewService(db *store.DB, notif *notifications.Service, media *media.Service) *Service {
+	return &Service{db: db, notif: notif, media: media}
+}
+
+func RegisterRoutes(r chi.Router, s *Service) {
+	r.Get("/feed",                               s.GetFeed)
+	r.Post("/posts",                             s.CreatePost)
+	r.Get("/posts/{id}",                         s.GetPost)
+	r.Delete("/posts/{id}",                      s.DeletePost)
+	r.Post("/posts/{id}/like",                   s.LikePost)
+	r.Delete("/posts/{id}/like",                 s.UnlikePost)
+	r.Post("/posts/{id}/repost",                 s.Repost)
+	r.Get("/posts/{id}/comments",                s.GetComments)
+	r.Post("/posts/{id}/comments",               s.CreateComment)
+	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
+	r.Get("/users/{username}/posts",             s.GetUserPosts)
+}
+
+// ── Feed ──────────────────────────────────────────────────────────────────────
+
+func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	limit, offset := pageParams(r)
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.group_id,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       -- repost source info
+		       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+		WHERE p.parent_id IS NULL
+		  AND p.deleted_at IS NULL
+		  AND (
+		    -- own posts
+		    p.author_id = $1
+		    -- public posts from friends
+		    OR (
+		      p.visibility = 'public'
+		      AND EXISTS(
+		        SELECT 1 FROM friendships f
+		        WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+		            OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+		        AND f.status = 'accepted'
+		      )
+		    )
+		    -- friends posts from friends
+		    OR (
+		      p.visibility = 'friends'
+		      AND EXISTS(
+		        SELECT 1 FROM friendships f
+		        WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+		            OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+		        AND f.status = 'accepted'
+		      )
+		    )
+		    -- group posts where viewer is in the group
+		    OR (
+		      p.visibility = 'group'
+		      AND EXISTS(
+		        SELECT 1 FROM friend_group_members m
+		        WHERE m.group_id = p.group_id AND m.friend_id = $1
+		      )
+		    )
+		  )
+		ORDER BY p.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, userID, limit, offset)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
+	viewerID := auth.UserIDFromCtx(r.Context())
+	username := chi.URLParam(r, "username")
+	limit, offset := pageParams(r)
+
+	var authorID string
+	var profilePrivate bool
+	s.db.QueryRow(`SELECT id, profile_private FROM users WHERE username = $1`, username).Scan(&authorID, &profilePrivate)
+	if authorID == "" {
+		writeError(w, 404, "user not found")
+		return
+	}
+
+	// Check access
+	isFriend := false
+	if viewerID != authorID {
+		s.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM friendships
+				WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+				AND status = 'accepted'
+			)
+		`, viewerID, authorID).Scan(&isFriend)
+	}
+
+	visFilter := `p.visibility = 'public'`
+	if viewerID == authorID {
+		visFilter = `true`
+	} else if isFriend {
+		visFilter = `p.visibility IN ('public', 'friends')`
+	}
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.group_id,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
+		  AND `+visFilter+`
+		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
+	`, viewerID, authorID, limit, offset)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+// ── Post CRUD ─────────────────────────────────────────────────────────────────
+
+func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	var req struct {
+		Content    string `json:"content"`
+		ImageURL   string `json:"image_url"`
+		Visibility string `json:"visibility"`
+		GroupID    string `json:"group_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	if req.Content == "" && req.ImageURL == "" {
+		writeError(w, 400, "post must have content or image")
+		return
+	}
+	if req.Visibility == "" {
+		req.Visibility = "friends"
+	}
+
+	var groupID *string
+	if req.GroupID != "" && req.Visibility == "group" {
+		groupID = &req.GroupID
+	}
+
+	var id string
+	err := s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, image_url, visibility, group_id)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, userID, req.Content, req.ImageURL, req.Visibility, groupID).Scan(&id)
+	if err != nil {
+		writeError(w, 500, "could not create post")
+		return
+	}
+	writeJSON(w, 201, map[string]string{"id": id})
+}
+
+func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var p struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+		ImageURL string `json:"image_url"`
+	}
+	err := s.db.QueryRow(`SELECT id, content, image_url FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&p.ID, &p.Content, &p.ImageURL)
+	if err != nil {
+		writeError(w, 404, "post not found")
+		return
+	}
+	writeJSON(w, 200, p)
+}
+
+func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	role := auth.RoleFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var authorID string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID)
+	if authorID == "" {
+		writeError(w, 404, "post not found")
+		return
+	}
+	if authorID != userID && role != "admin" && role != "moderator" {
+		writeError(w, 403, "forbidden")
+		return
+	}
+
+	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+	writeJSON(w, 200, map[string]string{"message": "deleted"})
+}
+
+// ── Likes ─────────────────────────────────────────────────────────────────────
+
+func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	s.db.Exec(`INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, postID)
+
+	var authorID string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&authorID)
+	if authorID != "" && authorID != userID {
+		go s.notif.Create(authorID, userID, "post_like", postID, "")
+	}
+	writeJSON(w, 200, map[string]string{"message": "liked"})
+}
+
+func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	writeJSON(w, 200, map[string]string{"message": "unliked"})
+}
+
+// ── Reposts ───────────────────────────────────────────────────────────────────
+
+func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	repostOfID := chi.URLParam(r, "id")
+
+	var req struct {
+		Content    string `json:"content"`
+		Visibility string `json:"visibility"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Visibility == "" {
+		req.Visibility = "friends"
+	}
+
+	var id string
+	err := s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility, repost_of_id)
+		VALUES ($1, $2, $3, $4) RETURNING id
+	`, userID, req.Content, req.Visibility, repostOfID).Scan(&id)
+	if err != nil {
+		writeError(w, 500, "could not repost")
+		return
+	}
+
+	var authorID string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, repostOfID).Scan(&authorID)
+	if authorID != "" && authorID != userID {
+		go s.notif.Create(authorID, userID, "post_repost", repostOfID, "")
+	}
+
+	writeJSON(w, 201, map[string]string{"id": id})
+}
+
+// ── Comments ──────────────────────────────────────────────────────────────────
+
+func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
+	postID := chi.URLParam(r, "id")
+	viewerID := auth.UserIDFromCtx(r.Context())
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		       p.content, p.image_url, p.created_at,
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		WHERE p.parent_id = $2 AND p.deleted_at IS NULL
+		ORDER BY p.created_at ASC
+	`, viewerID, postID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type Comment struct {
+		ID          string `json:"id"`
+		AuthorID    string `json:"author_id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+		Content     string `json:"content"`
+		ImageURL    string `json:"image_url"`
+		CreatedAt   string `json:"created_at"`
+		LikeCount   int    `json:"like_count"`
+		Liked       bool   `json:"liked"`
+	}
+
+	var comments []Comment
+	for rows.Next() {
+		var c Comment
+		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.AvatarURL,
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.LikeCount, &c.Liked)
+		comments = append(comments, c)
+	}
+	if comments == nil { comments = []Comment{} }
+	writeJSON(w, 200, map[string]any{"comments": comments})
+}
+
+func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var req struct {
+		Content  string `json:"content"`
+		ImageURL string `json:"image_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Content == "" && req.ImageURL == "") {
+		writeError(w, 400, "content required")
+		return
+	}
+
+	// Inherit visibility from parent
+	var visibility, authorID string
+	s.db.QueryRow(`SELECT visibility, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, postID).
+		Scan(&visibility, &authorID)
+	if authorID == "" {
+		writeError(w, 404, "post not found")
+		return
+	}
+
+	var id string
+	err := s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, image_url, visibility, parent_id)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, userID, req.Content, req.ImageURL, visibility, postID).Scan(&id)
+	if err != nil {
+		writeError(w, 500, "could not post comment")
+		return
+	}
+
+	if authorID != userID {
+		go s.notif.Create(authorID, userID, "post_comment", postID, "")
+	}
+
+	writeJSON(w, 201, map[string]string{"id": id})
+}
+
+func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	role := auth.RoleFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+	commentID := chi.URLParam(r, "commentID")
+
+	var commentAuthor, parentAuthor string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`, commentID, postID).Scan(&commentAuthor)
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&parentAuthor)
+
+	if commentAuthor == "" {
+		writeError(w, 404, "comment not found")
+		return
+	}
+	if commentAuthor != userID && parentAuthor != userID && role != "admin" && role != "moderator" {
+		writeError(w, 403, "forbidden")
+		return
+	}
+
+	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, commentID)
+	writeJSON(w, 200, map[string]string{"message": "deleted"})
+}
+
+// ── Scan helpers ──────────────────────────────────────────────────────────────
+
+type Post struct {
+	ID             string  `json:"id"`
+	AuthorID       string  `json:"author_id"`
+	AuthorUsername string  `json:"author_username"`
+	AuthorName     string  `json:"author_display_name"`
+	AuthorAvatar   string  `json:"author_avatar_url"`
+	Content        string  `json:"content"`
+	ImageURL       string  `json:"image_url"`
+	Visibility     string  `json:"visibility"`
+	GroupID        *string `json:"group_id"`
+	RepostOfID     *string `json:"repost_of_id"`
+	IsRemote       bool    `json:"is_remote"`
+	RemoteInstance string  `json:"remote_instance,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	LikeCount      int     `json:"like_count"`
+	CommentCount   int     `json:"comment_count"`
+	RepostCount    int     `json:"repost_count"`
+	Liked          bool    `json:"liked"`
+	Reposted       bool    `json:"reposted"`
+	// Repost source
+	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
+	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
+	RepostAuthorAvatar   *string `json:"repost_author_avatar_url,omitempty"`
+	RepostContent        *string `json:"repost_content,omitempty"`
+	RepostImageURL       *string `json:"repost_image_url,omitempty"`
+	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
+}
+
+func scanPosts(rows interface {
+	Next() bool
+	Scan(...any) error
+}) []Post {
+	var posts []Post
+	for rows.Next() {
+		var p Post
+		rows.Scan(
+			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
+			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID,
+			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
+			&p.CreatedAt, &p.UpdatedAt,
+			&p.LikeCount, &p.CommentCount, &p.RepostCount,
+			&p.Liked, &p.Reposted,
+			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,
+			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
+		)
+		posts = append(posts, p)
+	}
+	if posts == nil { return []Post{} }
+	return posts
+}
+
+func pageParams(r *http.Request) (limit, offset int) {
+	limit = 20
+	offset = 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}

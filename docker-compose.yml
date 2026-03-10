@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+
+  # ── Postgres ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: agora-postgres
+    restart: unless-stopped
+    user: "500:500"
+    environment:
+      POSTGRES_DB:       agora
+      POSTGRES_USER:     agora
+      POSTGRES_PASSWORD: agora
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - agora
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agora"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agora-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - ./data/redis:/data
+    networks:
+      - agora
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Go API backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agora-backend
+    restart: unless-stopped
+    expose:
+      - "8080"
+    env_file:
+      - .env
+    environment:
+      - HTTP_ADDR=:8080
+      - DATABASE_URL=postgres://agora:agora@postgres:5432/agora?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks:
+      - agora
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── nginx frontend + reverse proxy ───────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: agora-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    networks:
+      - agora
+    depends_on:
+      - backend
+
+networks:
+  agora:
+    driver: bridge

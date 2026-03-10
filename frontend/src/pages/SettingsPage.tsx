@@ -1,0 +1,134 @@
+import { useState } from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { useAuthStore } from '../store/auth'
+import { usersApi, authApi } from '../api'
+
+export default function SettingsPage() {
+  const { user, updateUser, logout } = useAuthStore()
+  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'data'>('profile')
+
+  const [profile, setProfile] = useState({ display_name: user?.display_name||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
+  const [passwords, setPasswords] = useState({ current_password:'', new_password:'' })
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  const ok = (m: string) => { setMsg(m); setErr(''); setTimeout(() => setMsg(''), 3000) }
+  const fail = (e: any) => setErr(e.response?.data?.error || 'Error')
+
+  const saveProfile = useMutation({
+    mutationFn: () => usersApi.updateProfile(profile),
+    onSuccess: () => { updateUser(profile); ok('Profile saved') },
+    onError: fail,
+  })
+
+  const savePassword = useMutation({
+    mutationFn: () => authApi.changePassword(passwords),
+    onSuccess: () => { setPasswords({ current_password:'', new_password:'' }); ok('Password changed') },
+    onError: fail,
+  })
+
+  const togglePrivacy = useMutation({
+    mutationFn: () => usersApi.updateProfile({ profile_private: !user?.profile_private }),
+    onSuccess: () => { updateUser({ profile_private: !user?.profile_private }); ok('Privacy updated') },
+    onError: fail,
+  })
+
+  const uploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return
+    const res = await usersApi.uploadAvatar(f)
+    updateUser({ avatar_url: res.data.avatar_url }); ok('Avatar updated')
+  }
+
+  const exportData = async () => {
+    const res = await usersApi.exportData()
+    const url = URL.createObjectURL(res.data)
+    const a = document.createElement('a'); a.href = url; a.download = 'agora-export.zip'; a.click()
+  }
+
+  const requestDelete = useMutation({
+    mutationFn: () => usersApi.requestDeletion(),
+    onSuccess: () => ok('Deletion scheduled. You have 30 days to cancel.'),
+    onError: fail,
+  })
+
+  const tabs = ['profile','account','privacy','data'] as const
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-xl font-bold">Settings</h1>
+      {msg && <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700 dark:text-green-400">{msg}</div>}
+      {err && <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700 dark:text-red-400">{err}</div>}
+
+      <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+        {tabs.map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${tab===t ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'profile' && (
+        <div className="card p-4 space-y-4">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+              {user?.avatar_url ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+                : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{user?.username?.[0]?.toUpperCase()}</span>}
+            </div>
+            <label className="btn-secondary text-sm cursor-pointer">
+              Change avatar
+              <input type="file" accept="image/*" className="hidden" onChange={uploadAvatar} />
+            </label>
+          </div>
+          <div><label className="label">Display name</label><input className="input" value={profile.display_name} onChange={e=>setProfile(p=>({...p,display_name:e.target.value}))} /></div>
+          <div><label className="label">Bio</label><textarea className="input resize-none" rows={3} value={profile.bio} onChange={e=>setProfile(p=>({...p,bio:e.target.value}))} /></div>
+          <div><label className="label">Location</label><input className="input" value={profile.location} onChange={e=>setProfile(p=>({...p,location:e.target.value}))} /></div>
+          <div><label className="label">Website</label><input className="input" type="url" value={profile.website} onChange={e=>setProfile(p=>({...p,website:e.target.value}))} /></div>
+          <button onClick={() => saveProfile.mutate()} disabled={saveProfile.isPending} className="btn-primary">{saveProfile.isPending?'Saving…':'Save profile'}</button>
+        </div>
+      )}
+
+      {tab === 'account' && (
+        <div className="card p-4 space-y-4">
+          <h3 className="font-semibold">Change password</h3>
+          <div><label className="label">Current password</label><input type="password" className="input" value={passwords.current_password} onChange={e=>setPasswords(p=>({...p,current_password:e.target.value}))} /></div>
+          <div><label className="label">New password</label><input type="password" className="input" value={passwords.new_password} onChange={e=>setPasswords(p=>({...p,new_password:e.target.value}))} /></div>
+          <button onClick={() => savePassword.mutate()} disabled={savePassword.isPending} className="btn-primary">{savePassword.isPending?'Saving…':'Change password'}</button>
+        </div>
+      )}
+
+      {tab === 'privacy' && (
+        <div className="card p-4 space-y-4">
+          <h3 className="font-semibold">Privacy settings</h3>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Private profile</p>
+              <p className="text-xs text-agora-400">Only friends can see your posts and full profile</p>
+            </div>
+            <button onClick={() => togglePrivacy.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors ${user?.profile_private ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.profile_private ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {tab === 'data' && (
+        <div className="space-y-4">
+          <div className="card p-4 space-y-3">
+            <h3 className="font-semibold">Export your data</h3>
+            <p className="text-sm text-agora-500">Download a ZIP of all your posts, friends, and profile info.</p>
+            <button onClick={exportData} className="btn-secondary">Export data (ZIP)</button>
+          </div>
+          <div className="card p-4 space-y-3 border-red-200 dark:border-red-800">
+            <h3 className="font-semibold text-red-600">Delete account</h3>
+            <p className="text-sm text-agora-500">Your account will be scheduled for deletion. You have 30 days to cancel before all data is permanently removed.</p>
+            <button onClick={() => { if(confirm('Schedule account deletion? You will have 30 days to cancel.')) requestDelete.mutate() }} className="btn-danger">
+              Schedule deletion
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

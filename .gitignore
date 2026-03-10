@@ -1,0 +1,11 @@
+.env
+bin/
+data/
+tmp/
+*.test
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

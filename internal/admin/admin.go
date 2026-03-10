@@ -417,3 +417,11 @@ func (s *Service) ResendVerification(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, 200, map[string]string{"message": "verification email sent"})
 }
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}

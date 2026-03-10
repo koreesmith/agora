@@ -14,15 +14,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/ctxkeys"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
-
-type contextKey string
-
-const userIDKey  contextKey = "userID"
-const userRoleKey contextKey = "userRole"
 
 type Service struct {
 	db       *store.DB
@@ -46,15 +42,15 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid token"); return
 		}
-		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
-		ctx  = context.WithValue(ctx, userRoleKey, claims.Role)
+		ctx := context.WithValue(r.Context(), ctxkeys.UserID, claims.UserID)
+		ctx  = context.WithValue(ctx, ctxkeys.UserRole, claims.Role)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func (s *Service) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		role, _ := r.Context().Value(userRoleKey).(string)
+		role := ctxkeys.GetUserRole(r.Context())
 		if role != "admin" && role != "moderator" {
 			writeError(w, http.StatusForbidden, "admin required"); return
 		}
@@ -62,12 +58,8 @@ func (s *Service) RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
-func UserIDFromCtx(ctx context.Context) string {
-	id, _ := ctx.Value(userIDKey).(string); return id
-}
-func RoleFromCtx(ctx context.Context) string {
-	role, _ := ctx.Value(userRoleKey).(string); return role
-}
+func UserIDFromCtx(ctx context.Context) string { return ctxkeys.GetUserID(ctx) }
+func RoleFromCtx(ctx context.Context) string     { return ctxkeys.GetUserRole(ctx) }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 

@@ -3,6 +3,7 @@ package notifications
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/smtp"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/ctxkeys"
 	"github.com/agora-social/agora/internal/store"
 )
 
@@ -45,7 +47,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 }
 
 func (s *Service) List(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(string)
+	userID := ctxkeys.GetUserID(r.Context())
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 100 {
@@ -80,20 +82,20 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) UnreadCount(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(string)
+	userID := ctxkeys.GetUserID(r.Context())
 	var count int
 	s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false`, userID).Scan(&count)
 	writeJSON(w, 200, map[string]int{"count": count})
 }
 
 func (s *Service) MarkAllRead(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(string)
+	userID := ctxkeys.GetUserID(r.Context())
 	s.db.Exec(`UPDATE notifications SET read = true WHERE user_id = $1`, userID)
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
 func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(string)
+	userID := ctxkeys.GetUserID(r.Context())
 	id := chi.URLParam(r, "id")
 	s.db.Exec(`UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2`, id, userID)
 	writeJSON(w, 200, map[string]string{"message": "ok"})
@@ -177,6 +179,9 @@ func NewEmailService(db *store.DB, cfg *config.Config) *EmailService {
 func (e *EmailService) enabled() bool {
 	var val string
 	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'smtp_enabled'`).Scan(&val)
+	if val != "true" {
+		log.Printf("email: smtp_enabled=%q, skipping", val)
+	}
 	return val == "true"
 }
 
@@ -202,7 +207,11 @@ func (e *EmailService) smtpConfig() (host, port, user, pass, from string) {
 
 func (e *EmailService) Send(to, subject, body string) error {
 	host, portStr, user, pass, from := e.smtpConfig()
-	if host == "" { return fmt.Errorf("smtp not configured") }
+	log.Printf("email: sending to=%s subject=%q via %s", to, subject, host)
+	if host == "" {
+		log.Println("email: smtp_host not configured, skipping")
+		return fmt.Errorf("smtp not configured")
+	}
 	if portStr == "" { portStr = "587" }
 
 	addr := host + ":" + portStr
@@ -223,7 +232,13 @@ func (e *EmailService) Send(to, subject, body string) error {
 	if user != "" {
 		auth = smtp.PlainAuth("", user, pass, host)
 	}
-	return smtp.SendMail(addr, auth, from, []string{to}, []byte(msg))
+	err := smtp.SendMail(addr, auth, from, []string{to}, []byte(msg))
+	if err != nil {
+		log.Printf("email: send failed to=%s err=%v", to, err)
+	} else {
+		log.Printf("email: sent successfully to=%s", to)
+	}
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

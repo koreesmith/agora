@@ -27,7 +27,8 @@ export default function AdminPage() {
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
-  const revokeInvite = useMutation({ mutationFn: (id:string)=>adminApi.revokeInvite(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
+  const revokeInvite   = useMutation({ mutationFn: (id:string)=>adminApi.revokeInvite(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
+  const resendVerif    = useMutation({ mutationFn: (id:string)=>adminApi.resendVerification(id) })
 
   const tabs = [
     { id:'overview',   label:'Overview',    icon: BookOpen },
@@ -117,6 +118,9 @@ export default function AdminPage() {
                 className="text-xs border border-agora-200 rounded px-1.5 py-1 dark:border-agora-600 dark:bg-agora-800">
                 <option value="user">User</option><option value="moderator">Mod</option><option value="admin">Admin</option>
               </select>
+              {!u.email_verified && (
+                <button onClick={()=>resendVerif.mutate(u.id)} className="text-xs text-blue-500 hover:underline" title="Resend verification email">Resend email</button>
+              )}
               <button onClick={()=>{if(confirm(`Delete ${u.username}?`))delUser.mutate(u.id)}} className="text-xs text-red-500 hover:underline">Delete</button>
             </div>
           ))}

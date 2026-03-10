@@ -14,12 +14,17 @@ import (
 )
 
 type Service struct {
-	db  *store.DB
-	cfg *config.Config
+	db       *store.DB
+	cfg      *config.Config
+	notifSvc notifSender
 }
 
-func NewService(db *store.DB, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg}
+type notifSender interface {
+	SendEmailVerification(userID, email, displayName, token string)
+}
+
+func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender) *Service {
+	return &Service{db: db, cfg: cfg, notifSvc: notifSvc}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
@@ -34,6 +39,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/admin/users",                    s.ListUsers)
 	r.Patch("/admin/users/{userID}/role",    s.SetRole)
 	r.Delete("/admin/users/{userID}",        s.DeleteUser)
+	r.Post("/admin/users/{userID}/resend-verification", s.ResendVerification)
 
 	// Invite codes
 	r.Get("/admin/invites",        s.ListInvites)
@@ -375,3 +381,39 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 var _ = strings.Contains
+
+func (s *Service) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userID")
+
+	var email, displayName string
+	var verified bool
+	err := s.db.QueryRow(`SELECT email, display_name, email_verified FROM users WHERE id = $1 AND is_remote = false`, userID).
+		Scan(&email, &displayName, &verified)
+	if err != nil {
+		writeError(w, 404, "user not found"); return
+	}
+	if verified {
+		writeError(w, 400, "email already verified"); return
+	}
+
+	token, err := randomHex(32)
+	if err != nil {
+		writeError(w, 500, "server error"); return
+	}
+
+	_, err = s.db.Exec(`
+		UPDATE users SET email_verify_token = $1, email_verify_expires = NOW() + INTERVAL '24 hours'
+		WHERE id = $2
+	`, token, userID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+
+	go s.notifSvc.SendEmailVerification(userID, email, displayName, token)
+
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details)
+		VALUES ($1, 'resend_verification', 'user', $2, $3)`,
+		auth.UserIDFromCtx(r.Context()), userID, email)
+
+	writeJSON(w, 200, map[string]string{"message": "verification email sent"})
+}

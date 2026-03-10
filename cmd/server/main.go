@@ -52,7 +52,7 @@ func main() {
 	feedSvc   := feed.NewService(db, notifSvc, mediaSvc)
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
-	adminSvc  := admin.NewService(db, cfg)
+	adminSvc  := admin.NewService(db, cfg, notifSvc)
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────

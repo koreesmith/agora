@@ -128,7 +128,8 @@ export const adminApi = {
   getAuditLog:     ()                          => api.get('/admin/audit-log'),
   listInstances:   ()                          => api.get('/admin/federation/instances'),
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),
-  unblockInstance: (id: string)                => api.post(`/admin/federation/instances/${id}/unblock`),
+  unblockInstance:        (id: string)          => api.post(`/admin/federation/instances/${id}/unblock`),
+  resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
 }
 
 

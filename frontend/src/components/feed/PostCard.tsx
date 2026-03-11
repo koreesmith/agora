@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal } from 'lucide-react'
+import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { feedApi, moderationApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -37,6 +37,7 @@ const visIcons: Record<string, React.ReactNode> = {
 }
 
 export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [showComments, setShowComments] = useState(false)
@@ -157,13 +158,42 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
           )}
 
           {/* Image */}
-          {(post.repost_of_id ? post.repost_image_url : post.image_url) && (
-            <img
-              src={post.repost_of_id ? post.repost_image_url : post.image_url}
-              alt=""
-              className="mt-2 rounded-lg max-h-96 w-full object-cover"
-            />
-          )}
+          {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
+            const url = post.repost_of_id ? post.repost_image_url : post.image_url
+            return (
+              <>
+                <button
+                  onClick={() => setLightboxUrl(url!)}
+                  className="mt-2 block w-full rounded-lg overflow-hidden focus:outline-none"
+                >
+                  <img
+                    src={url}
+                    alt=""
+                    className="w-full max-h-80 object-cover rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in"
+                  />
+                </button>
+                {lightboxUrl === url && (
+                  <div
+                    className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+                    onClick={() => setLightboxUrl(null)}
+                  >
+                    <button
+                      className="absolute top-4 right-4 text-white bg-black/40 rounded-full p-1.5 hover:bg-black/70"
+                      onClick={() => setLightboxUrl(null)}
+                    >
+                      <X size={20} />
+                    </button>
+                    <img
+                      src={url}
+                      alt=""
+                      className="max-w-3xl max-h-[85vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
+                      onClick={e => e.stopPropagation()}
+                    />
+                  </div>
+                )}
+              </>
+            )
+          })()}
 
           {/* Actions */}
           <div className="flex items-center gap-4 mt-3 text-agora-400 dark:text-agora-500">

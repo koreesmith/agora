@@ -1,10 +1,11 @@
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, Repeat2 } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2 } from 'lucide-react'
 
-const icons: Record<string, React.ReactNode> = {
+const typeIcon: Record<string, React.ReactNode> = {
   friend_request:  <UserPlus size={16} className="text-blue-500" />,
   friend_accepted: <UserCheck size={16} className="text-green-500" />,
   post_like:       <Heart size={16} className="text-red-500" />,
@@ -12,8 +13,18 @@ const icons: Record<string, React.ReactNode> = {
   post_repost:     <Repeat2 size={16} className="text-green-500" />,
 }
 
+const notifText: Record<string, string> = {
+  friend_request:  'sent you a friend request',
+  friend_accepted: 'accepted your friend request',
+  post_like:       'liked your post',
+  post_comment:    'commented on your post',
+  post_repost:     'reposted your post',
+}
+
 export default function NotificationsPage() {
   const qc = useQueryClient()
+  // Track per-notification local state so UI updates instantly on action
+  const [localState, setLocalState] = useState<Record<string, 'accepted' | 'declined'>>({})
 
   const { data, isLoading } = useQuery({
     queryKey: ['notifications'],
@@ -30,34 +41,29 @@ export default function NotificationsPage() {
 
   const accept = useMutation({
     mutationFn: (actorId: string) => friendsApi.acceptRequest(actorId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notifications'] })
+    onSuccess: (_, actorId) => {
       qc.invalidateQueries({ queryKey: ['friends'] })
       qc.invalidateQueries({ queryKey: ['requests'] })
+      qc.invalidateQueries({ queryKey: ['unread-count'] })
     },
   })
 
   const decline = useMutation({
     mutationFn: (actorId: string) => friendsApi.declineRequest(actorId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notifications'] })
-      qc.invalidateQueries({ queryKey: ['requests'] })
-    },
   })
+
+  const handleAccept = (notifId: string, actorId: string) => {
+    setLocalState(s => ({ ...s, [notifId]: 'accepted' }))
+    accept.mutate(actorId)
+  }
+
+  const handleDecline = (notifId: string, actorId: string) => {
+    setLocalState(s => ({ ...s, [notifId]: 'declined' }))
+    decline.mutate(actorId)
+  }
 
   const notifs = data?.notifications || []
   const hasUnread = notifs.some((n: any) => !n.read)
-
-  const notifText = (n: any) => {
-    switch (n.type) {
-      case 'friend_request':  return 'sent you a friend request'
-      case 'friend_accepted': return 'accepted your friend request'
-      case 'post_like':       return 'liked your post'
-      case 'post_comment':    return 'commented on your post'
-      case 'post_repost':     return 'reposted your post'
-      default:                return ''
-    }
-  }
 
   return (
     <div className="space-y-4">
@@ -83,12 +89,13 @@ export default function NotificationsPage() {
         {notifs.map((n: any) => (
           <div key={n.id}
             className={`card p-3 space-y-2 ${!n.read ? 'border-l-2 border-l-agora-600' : ''}`}>
+
             <div className="flex items-start gap-3">
               <Link to={`/profile/${n.actor_username}`}
                 className="w-9 h-9 rounded-full bg-agora-100 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 overflow-hidden">
                 {n.actor_avatar_url
                   ? <img src={n.actor_avatar_url} alt="" className="w-full h-full object-cover" />
-                  : icons[n.type] || <Bell size={16} />
+                  : (typeIcon[n.type] || <Bell size={16} />)
                 }
               </Link>
               <div className="flex-1 min-w-0">
@@ -98,7 +105,7 @@ export default function NotificationsPage() {
                       {n.actor_display_name || n.actor_username}
                     </Link>
                   )}{' '}
-                  {notifText(n)}
+                  {notifText[n.type] || ''}
                 </p>
                 <p className="text-xs text-agora-400 mt-0.5">
                   {formatDistanceToNow(new Date(n.created_at), { addSuffix: true })}
@@ -106,63 +113,39 @@ export default function NotificationsPage() {
               </div>
             </div>
 
-            {/* Inline accept/decline for pending friend requests */}
-            {n.type === 'friend_request' && n.actor_id && (
-              <FriendRequestActions
-                actorId={n.actor_id}
-                username={n.actor_username}
-                onAccept={() => accept.mutate(n.actor_id)}
-                onDecline={() => decline.mutate(n.actor_id)}
-                isPending={accept.isPending || decline.isPending}
-              />
-            )}
+            {/* Friend request actions — only for friend_request type */}
+            {n.type === 'friend_request' && n.actor_id && (() => {
+              const state = localState[n.id]
+              if (state === 'accepted') return (
+                <div className="pl-12 flex items-center gap-1.5 text-xs text-green-600 font-medium">
+                  <UserCheck size={13} /> You are now friends
+                </div>
+              )
+              if (state === 'declined') return (
+                <div className="pl-12 text-xs text-agora-400">
+                  Request declined
+                </div>
+              )
+              return (
+                <div className="pl-12 flex gap-2">
+                  <button
+                    onClick={() => handleAccept(n.id, n.actor_id)}
+                    disabled={accept.isPending}
+                    className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
+                    <UserCheck size={13} /> Accept
+                  </button>
+                  <button
+                    onClick={() => handleDecline(n.id, n.actor_id)}
+                    disabled={decline.isPending}
+                    className="btn-secondary text-xs py-1 px-3 flex items-center gap-1">
+                    <UserX size={13} /> Decline
+                  </button>
+                </div>
+              )
+            })()}
           </div>
         ))}
       </div>
-    </div>
-  )
-}
-
-function FriendRequestActions({ actorId, username, onAccept, onDecline, isPending }: {
-  actorId: string
-  username: string
-  onAccept: () => void
-  onDecline: () => void
-  isPending: boolean
-}) {
-  // Check current friendship status
-  const { data } = useQuery({
-    queryKey: ['profile', username],
-    queryFn: () => fetch(`/api/users/${username}`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('agora_token')}` }
-    }).then(r => r.json()),
-    enabled: !!username,
-  })
-
-  const status = data?.friend_status
-
-  if (status === 'accepted') {
-    return (
-      <div className="flex items-center gap-2 pl-12">
-        <span className="text-xs text-green-600 font-medium flex items-center gap-1">
-          <UserCheck size={13} /> Friends
-        </span>
-      </div>
-    )
-  }
-
-  if (status !== 'pending_incoming') return null
-
-  return (
-    <div className="flex gap-2 pl-12">
-      <button onClick={onAccept} disabled={isPending}
-        className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
-        <UserCheck size={13} /> Accept
-      </button>
-      <button onClick={onDecline} disabled={isPending}
-        className="btn-secondary text-xs py-1 px-3">
-        Decline
-      </button>
     </div>
   )
 }

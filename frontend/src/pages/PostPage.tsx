@@ -19,7 +19,7 @@ export default function PostPage() {
   return (
     <div className="space-y-4">
       <PostCard post={data.post} invalidateKey={`post-${id}`} />
-      <CommentsSection postId={id!} />
+      <CommentsSection postId={id!} postAuthorId={data.post.author_id} />
     </div>
   )
 }

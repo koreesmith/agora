@@ -352,61 +352,41 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Single query: mutual-friend candidates first (mutual_count > 0),
+	// then everyone else on the instance not already connected, up to 50 total.
 	rows, err := s.db.Query(`
-		WITH my_friends AS (
-			SELECT CASE
-				WHEN requester_id = $1 THEN addressee_id
-				ELSE requester_id
-			END AS friend_id
+		WITH already_connected AS (
+			-- self + anyone with any friendship row (accepted, pending, declined)
+			SELECT $1::uuid AS uid
+			UNION
+			SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END
 			FROM friendships
-			WHERE (requester_id = $1 OR addressee_id = $1)
-			  AND status = 'accepted'
+			WHERE requester_id = $1 OR addressee_id = $1
 		),
-		candidates AS (
-			-- Friends of friends, excluding self and existing friends/pending
-			SELECT DISTINCT
-				CASE
-					WHEN f.requester_id IN (SELECT friend_id FROM my_friends) THEN f.addressee_id
-					ELSE f.requester_id
-				END AS candidate_id
-			FROM friendships f
-			WHERE (
-				f.requester_id IN (SELECT friend_id FROM my_friends)
-				OR f.addressee_id IN (SELECT friend_id FROM my_friends)
-			)
-			AND f.status = 'accepted'
-			AND f.requester_id != $1
-			AND f.addressee_id != $1
-			-- exclude already friends
-			AND CASE
-				WHEN f.requester_id IN (SELECT friend_id FROM my_friends) THEN f.addressee_id
-				ELSE f.requester_id
-			END NOT IN (SELECT friend_id FROM my_friends)
-			-- exclude pending requests
-			AND CASE
-				WHEN f.requester_id IN (SELECT friend_id FROM my_friends) THEN f.addressee_id
-				ELSE f.requester_id
-			END NOT IN (
-				SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END
-				FROM friendships WHERE requester_id = $1 OR addressee_id = $1
-			)
+		my_friends AS (
+			SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END AS fid
+			FROM friendships
+			WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
 		),
 		mutual_counts AS (
-			SELECT c.candidate_id,
-				COUNT(*) AS mutual_count
-			FROM candidates c
-			JOIN friendships f ON f.status = 'accepted'
+			SELECT
+				u.id AS candidate_id,
+				COUNT(DISTINCT f.id) AS mutual_count
+			FROM users u
+			LEFT JOIN friendships f ON f.status = 'accepted'
 				AND (
-					(f.requester_id = c.candidate_id AND f.addressee_id IN (SELECT friend_id FROM my_friends))
-					OR (f.addressee_id = c.candidate_id AND f.requester_id IN (SELECT friend_id FROM my_friends))
+					(f.requester_id = u.id AND f.addressee_id IN (SELECT fid FROM my_friends))
+					OR (f.addressee_id = u.id AND f.requester_id IN (SELECT fid FROM my_friends))
 				)
-			GROUP BY c.candidate_id
+			WHERE u.id NOT IN (SELECT uid FROM already_connected)
+			  AND u.deleted_at IS NULL
+			  AND u.email_verified = true
+			GROUP BY u.id
 		)
 		SELECT u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.bio,''),
 		       mc.mutual_count
 		FROM mutual_counts mc
 		JOIN users u ON u.id = mc.candidate_id
-		WHERE u.deleted_at IS NULL
 		ORDER BY mc.mutual_count DESC, u.display_name
 		LIMIT 50
 	`, userID)

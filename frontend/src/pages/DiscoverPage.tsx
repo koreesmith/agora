@@ -68,15 +68,19 @@ export default function DiscoverPage() {
               {/* Mutual friends */}
               <div className="flex items-center gap-1 mt-1.5 text-xs text-agora-500">
                 <Users size={11} />
-                <span>
-                  {u.mutual_count} mutual friend{u.mutual_count !== 1 ? 's' : ''}
-                  {u.mutual_friends?.length > 0 && (
-                    <span className="text-agora-400">
-                      {' '}· {u.mutual_friends.slice(0, 3).join(', ')}
-                      {u.mutual_count > 3 ? ` +${u.mutual_count - 3} more` : ''}
-                    </span>
-                  )}
-                </span>
+                {u.mutual_count > 0 ? (
+                  <span>
+                    {u.mutual_count} mutual friend{u.mutual_count !== 1 ? 's' : ''}
+                    {u.mutual_friends?.length > 0 && (
+                      <span className="text-agora-400">
+                        {' '}· {u.mutual_friends.slice(0, 3).join(', ')}
+                        {u.mutual_count > 3 ? ` +${u.mutual_count - 3} more` : ''}
+                      </span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-agora-400">Member of this instance</span>
+                )}
               </div>
 
               {/* Add friend button */}

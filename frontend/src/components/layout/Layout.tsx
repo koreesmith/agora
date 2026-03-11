@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass } from 'lucide-react'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
@@ -35,6 +35,7 @@ export default function Layout() {
     { to: '/',                          icon: Home,    label: 'Feed' },
     { to: '/notifications',             icon: Bell,    label: 'Notifications', badge: unread },
     { to: '/friends',                   icon: Users,   label: 'Friends' },
+    { to: '/discover',                  icon: Compass, label: 'Discover' },
     { to: '/search',                    icon: Search,  label: 'Search' },
     { to: `/profile/${user?.username}`, icon: User,    label: 'Profile' },
     { to: '/settings',                  icon: Settings,label: 'Settings' },

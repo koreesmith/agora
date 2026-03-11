@@ -185,19 +185,39 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var p struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
-		ImageURL string `json:"image_url"`
-	}
-	err := s.db.QueryRow(`SELECT id, content, image_url FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
-		Scan(&p.ID, &p.Content, &p.ImageURL)
+	id       := chi.URLParam(r, "id")
+	viewerID := auth.UserIDFromCtx(r.Context())
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.group_id,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $2) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
+		       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users rp_u ON rp_u.id = rp.author_id
+		WHERE p.id = $1 AND p.deleted_at IS NULL
+	`, id, viewerID)
 	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	if len(posts) == 0 {
 		writeError(w, 404, "post not found")
 		return
 	}
-	writeJSON(w, 200, p)
+	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
 func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {

@@ -35,7 +35,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 }
 
 func (s *Service) FileServer() http.Handler {
-	return http.StripPrefix("/uploads/", http.FileServer(http.Dir(s.uploadDir)))
+	return http.StripPrefix("/uploads", http.FileServer(http.Dir(s.uploadDir)))
 }
 
 func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {

@@ -72,7 +72,7 @@ func main() {
 	}))
 
 	// Static uploads
-	r.Handle("/uploads/*", mediaSvc.FileServer())
+	r.Mount("/uploads", mediaSvc.FileServer())
 
 	// ── API routes ────────────────────────────────────────────────────────
 	r.Route("/api", func(r chi.Router) {

@@ -39,6 +39,7 @@ type Notification struct {
 	PostID           *string `json:"post_id"`
 	Data             string  `json:"data"`
 	Read             bool    `json:"read"`
+	FriendStatus     string  `json:"friend_status,omitempty"` // for friend_request type
 	CreatedAt        string  `json:"created_at"`
 }
 
@@ -77,6 +78,25 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&n.ID, &n.Type, &n.ActorID, &n.ActorUsername, &n.ActorDisplayName,
 			&n.ActorAvatarURL, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
 		notifs = append(notifs, n)
+	}
+	// For friend_request notifications, look up the current friendship status
+	// so the frontend can show "accepted" even after a page reload
+	for i, n := range notifs {
+		if n.Type == "friend_request" && n.ActorID != nil {
+			var status, requesterID string
+			s.db.QueryRow(`
+				SELECT status, requester_id FROM friendships
+				WHERE (requester_id = $1 AND addressee_id = $2)
+				   OR (requester_id = $2 AND addressee_id = $1)
+			`, *n.ActorID, userID).Scan(&status, &requesterID)
+			if status == "accepted" {
+				notifs[i].FriendStatus = "accepted"
+			} else if status == "pending" && requesterID == *n.ActorID {
+				notifs[i].FriendStatus = "pending_incoming"
+			} else if status == "pending" {
+				notifs[i].FriendStatus = "pending_outgoing"
+			}
+		}
 	}
 	if notifs == nil {
 		notifs = []Notification{}

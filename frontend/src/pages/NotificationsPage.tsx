@@ -105,11 +105,11 @@ export default function NotificationsPage() {
               {/* Friend request actions */}
               {isFriendReq && n.actor_id && (
                 <div className="pl-12 flex gap-2 flex-wrap">
-                  {localAction === 'accepted' ? (
+                  {(localAction === 'accepted' || n.friend_status === 'accepted') ? (
                     <span className="text-xs text-green-600 font-medium flex items-center gap-1">
                       <UserCheck size={13} /> You are now friends
                     </span>
-                  ) : localAction === 'declined' ? (
+                  ) : (localAction === 'declined' || n.friend_status === 'declined') ? (
                     <span className="text-xs text-agora-400">Request declined</span>
                   ) : (
                     <>

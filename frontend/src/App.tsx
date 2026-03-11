@@ -18,6 +18,7 @@ import SearchPage         from './pages/SearchPage'
 import NotificationsPage  from './pages/NotificationsPage'
 import SettingsPage       from './pages/SettingsPage'
 import AdminPage          from './pages/AdminPage'
+import PostPage           from './pages/PostPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -72,6 +73,7 @@ function AppRoutes() {
         <Route path="/notifications"       element={<NotificationsPage />} />
         <Route path="/settings"            element={<SettingsPage />} />
         <Route path="/admin"               element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+        <Route path="/post/:id"             element={<PostPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

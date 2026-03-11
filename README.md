@@ -89,3 +89,53 @@ Only `public` visibility posts are federated.
 Username: `admin`  
 Password: `admin`  
 Registration is locked until this password is changed.
+
+---
+
+## SSL / HTTPS Setup
+
+Agora includes an automated SSL setup using Let's Encrypt and Certbot.
+
+### Prerequisites
+
+- A domain name with DNS pointing to your server's IP
+- Port 80 and 443 open on your firewall
+- Docker installed
+
+### One-time setup
+
+```bash
+./setup-ssl.sh yourdomain.com you@email.com
+```
+
+This script will:
+1. Configure nginx with your domain
+2. Temporarily start nginx on port 80 to serve the ACME challenge
+3. Run certbot to obtain a certificate from Let's Encrypt
+4. Generate `docker-compose.ssl.yml` with the full SSL stack
+
+### Start with SSL
+
+```bash
+docker compose -f docker-compose.ssl.yml up -d
+```
+
+### Renewal
+
+The `certbot` container runs automatically and checks for renewal every 12 hours. Let's Encrypt certificates are valid for 90 days; certbot renews them when they're within 30 days of expiry. No manual action needed.
+
+### Architecture
+
+```
+Internet
+   │
+   ▼
+nginx (ports 80/443)          ← SSL termination, rate limiting
+   │
+   ├── /uploads/*             ← served directly from disk
+   │
+   └── everything else ──────→ frontend container (port 80)
+                                      │
+                                      ├── /api/* ──→ backend (port 8080)
+                                      └── /* ──────→ React SPA
+```

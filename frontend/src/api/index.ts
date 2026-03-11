@@ -95,10 +95,12 @@ export const friendsApi = {
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 export const notificationsApi = {
-  list:        (params?: any) => api.get('/notifications', { params }),
-  unreadCount: ()             => api.get('/notifications/unread-count'),
-  markAllRead: ()             => api.post('/notifications/read-all'),
-  markRead:    (id: string)   => api.post(`/notifications/${id}/read`),
+  list:            (params?: any) => api.get('/notifications', { params }),
+  unreadCount:     ()             => api.get('/notifications/unread-count'),
+  markAllRead:     ()             => api.post('/notifications/read-all'),
+  markRead:        (id: string)   => api.post(`/notifications/${id}/read`),
+  getEmailPrefs:   ()             => api.get('/notifications/email-preferences'),
+  updateEmailPrefs:(enabled: boolean) => api.put('/notifications/email-preferences', { email_notifications_enabled: enabled }),
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

@@ -79,9 +79,12 @@ var schema = []string{
 		remote_user_id            TEXT         NOT NULL DEFAULT '',
 		federation_public_key     TEXT         NOT NULL DEFAULT '',
 		federation_private_key    TEXT         NOT NULL DEFAULT '',
+		email_notifications_enabled BOOLEAN    NOT NULL DEFAULT TRUE,
 		created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
 		updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 	)`,
+	// Migration: add column if upgrading from older schema
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
 	`CREATE INDEX IF NOT EXISTS idx_users_username_trgm ON users USING gin(username gin_trgm_ops)`,
 	`CREATE INDEX IF NOT EXISTS idx_users_dispname_trgm ON users USING gin(display_name gin_trgm_ops)`,
 	`CREATE INDEX IF NOT EXISTS idx_users_remote        ON users(is_remote, remote_instance)`,

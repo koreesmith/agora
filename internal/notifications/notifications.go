@@ -39,15 +39,17 @@ type Notification struct {
 	PostID           *string `json:"post_id"`
 	Data             string  `json:"data"`
 	Read             bool    `json:"read"`
-	FriendStatus     string  `json:"friend_status,omitempty"` // for friend_request type
+	FriendStatus     string  `json:"friend_status,omitempty"`
 	CreatedAt        string  `json:"created_at"`
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
-	r.Get("/notifications",              s.List)
-	r.Get("/notifications/unread-count", s.UnreadCount)
-	r.Post("/notifications/read-all",    s.MarkAllRead)
-	r.Post("/notifications/{id}/read",   s.MarkRead)
+	r.Get("/notifications",                    s.List)
+	r.Get("/notifications/unread-count",       s.UnreadCount)
+	r.Post("/notifications/read-all",          s.MarkAllRead)
+	r.Post("/notifications/{id}/read",         s.MarkRead)
+	r.Get("/notifications/email-preferences",  s.GetEmailPrefs)
+	r.Put("/notifications/email-preferences",  s.UpdateEmailPrefs)
 }
 
 func (s *Service) List(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +81,6 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 			&n.ActorAvatarURL, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
 		notifs = append(notifs, n)
 	}
-	// For friend_request notifications, look up the current friendship status
-	// so the frontend can show "accepted" even after a page reload
 	for i, n := range notifs {
 		if n.Type == "friend_request" && n.ActorID != nil {
 			var status, requesterID string
@@ -124,7 +124,26 @@ func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
-// ── Create helpers (called by other packages) ─────────────────────────────────
+func (s *Service) GetEmailPrefs(w http.ResponseWriter, r *http.Request) {
+	userID := ctxkeys.GetUserID(r.Context())
+	var enabled bool
+	s.db.QueryRow(`SELECT email_notifications_enabled FROM users WHERE id = $1`, userID).Scan(&enabled)
+	writeJSON(w, 200, map[string]bool{"email_notifications_enabled": enabled})
+}
+
+func (s *Service) UpdateEmailPrefs(w http.ResponseWriter, r *http.Request) {
+	userID := ctxkeys.GetUserID(r.Context())
+	var req struct {
+		Enabled bool `json:"email_notifications_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid request"); return
+	}
+	s.db.Exec(`UPDATE users SET email_notifications_enabled = $1, updated_at = NOW() WHERE id = $2`, req.Enabled, userID)
+	writeJSON(w, 200, map[string]bool{"email_notifications_enabled": req.Enabled})
+}
+
+// ── Create (called by other packages) ────────────────────────────────────────
 
 func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	var pID *string
@@ -133,48 +152,118 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	if actorID != "" { aID = &actorID }
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
-	go s.maybeEmailNotif(userID, notifType)
+	go s.maybeEmailNotif(userID, actorID, notifType)
 }
 
-func (s *Service) maybeEmailNotif(userID, notifType string) {
+func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 	if !s.email.enabled() { return }
-	var email, displayName string
-	if err := s.db.QueryRow(`SELECT email, display_name FROM users WHERE id = $1 AND email_verified = true`, userID).
-		Scan(&email, &displayName); err != nil {
+
+	// Check user's email notification preference (never blocks verification emails)
+	var toEmail, displayName string
+	var emailNotifsEnabled bool
+	if err := s.db.QueryRow(`
+		SELECT email, display_name, email_notifications_enabled
+		FROM users WHERE id = $1 AND email_verified = true
+	`, userID).Scan(&toEmail, &displayName, &emailNotifsEnabled); err != nil {
 		return
 	}
-	subject, body := notifEmailContent(notifType)
+	if !emailNotifsEnabled { return }
+
+	// Look up actor name
+	actorName := "Someone"
+	if actorID != "" {
+		var aDisplay, aUsername string
+		s.db.QueryRow(`SELECT display_name, username FROM users WHERE id = $1`, actorID).
+			Scan(&aDisplay, &aUsername)
+		if aDisplay != "" {
+			actorName = aDisplay
+		} else if aUsername != "" {
+			actorName = aUsername
+		}
+	}
+
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+
+	subject, body := notifEmailContent(notifType, actorName, instanceName, domain)
 	if subject == "" { return }
-	s.email.Send(email, subject, fmt.Sprintf("Hi %s,\n\n%s\n\n— Agora", displayName, body))
+
+	s.email.Send(toEmail, subject, buildBody(displayName, instanceName, domain, body))
 }
 
-func notifEmailContent(t string) (string, string) {
+func notifEmailContent(t, actorName, instanceName, domain string) (subject, body string) {
 	switch t {
-	case "friend_request":  return "New friend request on Agora", "Someone sent you a friend request."
-	case "friend_accepted": return "Friend request accepted", "Your friend request was accepted."
-	case "post_like":       return "Someone liked your post", "One of your posts received a like."
-	case "post_comment":    return "New comment on your post", "Someone commented on your post."
-	case "post_repost":     return "Your post was reposted", "Someone shared your post."
+	case "friend_request":
+		return fmt.Sprintf("New friend request on %s", instanceName),
+			fmt.Sprintf("%s sent you a friend request!\n\nHead to %s/friends to accept or decline.", actorName, domain)
+	case "friend_accepted":
+		return fmt.Sprintf("%s accepted your friend request!", actorName),
+			fmt.Sprintf("Great news — %s accepted your friend request on %s.\n\nView their profile: %s/profile/%s",
+				actorName, instanceName, domain, strings.ToLower(strings.ReplaceAll(actorName, " ", "-")))
+	case "post_like":
+		return fmt.Sprintf("%s liked your post", actorName),
+			fmt.Sprintf("%s liked one of your posts on %s.", actorName, instanceName)
+	case "post_comment":
+		return fmt.Sprintf("%s commented on your post", actorName),
+			fmt.Sprintf("%s left a comment on your post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, domain)
+	case "post_repost":
+		return fmt.Sprintf("%s shared your post", actorName),
+			fmt.Sprintf("%s shared one of your posts on %s.", actorName, instanceName)
 	}
 	return "", ""
 }
 
-// ── Email helpers (called by auth) ────────────────────────────────────────────
+func buildBody(displayName, instanceName, domain, content string) string {
+	return fmt.Sprintf(`Hi %s,
+
+%s
+
+──────────────────────────────
+This notification was sent by %s (%s).
+To turn off email notifications, go to Settings → Notifications.
+`, displayName, content, instanceName, domain)
+}
+
+// ── Transactional emails (verification, password reset) ───────────────────────
+// These always send regardless of email_notifications_enabled.
 
 func (s *Service) SendEmailVerification(_, email, displayName, token string) {
 	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
-	link := fmt.Sprintf("%s/verify-email?token=%s", domain, token)
-	s.email.Send(email, "Verify your Agora email address",
-		fmt.Sprintf("Hi %s,\n\nVerify your email:\n\n%s\n\nExpires in 24 hours.\n\n— Agora", displayName, link))
+	link := fmt.Sprintf("https://%s/verify-email?token=%s", domain, token)
+	body := fmt.Sprintf(`Hi %s,
+
+Welcome to %s! Please verify your email address by clicking the link below:
+
+%s
+
+This link expires in 24 hours. If you didn't create an account on %s, you can safely ignore this email.
+
+──────────────────────────────
+%s (%s)
+`, displayName, instanceName, link, instanceName, instanceName, domain)
+	s.email.Send(email, fmt.Sprintf("Verify your email address — %s", instanceName), body)
 }
 
 func (s *Service) SendPasswordReset(_, email, displayName, token string) {
 	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
-	link := fmt.Sprintf("%s/reset-password?token=%s", domain, token)
-	s.email.Send(email, "Reset your Agora password",
-		fmt.Sprintf("Hi %s,\n\nReset your password:\n\n%s\n\nExpires in 2 hours.\n\n— Agora", displayName, link))
+	link := fmt.Sprintf("https://%s/reset-password?token=%s", domain, token)
+	body := fmt.Sprintf(`Hi %s,
+
+You requested a password reset for your account on %s.
+
+Reset your password here:
+%s
+
+This link expires in 2 hours. If you didn't request this, you can safely ignore this email — your password has not been changed.
+
+──────────────────────────────
+%s (%s)
+`, displayName, instanceName, link, instanceName, domain)
+	s.email.Send(email, fmt.Sprintf("Reset your password — %s", instanceName), body)
 }
 
 func (s *Service) SendModerationAction(userID, action, reason string) {
@@ -184,8 +273,21 @@ func (s *Service) SendModerationAction(userID, action, reason string) {
 		Scan(&email, &displayName); err != nil {
 		return
 	}
-	s.email.Send(email, "Moderation action on your Agora account",
-		fmt.Sprintf("Hi %s,\n\nAction: %s\nReason: %s\n\n— Agora", displayName, action, reason))
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+	body := fmt.Sprintf(`Hi %s,
+
+A moderation action has been taken on your account on %s.
+
+Action: %s
+Reason: %s
+
+If you have questions, please contact the instance administrators.
+
+──────────────────────────────
+%s (%s)
+`, displayName, instanceName, action, reason, instanceName, domain)
+	s.email.Send(email, fmt.Sprintf("Moderation action on your %s account", instanceName), body)
 }
 
 // ── Email Service ─────────────────────────────────────────────────────────────
@@ -202,9 +304,6 @@ func NewEmailService(db *store.DB, cfg *config.Config) *EmailService {
 func (e *EmailService) enabled() bool {
 	var val string
 	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'smtp_enabled'`).Scan(&val)
-	if val != "true" {
-		log.Printf("email: smtp_enabled=%q, skipping", val)
-	}
 	return val == "true"
 }
 
@@ -212,6 +311,13 @@ func (e *EmailService) instanceDomain() string {
 	var val string
 	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&val)
 	if val == "" { return e.cfg.InstanceDomain }
+	return val
+}
+
+func (e *EmailService) instanceName() string {
+	var val string
+	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_name'`).Scan(&val)
+	if val == "" { return "Agora" }
 	return val
 }
 
@@ -235,20 +341,12 @@ func (e *EmailService) Send(to, subject, body string) error {
 		log.Println("email: smtp_host not configured, skipping")
 		return fmt.Errorf("smtp not configured")
 	}
-	if portStr == "" {
-		portStr = "587"
-	}
+	if portStr == "" { portStr = "587" }
 
 	domain := e.instanceDomain()
 	instanceName := e.instanceName()
-
-	// Friendly From with display name, e.g. "Agora <noreply@example.com>"
 	fromHeader := fmt.Sprintf("%s <%s>", instanceName, from)
-
-	// Unique Message-ID to prevent duplicate/spam classification
 	msgID := fmt.Sprintf("<%s.%s@%s>", randomID(), randomID(), domain)
-
-	// RFC 2822 date
 	date := time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")
 
 	headers := []string{
@@ -273,7 +371,6 @@ func (e *EmailService) Send(to, subject, body string) error {
 	if user != "" {
 		auth = smtp.PlainAuth("", user, pass, host)
 	}
-
 	err := smtp.SendMail(addr, auth, from, []string{to}, []byte(msg))
 	if err != nil {
 		log.Printf("email: send failed to=%s err=%v", to, err)
@@ -281,15 +378,6 @@ func (e *EmailService) Send(to, subject, body string) error {
 		log.Printf("email: sent successfully to=%s", to)
 	}
 	return err
-}
-
-func (e *EmailService) instanceName() string {
-	var val string
-	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_name'`).Scan(&val)
-	if val == "" {
-		return "Agora"
-	}
-	return val
 }
 
 func randomID() string {

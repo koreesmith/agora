@@ -21,10 +21,16 @@ export default function ProfilePage() {
     enabled: !!profile && !profile.profile_private,
   })
 
-  const inv = () => qc.invalidateQueries({ queryKey: ['profile', username] })
+  const inv = () => {
+    qc.invalidateQueries({ queryKey: ['profile', username] })
+    qc.invalidateQueries({ queryKey: ['friends'] })
+    qc.invalidateQueries({ queryKey: ['requests'] })
+    qc.invalidateQueries({ queryKey: ['notifications'] })
+  }
 
   const sendReq = useMutation({ mutationFn: () => friendsApi.sendRequest(profile.id), onSuccess: inv })
   const accept  = useMutation({ mutationFn: () => friendsApi.acceptRequest(profile.id), onSuccess: inv })
+  const decline = useMutation({ mutationFn: () => friendsApi.declineRequest(profile.id), onSuccess: inv })
   const unfriend= useMutation({ mutationFn: () => friendsApi.unfriend(profile.id), onSuccess: inv })
 
   if (isLoading) return <div className="text-center py-12 text-agora-400">Loading…</div>
@@ -49,16 +55,26 @@ export default function ProfilePage() {
               }
             </div>
             <div className="flex gap-2 mt-10">
-              {!isSelf && status !== 'accepted' && status !== 'pending' && (
-                <button onClick={() => sendReq.mutate()} className="btn-primary text-sm">
+              {!isSelf && !status && (
+                <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                   <UserPlus size={16}/> Add friend
                 </button>
               )}
               {!isSelf && status === 'pending' && (
-                <button disabled className="btn-secondary text-sm"><Clock size={16}/> Pending</button>
+                <button disabled className="btn-secondary text-sm flex items-center gap-1"><Clock size={16}/> Pending</button>
+              )}
+              {!isSelf && status === 'pending_incoming' && (
+                <div className="flex gap-2">
+                  <button onClick={() => accept.mutate()} className="btn-primary text-sm flex items-center gap-1">
+                    <UserCheck size={16}/> Accept request
+                  </button>
+                  <button onClick={() => { if(confirm('Decline request?')) decline.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
+                    <UserX size={16}/> Decline
+                  </button>
+                </div>
               )}
               {!isSelf && status === 'accepted' && (
-                <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm">
+                <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
                   <UserCheck size={16}/> Friends
                 </button>
               )}

@@ -78,13 +78,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Friend status
+	// Friend status (directional: pending_incoming = they requested us)
 	if viewerID != "" && viewerID != u.ID {
+		var status, requesterID string
 		s.db.QueryRow(`
-			SELECT status FROM friendships
+			SELECT status, requester_id FROM friendships
 			WHERE (requester_id = $1 AND addressee_id = $2)
 			   OR (requester_id = $2 AND addressee_id = $1)
-		`, viewerID, u.ID).Scan(&u.FriendStatus)
+		`, viewerID, u.ID).Scan(&status, &requesterID)
+		if status == "pending" && requesterID == u.ID {
+			u.FriendStatus = "pending_incoming"
+		} else {
+			u.FriendStatus = status
+		}
 	}
 	if viewerID == u.ID {
 		u.FriendStatus = "self"

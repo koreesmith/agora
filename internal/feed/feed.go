@@ -61,36 +61,16 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 		WHERE p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
+		  AND p.visibility != 'private'
 		  AND (
 		    -- own posts
 		    p.author_id = $1
-		    -- public posts from friends
-		    OR (
-		      p.visibility = 'public'
-		      AND EXISTS(
-		        SELECT 1 FROM friendships f
-		        WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
-		            OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
-		        AND f.status = 'accepted'
-		      )
-		    )
-		    -- friends posts from friends
-		    OR (
-		      p.visibility = 'friends'
-		      AND EXISTS(
-		        SELECT 1 FROM friendships f
-		        WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
-		            OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
-		        AND f.status = 'accepted'
-		      )
-		    )
-		    -- group posts where viewer is in the group
-		    OR (
-		      p.visibility = 'group'
-		      AND EXISTS(
-		        SELECT 1 FROM friend_group_members m
-		        WHERE m.group_id = p.group_id AND m.friend_id = $1
-		      )
+		    -- any non-private post from accepted friends
+		    OR EXISTS(
+		      SELECT 1 FROM friendships f
+		      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+		          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+		      AND f.status = 'accepted'
 		    )
 		  )
 		ORDER BY p.created_at DESC

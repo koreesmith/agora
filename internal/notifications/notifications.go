@@ -1,13 +1,16 @@
 package notifications
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"net/smtp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/config"
@@ -212,26 +215,45 @@ func (e *EmailService) Send(to, subject, body string) error {
 		log.Println("email: smtp_host not configured, skipping")
 		return fmt.Errorf("smtp not configured")
 	}
-	if portStr == "" { portStr = "587" }
+	if portStr == "" {
+		portStr = "587"
+	}
 
-	addr := host + ":" + portStr
-	msg := strings.Join([]string{
-		"From: " + from,
+	domain := e.instanceDomain()
+	instanceName := e.instanceName()
+
+	// Friendly From with display name, e.g. "Agora <noreply@example.com>"
+	fromHeader := fmt.Sprintf("%s <%s>", instanceName, from)
+
+	// Unique Message-ID to prevent duplicate/spam classification
+	msgID := fmt.Sprintf("<%s.%s@%s>", randomID(), randomID(), domain)
+
+	// RFC 2822 date
+	date := time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")
+
+	headers := []string{
+		"From: " + fromHeader,
 		"To: " + to,
+		"Reply-To: " + fromHeader,
 		"Subject: " + subject,
+		"Date: " + date,
+		"Message-ID: " + msgID,
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=UTF-8",
-		"",
-		body,
-	}, "\r\n")
+		"Content-Transfer-Encoding: 8bit",
+		"X-Mailer: Agora Social",
+		"Precedence: bulk",
+		"Auto-Submitted: auto-generated",
+	}
 
-	port, _ := strconv.Atoi(portStr)
-	_ = port
+	msg := strings.Join(headers, "\r\n") + "\r\n\r\n" + body
 
+	addr := host + ":" + portStr
 	var auth smtp.Auth
 	if user != "" {
 		auth = smtp.PlainAuth("", user, pass, host)
 	}
+
 	err := smtp.SendMail(addr, auth, from, []string{to}, []byte(msg))
 	if err != nil {
 		log.Printf("email: send failed to=%s err=%v", to, err)
@@ -239,6 +261,25 @@ func (e *EmailService) Send(to, subject, body string) error {
 		log.Printf("email: sent successfully to=%s", to)
 	}
 	return err
+}
+
+func (e *EmailService) instanceName() string {
+	var val string
+	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_name'`).Scan(&val)
+	if val == "" {
+		return "Agora"
+	}
+	return val
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(36))
+		const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+		b[i] = chars[n.Int64()]
+	}
+	return string(b)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

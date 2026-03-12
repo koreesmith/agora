@@ -38,7 +38,7 @@ export const authApi = {
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
 export const feedApi = {
-  getFeed:       (params?: any)            => api.get('/feed', { params }),
+  getFeed:       (params?: { page?: number, offset?: number, limit?: number, list_id?: string }) => api.get('/feed', { params }),
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),

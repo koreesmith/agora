@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Image, X, Globe, Users, Lock } from 'lucide-react'
 import { feedApi, friendsApi } from '../../api'
@@ -39,7 +40,7 @@ export default function CreatePost() {
   const visOptions = [
     { value: 'public',  icon: Globe,  label: 'Public' },
     { value: 'friends', icon: Users,  label: 'Friends' },
-    { value: 'group',   icon: Lock,   label: 'Group' },
+    { value: 'group',   icon: Lock,   label: 'Friend List' },
   ]
 
   return (
@@ -82,12 +83,14 @@ export default function CreatePost() {
           className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
           {visOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
-        {visibility === 'group' && groups.length > 0 && (
-          <select value={groupId} onChange={e => setGroupId(e.target.value)}
-            className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
-            <option value="">Select group…</option>
-            {groups.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
+        {visibility === 'group' && (
+          groups.length > 0
+            ? <select value={groupId} onChange={e => setGroupId(e.target.value)}
+                className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
+                <option value="">Select list…</option>
+                {groups.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            : <span className="text-xs text-agora-400">No lists yet — <Link to="/friends" className="underline">create one</Link></span>
         )}
         <button onClick={() => create.mutate()} disabled={(!content.trim() && !imageUrl) || create.isPending || uploading} className="ml-auto btn-primary text-sm">
           {create.isPending ? 'Posting…' : 'Post'}

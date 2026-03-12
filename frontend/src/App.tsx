@@ -20,6 +20,7 @@ import SettingsPage       from './pages/SettingsPage'
 import AdminPage          from './pages/AdminPage'
 import PostPage           from './pages/PostPage'
 import DiscoverPage       from './pages/DiscoverPage'
+import ListFeedPage        from './pages/ListFeedPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -76,6 +77,7 @@ function AppRoutes() {
         <Route path="/admin"               element={<RequireAdmin><AdminPage /></RequireAdmin>} />
         <Route path="/post/:id"             element={<PostPage />} />
         <Route path="/discover"             element={<DiscoverPage />} />
+        <Route path="/lists/:id"            element={<ListFeedPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -1,6 +1,7 @@
 package feed
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"regexp"
@@ -45,41 +46,78 @@ func RegisterRoutes(r chi.Router, s *Service) {
 func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	limit, offset := pageParams(r)
+	listID := r.URL.Query().Get("list_id")
 
-	rows, err := s.db.Query(`
-		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.group_id,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at,
-		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
-		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
-		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
-		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
-		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       -- repost source info
-		       rp_u.username, rp_u.display_name, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at
-		FROM posts p
-		JOIN users u ON u.id = p.author_id
-		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
-		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
-		WHERE p.parent_id IS NULL
-		  AND p.deleted_at IS NULL
-		  AND p.visibility != 'private'
-		  AND (
-		    -- own posts
-		    p.author_id = $1
-		    -- any non-private post from accepted friends
-		    OR EXISTS(
-		      SELECT 1 FROM friendships f
-		      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
-		          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
-		      AND f.status = 'accepted'
-		    )
-		  )
-		ORDER BY p.created_at DESC
-		LIMIT $2 OFFSET $3
-	`, userID, limit, offset)
+	var rows *sql.Rows
+	var err error
+
+	if listID != "" {
+		// List feed: posts from members of a specific friend list owned by this user
+		rows, err = s.db.Query(`
+			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+			       p.content, p.image_url, p.visibility, p.group_id,
+			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.created_at, p.updated_at,
+			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+			       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+			       rp.content, rp.image_url, rp.created_at
+			FROM posts p
+			JOIN users u ON u.id = p.author_id
+			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+			WHERE p.parent_id IS NULL
+			  AND p.deleted_at IS NULL
+			  AND p.visibility != 'private'
+			  AND p.author_id IN (
+			    SELECT friend_id FROM friend_group_members
+			    WHERE group_id = $4
+			    AND group_id IN (SELECT id FROM friend_groups WHERE user_id = $1)
+			  )
+			  AND (
+			    p.visibility = 'public'
+			    OR p.visibility = 'friends'
+			    OR (p.visibility = 'group' AND p.group_id = $4)
+			  )
+			ORDER BY p.created_at DESC
+			LIMIT $2 OFFSET $3
+		`, userID, limit, offset, listID)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+			       p.content, p.image_url, p.visibility, p.group_id,
+			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.created_at, p.updated_at,
+			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+			       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+			       rp.content, rp.image_url, rp.created_at
+			FROM posts p
+			JOIN users u ON u.id = p.author_id
+			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+			WHERE p.parent_id IS NULL
+			  AND p.deleted_at IS NULL
+			  AND p.visibility != 'private'
+			  AND (
+			    p.author_id = $1
+			    OR EXISTS(
+			      SELECT 1 FROM friendships f
+			      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+			          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+			      AND f.status = 'accepted'
+			    )
+			  )
+			ORDER BY p.created_at DESC
+			LIMIT $2 OFFSET $3
+		`, userID, limit, offset)
+	}
 	if err != nil {
 		writeError(w, 500, "db error")
 		return

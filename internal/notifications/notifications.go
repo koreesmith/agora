@@ -209,6 +209,9 @@ func notifEmailContent(t, actorName, instanceName, domain string) (subject, body
 	case "post_repost":
 		return fmt.Sprintf("%s shared your post", actorName),
 			fmt.Sprintf("%s shared one of your posts on %s.", actorName, instanceName)
+	case "post_mention":
+		return fmt.Sprintf("%s mentioned you in a post", actorName),
+			fmt.Sprintf("%s mentioned you in a post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, domain)
 	}
 	return "", ""
 }

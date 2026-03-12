@@ -3,7 +3,9 @@ package feed
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -11,6 +13,8 @@ import (
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
+
+var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
 type Service struct {
 	db    *store.DB
@@ -181,6 +185,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "could not create post")
 		return
 	}
+
+	go s.notifyMentions(req.Content, userID, id)
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
@@ -378,6 +384,7 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	if authorID != userID {
 		go s.notif.Create(authorID, userID, "post_comment", postID, "")
 	}
+	go s.notifyMentions(req.Content, userID, postID)
 
 	writeJSON(w, 201, map[string]string{"id": id})
 }
@@ -482,4 +489,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// ── Mention helpers ───────────────────────────────────────────────────────────
+
+func (s *Service) notifyMentions(content, authorID, postID string) {
+	matches := mentionRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	for _, m := range matches {
+		username := strings.ToLower(m[1])
+		if seen[username] { continue }
+		seen[username] = true
+
+		var userID string
+		s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&userID)
+		if userID == "" || userID == authorID { continue }
+
+		s.notif.Create(userID, authorID, "post_mention", postID, "")
+	}
 }

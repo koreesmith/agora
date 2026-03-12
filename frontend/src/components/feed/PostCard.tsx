@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { feedApi, moderationApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import CommentsSection from './CommentsSection'
+import CommentsSection, { renderContent } from './CommentsSection'
 
 interface Post {
   id: string
@@ -146,14 +146,14 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
           {/* Content */}
           {(post.repost_of_id ? post.repost_content : post.content) && (
             <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-              {post.repost_of_id ? post.repost_content : post.content}
+              {renderContent(post.repost_of_id ? post.repost_content! : post.content)}
             </p>
           )}
 
           {/* Reposter's comment */}
           {post.repost_of_id && post.content && (
             <p className="text-sm text-agora-500 dark:text-agora-400 mt-2 italic">
-              "{post.content}"
+              "{renderContent(post.content)}"
             </p>
           )}
 

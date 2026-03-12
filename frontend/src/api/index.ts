@@ -75,6 +75,7 @@ export const usersApi = {
   cancelDeletion:   ()                 => api.delete('/users/me/request-deletion'),
   deleteImmediately:()                 => api.post('/users/me/delete-immediately'),
   discover:         ()                 => api.get('/users/discover'),
+  mentionSearch:    (q: string)        => api.get('/users/mention-search', { params: { q } }),
 }
 
 // ── Friends ───────────────────────────────────────────────────────────────────

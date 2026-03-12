@@ -11,6 +11,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   post_like:       <Heart size={16} className="text-red-500" />,
   post_comment:    <MessageCircle size={16} className="text-agora-500" />,
   post_repost:     <Repeat2 size={16} className="text-green-500" />,
+  post_mention:    <MessageCircle size={16} className="text-blue-500" />,
 }
 
 const notifText: Record<string, string> = {
@@ -18,7 +19,8 @@ const notifText: Record<string, string> = {
   friend_accepted: 'accepted your friend request',
   post_like:       'liked your post',
   post_comment:    'commented on your post',
-  post_repost:     'reposted your post',
+  post_repost:     'shared your post',
+  post_mention:    'mentioned you in a post',
 }
 
 function notifTarget(n: any): string | null {
@@ -29,6 +31,7 @@ function notifTarget(n: any): string | null {
     case 'post_like':
     case 'post_repost':
     case 'post_comment':
+    case 'post_mention':
       return n.post_id ? `/post/${n.post_id}` : null
     default:
       return null

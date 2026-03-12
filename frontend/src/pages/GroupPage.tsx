@@ -6,7 +6,7 @@ import { useAuthStore } from '../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 import CommentsSection from '../components/feed/CommentsSection'
-import { Heart, MessageCircle, Trash2, Users, Lock, Globe, Settings, UserMinus, Shield, Crown, Image, X, ChevronDown } from 'lucide-react'
+import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList } from 'lucide-react'
 
 export default function GroupPage() {
   const { slug } = useParams<{ slug: string }>()!
@@ -14,6 +14,9 @@ export default function GroupPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [tab, setTab] = useState<'feed'|'members'|'settings'>('feed')
+  const [requestMsg, setRequestMsg] = useState('')
+  const [showRequestModal, setShowRequestModal] = useState(false)
+  const [requestSent, setRequestSent] = useState(false)
 
   const { data: groupData, isLoading, error } = useQuery({
     queryKey: ['group', slug],
@@ -28,6 +31,10 @@ export default function GroupPage() {
   const join = useMutation({
     mutationFn: () => groupsApi.join(slug!),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['group', slug] }),
+  })
+  const requestJoin = useMutation({
+    mutationFn: () => groupsApi.requestJoin(slug!, requestMsg),
+    onSuccess: () => { setShowRequestModal(false); setRequestSent(true) },
   })
   const leave = useMutation({
     mutationFn: () => groupsApi.leave(slug!),
@@ -48,6 +55,30 @@ export default function GroupPage() {
 
   return (
     <div className="space-y-4">
+      {/* Request to join modal */}
+      {showRequestModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowRequestModal(false)}>
+          <div className="bg-white dark:bg-agora-800 rounded-xl shadow-xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold">Request to Join</h2>
+              <button onClick={() => setShowRequestModal(false)} className="btn-ghost p-1"><X size={18} /></button>
+            </div>
+            <p className="text-sm text-agora-500">This is a private group. Your request will be reviewed by the group admins.</p>
+            <div>
+              <label className="label">Message (optional)</label>
+              <textarea className="input resize-none" rows={3} placeholder="Introduce yourself or explain why you'd like to join…"
+                value={requestMsg} onChange={e => setRequestMsg(e.target.value)} />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setShowRequestModal(false)} className="btn-secondary">Cancel</button>
+              <button onClick={() => requestJoin.mutate()} disabled={requestJoin.isPending} className="btn-primary">
+                {requestJoin.isPending ? 'Sending…' : 'Send Request'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="card overflow-hidden">
         {group.cover_url
@@ -80,7 +111,9 @@ export default function GroupPage() {
               ? <button onClick={() => { if (confirm(`Leave "${group.name}"?`)) leave.mutate() }} className="btn-secondary text-sm">Leave</button>
               : group.privacy === 'public'
                 ? <button onClick={() => join.mutate()} disabled={join.isPending} className="btn-primary text-sm">Join Group</button>
-                : null
+                : requestSent
+                  ? <span className="text-sm text-agora-400 flex items-center gap-1"><CheckCircle size={14} className="text-green-500" /> Request sent</span>
+                  : <button onClick={() => setShowRequestModal(true)} className="btn-primary text-sm flex items-center gap-1.5"><UserPlus size={14} /> Request to Join</button>
             }
             {canManage && <button onClick={() => setTab('settings')} className="btn-ghost p-2"><Settings size={16} /></button>}
           </div>
@@ -312,14 +345,147 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
   const [description, setDescription] = useState(group.description)
   const [privacy, setPrivacy] = useState(group.privacy)
   const [msg, setMsg] = useState('')
+  const [addUsername, setAddUsername] = useState('')
+  const [addMsg, setAddMsg] = useState('')
+  const [copiedToken, setCopiedToken] = useState('')
 
   const save = useMutation({
     mutationFn: () => groupsApi.update(slug, { name, description, ...(isOwner ? { privacy } : {}) }),
     onSuccess: () => { setMsg('Saved!'); qc.invalidateQueries({ queryKey: ['group', slug] }); setTimeout(() => setMsg(''), 2000) },
   })
 
+  // Invite links
+  const { data: inviteData, refetch: refetchInvites } = useQuery({
+    queryKey: ['group-invites', slug],
+    queryFn: () => groupsApi.listInvites(slug).then(r => r.data),
+  })
+  const invites: any[] = inviteData?.invites ?? []
+
+  const createInvite = useMutation({
+    mutationFn: () => groupsApi.createInvite(slug),
+    onSuccess: () => refetchInvites(),
+  })
+  const revokeInvite = useMutation({
+    mutationFn: (token: string) => groupsApi.revokeInvite(slug, token),
+    onSuccess: () => refetchInvites(),
+  })
+
+  const copyInvite = (token: string) => {
+    const url = `${window.location.origin}/invite/${token}`
+    navigator.clipboard.writeText(url)
+    setCopiedToken(token)
+    setTimeout(() => setCopiedToken(''), 2000)
+  }
+
+  // Join requests
+  const { data: reqData, refetch: refetchRequests } = useQuery({
+    queryKey: ['group-requests', slug],
+    queryFn: () => groupsApi.listRequests(slug).then(r => r.data),
+  })
+  const requests: any[] = reqData?.requests ?? []
+
+  const approveReq = useMutation({
+    mutationFn: (id: string) => groupsApi.approveRequest(slug, id),
+    onSuccess: () => { refetchRequests(); qc.invalidateQueries({ queryKey: ['group', slug] }) },
+  })
+  const rejectReq = useMutation({
+    mutationFn: (id: string) => groupsApi.rejectRequest(slug, id),
+    onSuccess: () => refetchRequests(),
+  })
+
+  // Direct add
+  const addMember = useMutation({
+    mutationFn: () => groupsApi.addMember(slug, addUsername),
+    onSuccess: () => {
+      setAddMsg('Member added!')
+      setAddUsername('')
+      qc.invalidateQueries({ queryKey: ['group-members', slug] })
+      qc.invalidateQueries({ queryKey: ['group', slug] })
+      setTimeout(() => setAddMsg(''), 2000)
+    },
+    onError: (e: any) => setAddMsg(e.response?.data?.error || 'Could not add member'),
+  })
+
   return (
     <div className="space-y-4">
+
+      {/* Join Requests */}
+      {requests.length > 0 && (
+        <div className="card p-4 space-y-3">
+          <h3 className="font-semibold flex items-center gap-2">
+            <ClipboardList size={16} />
+            Join Requests
+            <span className="ml-auto bg-agora-600 text-white text-xs font-bold px-2 py-0.5 rounded-full">{requests.length}</span>
+          </h3>
+          <div className="divide-y divide-agora-100 dark:divide-agora-700">
+            {requests.map((req: any) => (
+              <div key={req.id} className="flex items-center gap-3 py-2.5">
+                <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  {req.avatar_url
+                    ? <img src={req.avatar_url} alt="" className="w-full h-full object-cover" />
+                    : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-xs">{(req.display_name||req.username)[0].toUpperCase()}</span>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium">{req.display_name || req.username}</p>
+                  {req.message && <p className="text-xs text-agora-400 truncate">"{req.message}"</p>}
+                </div>
+                <div className="flex gap-1.5">
+                  <button onClick={() => approveReq.mutate(req.id)} className="btn-ghost p-1.5 text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20" title="Approve">
+                    <CheckCircle size={16} />
+                  </button>
+                  <button onClick={() => rejectReq.mutate(req.id)} className="btn-ghost p-1.5 text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="Reject">
+                    <XCircle size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Invite Links */}
+      <div className="card p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold flex items-center gap-2"><Link2 size={16} /> Invite Links</h3>
+          <button onClick={() => createInvite.mutate()} disabled={createInvite.isPending} className="btn-primary text-xs py-1 px-2.5">
+            + New Link
+          </button>
+        </div>
+        {invites.length === 0 && (
+          <p className="text-sm text-agora-400">No invite links yet. Create one to share with people.</p>
+        )}
+        {invites.map((inv: any) => (
+          <div key={inv.id} className="flex items-center gap-2 bg-agora-50 dark:bg-agora-700/50 rounded-lg px-3 py-2">
+            <code className="text-xs text-agora-600 dark:text-agora-300 flex-1 truncate">
+              {window.location.origin}/invite/{inv.token}
+            </code>
+            <span className="text-xs text-agora-400 flex-shrink-0">{inv.uses}{inv.max_uses > 0 ? `/${inv.max_uses}` : ''} uses</span>
+            <button onClick={() => copyInvite(inv.token)} className="btn-ghost p-1.5 flex-shrink-0" title="Copy link">
+              {copiedToken === inv.token ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+            </button>
+            <button onClick={() => { if (confirm('Revoke this invite link?')) revokeInvite.mutate(inv.token) }}
+              className="btn-ghost p-1.5 flex-shrink-0 text-red-400" title="Revoke">
+              <X size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Add member directly */}
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold flex items-center gap-2"><UserPlus size={16} /> Add Member Directly</h3>
+        {addMsg && <p className={`text-sm ${addMsg.includes('added') ? 'text-green-600' : 'text-red-500'}`}>{addMsg}</p>}
+        <div className="flex gap-2">
+          <input className="input flex-1 text-sm" placeholder="Username…"
+            value={addUsername} onChange={e => setAddUsername(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addUsername.trim() && addMember.mutate()} />
+          <button onClick={() => addMember.mutate()} disabled={!addUsername.trim() || addMember.isPending} className="btn-primary text-sm">
+            {addMember.isPending ? '…' : 'Add'}
+          </button>
+        </div>
+      </div>
+
+      {/* Group settings */}
       <div className="card p-4 space-y-4">
         <h3 className="font-semibold">Group Settings</h3>
         {msg && <p className="text-sm text-green-600">{msg}</p>}

@@ -283,4 +283,32 @@ var schema = []string{
 	// community_group_posts links existing posts to a group
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS community_group_id UUID REFERENCES community_groups(id) ON DELETE SET NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_posts_community_group ON posts(community_group_id, created_at DESC)`,
+
+	`CREATE TABLE IF NOT EXISTS community_group_invites (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		group_id   UUID        NOT NULL REFERENCES community_groups(id) ON DELETE CASCADE,
+		token      TEXT        UNIQUE NOT NULL,
+		created_by UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		max_uses   INT         NOT NULL DEFAULT 0,
+		uses       INT         NOT NULL DEFAULT 0,
+		expires_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgi_token ON community_group_invites(token)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgi_group ON community_group_invites(group_id)`,
+
+	`CREATE TABLE IF NOT EXISTS community_group_join_requests (
+		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		group_id    UUID        NOT NULL REFERENCES community_groups(id) ON DELETE CASCADE,
+		user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		message     TEXT        NOT NULL DEFAULT '',
+		status      VARCHAR(20) NOT NULL DEFAULT 'pending'
+		                CHECK (status IN ('pending','approved','rejected')),
+		reviewed_by UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		reviewed_at TIMESTAMPTZ,
+		UNIQUE(group_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgjr_group ON community_group_join_requests(group_id, status)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgjr_user  ON community_group_join_requests(user_id)`,
 }

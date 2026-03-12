@@ -3,24 +3,32 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2 } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle } from 'lucide-react'
 
 const typeIcon: Record<string, React.ReactNode> = {
-  friend_request:  <UserPlus size={16} className="text-blue-500" />,
-  friend_accepted: <UserCheck size={16} className="text-green-500" />,
-  post_like:       <Heart size={16} className="text-red-500" />,
-  post_comment:    <MessageCircle size={16} className="text-agora-500" />,
-  post_repost:     <Repeat2 size={16} className="text-green-500" />,
-  post_mention:    <MessageCircle size={16} className="text-blue-500" />,
+  friend_request:        <UserPlus size={16} className="text-blue-500" />,
+  friend_accepted:       <UserCheck size={16} className="text-green-500" />,
+  post_like:             <Heart size={16} className="text-red-500" />,
+  post_comment:          <MessageCircle size={16} className="text-agora-500" />,
+  post_repost:           <Repeat2 size={16} className="text-green-500" />,
+  post_mention:          <MessageCircle size={16} className="text-blue-500" />,
+  group_join_request:    <Users size={16} className="text-agora-500" />,
+  group_join_approved:   <CheckCircle size={16} className="text-green-500" />,
+  group_join_rejected:   <XCircle size={16} className="text-red-400" />,
+  group_invite_accepted: <UserCheck size={16} className="text-green-500" />,
 }
 
 const notifText: Record<string, string> = {
-  friend_request:  'sent you a friend request',
-  friend_accepted: 'accepted your friend request',
-  post_like:       'liked your post',
-  post_comment:    'commented on your post',
-  post_repost:     'shared your post',
-  post_mention:    'mentioned you in a post',
+  friend_request:        'sent you a friend request',
+  friend_accepted:       'accepted your friend request',
+  post_like:             'liked your post',
+  post_comment:          'commented on your post',
+  post_repost:           'shared your post',
+  post_mention:          'mentioned you in a post',
+  group_join_request:    'wants to join your group',
+  group_join_approved:   'approved your request to join a group',
+  group_join_rejected:   'declined your request to join a group',
+  group_invite_accepted: 'added you to a group',
 }
 
 function notifTarget(n: any): string | null {
@@ -33,6 +41,11 @@ function notifTarget(n: any): string | null {
     case 'post_comment':
     case 'post_mention':
       return n.post_id ? `/post/${n.post_id}` : null
+    case 'group_join_request':
+    case 'group_join_approved':
+    case 'group_join_rejected':
+    case 'group_invite_accepted':
+      return n.data ? `/groups/${n.data}` : '/groups'
     default:
       return null
   }

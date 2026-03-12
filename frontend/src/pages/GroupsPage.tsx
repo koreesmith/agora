@@ -75,6 +75,7 @@ export default function GroupsPage() {
 
 function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => void }) {
   const qc = useQueryClient()
+  const [requestSent, setRequestSent] = useState(false)
 
   const handleJoin = async () => {
     await groupsApi.join(g.slug)
@@ -84,6 +85,10 @@ function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => v
     if (!confirm(`Leave "${g.name}"?`)) return
     await groupsApi.leave(g.slug)
     onJoinLeave()
+  }
+  const handleRequest = async () => {
+    await groupsApi.requestJoin(g.slug)
+    setRequestSent(true)
   }
 
   return (
@@ -114,7 +119,9 @@ function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => v
                 ? <button onClick={handleLeave} className="btn-secondary text-xs py-1 px-2.5">Leave</button>
                 : g.privacy === 'public'
                   ? <button onClick={handleJoin} className="btn-primary text-xs py-1 px-2.5">Join</button>
-                  : <span className="text-xs text-agora-400 flex items-center gap-1"><Lock size={11}/> Private</span>
+                  : requestSent
+                    ? <span className="text-xs text-agora-400">Requested ✓</span>
+                    : <button onClick={handleRequest} className="btn-secondary text-xs py-1 px-2.5">Request</button>
               }
             </div>
           </div>

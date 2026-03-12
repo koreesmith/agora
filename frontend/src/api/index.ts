@@ -106,18 +106,29 @@ export const notificationsApi = {
 
 // ── Groups ────────────────────────────────────────────────────────────────────
 export const groupsApi = {
-  list:         (params?: { q?: string, filter?: string, page?: number }) => api.get('/groups', { params }),
-  get:          (slug: string)                              => api.get(`/groups/${slug}`),
-  create:       (data: { name: string, description: string, privacy: string }) => api.post('/groups', data),
-  update:       (slug: string, data: any)                  => api.patch(`/groups/${slug}`, data),
-  delete:       (slug: string)                             => api.delete(`/groups/${slug}`),
-  listMembers:  (slug: string)                             => api.get(`/groups/${slug}/members`),
-  join:         (slug: string)                             => api.post(`/groups/${slug}/join`),
-  leave:        (slug: string)                             => api.delete(`/groups/${slug}/leave`),
-  setRole:      (slug: string, userID: string, role: string) => api.patch(`/groups/${slug}/members/${userID}/role`, { role }),
-  removeMember: (slug: string, userID: string)             => api.delete(`/groups/${slug}/members/${userID}`),
-  getFeed:      (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
-  createPost:   (slug: string, data: { content: string, image_url?: string }) => api.post(`/groups/${slug}/posts`, data),
+  list:           (params?: { q?: string, filter?: string, page?: number }) => api.get('/groups', { params }),
+  get:            (slug: string)                              => api.get(`/groups/${slug}`),
+  create:         (data: { name: string, description: string, privacy: string }) => api.post('/groups', data),
+  update:         (slug: string, data: any)                  => api.patch(`/groups/${slug}`, data),
+  delete:         (slug: string)                             => api.delete(`/groups/${slug}`),
+  listMembers:    (slug: string)                             => api.get(`/groups/${slug}/members`),
+  join:           (slug: string)                             => api.post(`/groups/${slug}/join`),
+  leave:          (slug: string)                             => api.delete(`/groups/${slug}/leave`),
+  setRole:        (slug: string, userID: string, role: string) => api.patch(`/groups/${slug}/members/${userID}/role`, { role }),
+  removeMember:   (slug: string, userID: string)             => api.delete(`/groups/${slug}/members/${userID}`),
+  addMember:      (slug: string, username: string)           => api.post(`/groups/${slug}/members/add`, { username }),
+  getFeed:        (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
+  createPost:     (slug: string, data: { content: string, image_url?: string }) => api.post(`/groups/${slug}/posts`, data),
+  // Invite links
+  listInvites:    (slug: string)                             => api.get(`/groups/${slug}/invites`),
+  createInvite:   (slug: string, maxUses = 0)                => api.post(`/groups/${slug}/invites`, { max_uses: maxUses }),
+  revokeInvite:   (slug: string, token: string)              => api.delete(`/groups/${slug}/invites/${token}`),
+  joinByInvite:   (token: string)                            => api.get(`/groups/join-by-invite/${token}`),
+  // Join requests
+  requestJoin:    (slug: string, message = '')               => api.post(`/groups/${slug}/request`, { message }),
+  listRequests:   (slug: string)                             => api.get(`/groups/${slug}/requests`),
+  approveRequest: (slug: string, requestID: string)          => api.post(`/groups/${slug}/requests/${requestID}/approve`),
+  rejectRequest:  (slug: string, requestID: string)          => api.post(`/groups/${slug}/requests/${requestID}/reject`),
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

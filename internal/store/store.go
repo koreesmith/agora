@@ -249,4 +249,38 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_sessions_user  ON sessions(user_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash)`,
+
+	// ── Community Groups ───────────────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS community_groups (
+		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		name        VARCHAR(100) NOT NULL,
+		slug        VARCHAR(110) UNIQUE NOT NULL,
+		description TEXT         NOT NULL DEFAULT '',
+		cover_url   TEXT         NOT NULL DEFAULT '',
+		avatar_url  TEXT         NOT NULL DEFAULT '',
+		privacy     VARCHAR(20)  NOT NULL DEFAULT 'public'
+		                CHECK (privacy IN ('public','private')),
+		created_by  UUID         NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+		member_count INT         NOT NULL DEFAULT 1,
+		post_count  INT          NOT NULL DEFAULT 0,
+		created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+		updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cg_slug    ON community_groups(slug)`,
+	`CREATE INDEX IF NOT EXISTS idx_cg_created ON community_groups(created_at DESC)`,
+
+	`CREATE TABLE IF NOT EXISTS community_group_members (
+		group_id   UUID        NOT NULL REFERENCES community_groups(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id)            ON DELETE CASCADE,
+		role       VARCHAR(20) NOT NULL DEFAULT 'member'
+		               CHECK (role IN ('owner','mod','member')),
+		joined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (group_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgm_user  ON community_group_members(user_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_cgm_group ON community_group_members(group_id, role)`,
+
+	// community_group_posts links existing posts to a group
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS community_group_id UUID REFERENCES community_groups(id) ON DELETE SET NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_posts_community_group ON posts(community_group_id, created_at DESC)`,
 }

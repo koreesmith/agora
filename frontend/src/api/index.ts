@@ -104,6 +104,22 @@ export const notificationsApi = {
   updateEmailPrefs:(enabled: boolean) => api.put('/notifications/email-preferences', { email_notifications_enabled: enabled }),
 }
 
+// ── Groups ────────────────────────────────────────────────────────────────────
+export const groupsApi = {
+  list:         (params?: { q?: string, filter?: string, page?: number }) => api.get('/groups', { params }),
+  get:          (slug: string)                              => api.get(`/groups/${slug}`),
+  create:       (data: { name: string, description: string, privacy: string }) => api.post('/groups', data),
+  update:       (slug: string, data: any)                  => api.patch(`/groups/${slug}`, data),
+  delete:       (slug: string)                             => api.delete(`/groups/${slug}`),
+  listMembers:  (slug: string)                             => api.get(`/groups/${slug}/members`),
+  join:         (slug: string)                             => api.post(`/groups/${slug}/join`),
+  leave:        (slug: string)                             => api.delete(`/groups/${slug}/leave`),
+  setRole:      (slug: string, userID: string, role: string) => api.patch(`/groups/${slug}/members/${userID}/role`, { role }),
+  removeMember: (slug: string, userID: string)             => api.delete(`/groups/${slug}/members/${userID}`),
+  getFeed:      (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
+  createPost:   (slug: string, data: { content: string, image_url?: string }) => api.post(`/groups/${slug}/posts`, data),
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 export const searchApi = {
   searchUsers: (q: string, scope = 'local') => api.get('/search/users', { params: { q, scope } }),

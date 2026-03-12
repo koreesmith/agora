@@ -21,6 +21,8 @@ import AdminPage          from './pages/AdminPage'
 import PostPage           from './pages/PostPage'
 import DiscoverPage       from './pages/DiscoverPage'
 import ListFeedPage        from './pages/ListFeedPage'
+import GroupsPage          from './pages/GroupsPage'
+import GroupPage           from './pages/GroupPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -78,6 +80,8 @@ function AppRoutes() {
         <Route path="/post/:id"             element={<PostPage />} />
         <Route path="/discover"             element={<DiscoverPage />} />
         <Route path="/lists/:id"            element={<ListFeedPage />} />
+        <Route path="/groups"               element={<GroupsPage />} />
+        <Route path="/groups/:slug"         element={<GroupPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -19,6 +19,7 @@ import (
 	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/friends"
+	"github.com/agora-social/agora/internal/groups"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
@@ -50,6 +51,7 @@ func main() {
 	authSvc   := auth.NewService(db, cfg, notifSvc)
 	friendSvc := friends.NewService(db, notifSvc)
 	feedSvc   := feed.NewService(db, notifSvc, mediaSvc)
+	groupSvc  := groups.NewService(db, notifSvc)
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc)
@@ -87,6 +89,7 @@ func main() {
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)
+			groups.RegisterRoutes(r, groupSvc)
 			notifications.RegisterRoutes(r, notifSvc)
 			search.RegisterRoutes(r, searchSvc)
 			moderation.RegisterRoutes(r, modSvc)

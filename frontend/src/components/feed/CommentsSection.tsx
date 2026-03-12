@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send } from 'lucide-react'
+import { Trash2, Send, Heart } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 
@@ -44,6 +44,26 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
     onSuccess: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
   })
 
+  const likeComment = useMutation({
+    mutationFn: ({ id, liked }: { id: string, liked: boolean }) =>
+      liked ? feedApi.unlikePost(id) : feedApi.likePost(id),
+    onMutate: async ({ id, liked }) => {
+      await qc.cancelQueries({ queryKey: ['comments', postId] })
+      const prev = qc.getQueryData(['comments', postId])
+      qc.setQueryData(['comments', postId], (old: any) => ({
+        ...old,
+        comments: old.comments.map((c: any) =>
+          c.id === id ? { ...c, liked: !liked, like_count: c.like_count + (liked ? -1 : 1) } : c
+        ),
+      }))
+      return { prev }
+    },
+    onError: (_err, _vars, ctx) => {
+      qc.setQueryData(['comments', postId], ctx?.prev)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
+  })
+
   const comments = data?.comments || []
 
   return (
@@ -69,6 +89,15 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             </div>
             <div className="flex items-center gap-3 mt-1 px-1">
               <span className="text-xs text-agora-400">{formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}</span>
+
+              {/* Like button */}
+              <button
+                onClick={() => likeComment.mutate({ id: c.id, liked: c.liked })}
+                className={`flex items-center gap-1 text-xs transition-colors ${c.liked ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}>
+                <Heart size={12} className={c.liked ? 'fill-current' : ''} />
+                {c.like_count > 0 && <span>{c.like_count}</span>}
+              </button>
+
               {(c.author_id === user?.id || user?.id === postAuthorId || user?.role === 'admin') && (
                 <button onClick={() => del.mutate(c.id)} className="text-xs text-agora-300 hover:text-red-500 transition-colors">
                   <Trash2 size={12} />

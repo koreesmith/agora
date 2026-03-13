@@ -165,7 +165,10 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
     const file = e.target.files?.[0]; if (!file) return
     setUploading(true)
     try { const res = await feedApi.uploadMedia(file, 'posts'); setImageUrl(res.data.url) }
-    catch { alert('Upload failed') }
+    catch (err: any) {
+      const msg = err?.response?.data?.error || 'Upload failed. Please try a JPEG or PNG file.'
+      alert(msg)
+    }
     finally { setUploading(false) }
   }
 

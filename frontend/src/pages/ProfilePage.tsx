@@ -1,14 +1,22 @@
-import { useParams } from 'react-router-dom'
+import { useState } from 'react'
+import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usersApi, feedApi, friendsApi } from '../api'
+import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
-import { UserPlus, UserCheck, UserX, Clock, Lock } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users } from 'lucide-react'
+
+const visIcon: Record<string, React.ReactNode> = {
+  public:  <Globe size={10} />,
+  friends: <Users size={10} />,
+  private: <Lock  size={10} />,
+}
 
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
   const { user: me } = useAuthStore()
   const qc = useQueryClient()
+  const [tab, setTab] = useState<'posts'|'photos'>('posts')
 
   const { data: profile, isLoading } = useQuery({
     queryKey: ['profile', username],
@@ -18,7 +26,13 @@ export default function ProfilePage() {
   const { data: postsData } = useQuery({
     queryKey: ['user-posts', username],
     queryFn: () => feedApi.getUserPosts(username!).then(r => r.data),
-    enabled: !!profile && !profile.profile_private,
+    enabled: !!profile && !profile.profile_private && tab === 'posts',
+  })
+
+  const { data: albumsData } = useQuery({
+    queryKey: ['user-albums', username],
+    queryFn: () => albumsApi.listForUser(username!).then(r => r.data),
+    enabled: !!profile && !profile.profile_private && tab === 'photos',
   })
 
   const inv = () => {
@@ -38,6 +52,10 @@ export default function ProfilePage() {
 
   const isSelf = me?.id === profile.id || me?.username === username
   const status = profile.friend_status
+  const canSeeContent = !profile.profile_private || isSelf || status === 'accepted'
+
+  const albums: any[] = albumsData?.albums ?? []
+  const posts: any[]  = postsData?.posts ?? []
 
   return (
     <div className="space-y-4">
@@ -89,18 +107,72 @@ export default function ProfilePage() {
             {profile.website && <a href={profile.website} className="text-agora-600 hover:underline" target="_blank" rel="noreferrer">{profile.website}</a>}
           </div>
         </div>
+
+        {/* Tabs */}
+        {canSeeContent && (
+          <div className="flex border-t border-agora-100 dark:border-agora-700">
+            <button onClick={() => setTab('posts')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'posts' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
+              <FileText size={14} /> Posts
+            </button>
+            <button onClick={() => setTab('photos')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'photos' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
+              <Images size={14} /> Photos
+            </button>
+          </div>
+        )}
       </div>
 
-      {profile.profile_private && !isSelf && status !== 'accepted' ? (
+      {/* Private profile gate */}
+      {!canSeeContent ? (
         <div className="card p-8 text-center text-agora-400">
           <Lock size={32} className="mx-auto mb-2" />
           <p className="font-medium">This profile is private</p>
           <p className="text-sm mt-1">Add {profile.display_name} as a friend to see their posts.</p>
         </div>
-      ) : (
+      ) : tab === 'posts' ? (
         <div className="space-y-4">
-          {(postsData?.posts || []).map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts-${username}`} />)}
-          {(postsData?.posts || []).length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
+          {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts-${username}`} />)}
+          {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
+        </div>
+      ) : (
+        /* Photos tab */
+        <div className="space-y-3">
+          {isSelf && (
+            <div className="flex justify-end">
+              <Link to="/albums" className="btn-primary text-sm flex items-center gap-1.5">
+                <Images size={14} /> Manage albums
+              </Link>
+            </div>
+          )}
+          {albums.length === 0 ? (
+            <div className="card p-8 text-center text-agora-400 space-y-2">
+              <Images size={28} className="mx-auto opacity-40" />
+              <p>{isSelf ? 'You haven\'t created any albums yet.' : `${profile.display_name} hasn't shared any albums.`}</p>
+              {isSelf && <Link to="/albums" className="btn-primary text-sm inline-block mt-1">Create an album</Link>}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {albums.map((a: any) => (
+                <Link key={a.id} to={`/albums/${a.id}`} className="card overflow-hidden group hover:shadow-md transition-shadow">
+                  <div className="aspect-square bg-agora-100 dark:bg-agora-800 overflow-hidden">
+                    {a.cover_url
+                      ? <img src={a.cover_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      : <div className="w-full h-full flex items-center justify-center">
+                          <Images size={28} className="text-agora-300 dark:text-agora-600" />
+                        </div>}
+                  </div>
+                  <div className="p-2.5">
+                    <p className="font-semibold text-sm truncate">{a.title}</p>
+                    <div className="flex items-center gap-1 text-xs text-agora-400 mt-0.5">
+                      {visIcon[a.visibility]}
+                      <span>{a.photo_count} photo{a.photo_count !== 1 ? 's' : ''}</span>
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

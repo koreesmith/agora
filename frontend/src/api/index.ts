@@ -174,6 +174,26 @@ export const adminApi = {
 }
 
 
+// ── Albums ────────────────────────────────────────────────────────────────────
+export const albumsApi = {
+  list:         (page = 0)                     => api.get('/albums', { params: { page } }),
+  listForUser:  (username: string)             => api.get(`/users/${username}/albums`),
+  get:          (id: string)                   => api.get(`/albums/${id}`),
+  create:       (data: { title: string, description?: string, visibility?: string }) => api.post('/albums', data),
+  update:       (id: string, data: any)        => api.patch(`/albums/${id}`, data),
+  delete:       (id: string)                   => api.delete(`/albums/${id}`),
+  addPhoto:     (id: string, data: { url: string, caption?: string }) => api.post(`/albums/${id}/photos`, data),
+  uploadPhoto:  (id: string, file: File, caption = '') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('caption', caption)
+    return api.post(`/albums/${id}/photos`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
+  updatePhoto:  (albumId: string, photoId: string, data: { caption?: string, position?: number }) =>
+    api.patch(`/albums/${albumId}/photos/${photoId}`, data),
+  deletePhoto:  (albumId: string, photoId: string) => api.delete(`/albums/${albumId}/photos/${photoId}`),
+}
+
 // ── Instance ──────────────────────────────────────────────────────────────────
 export const instanceApi = {
   getInfo:  () => api.get('/instance'),

@@ -33,7 +33,10 @@ export default function CreatePost() {
     const file = e.target.files?.[0]; if (!file) return
     setUploading(true)
     try { const res = await feedApi.uploadMedia(file, 'posts'); setImageUrl(res.data.url) }
-    catch { alert('Image upload failed') }
+    catch (err: any) {
+      const msg = err?.response?.data?.error || 'Image upload failed. Please try a JPEG or PNG file.'
+      alert(msg)
+    }
     finally { setUploading(false) }
   }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/cors"
 
 	"github.com/agora-social/agora/internal/admin"
+	"github.com/agora-social/agora/internal/albums"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/feed"
@@ -52,6 +53,8 @@ func main() {
 	friendSvc := friends.NewService(db, notifSvc)
 	feedSvc   := feed.NewService(db, notifSvc, mediaSvc)
 	groupSvc  := groups.NewService(db, notifSvc)
+	albumsSvc := albums.NewService(db, mediaSvc)
+	feedSvc.SetAlbums(albumsSvc)
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc)
@@ -94,6 +97,7 @@ func main() {
 			search.RegisterRoutes(r, searchSvc)
 			moderation.RegisterRoutes(r, modSvc)
 			media.RegisterRoutes(r, mediaSvc)
+			albums.RegisterRoutes(r, albumsSvc)
 		})
 
 		// Admin only

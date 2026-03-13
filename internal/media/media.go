@@ -21,20 +21,38 @@ import (
 )
 
 const (
-	maxPostWidth  = 1200
-	maxPostHeight = 1200
-	maxAvatarSize = 400
-	maxCoverWidth = 1200
-	maxCoverHeight = 400
-	jpegQuality   = 85
+	maxPostWidth   = 2400
+	maxPostHeight  = 2400
+	maxAlbumWidth  = 2400
+	maxAlbumHeight = 2400
+	maxAvatarSize  = 400
+	maxCoverWidth  = 1400
+	maxCoverHeight = 500
+	jpegQuality    = 88
+	// 50MB — covers 48MP RAW JPEGs from modern iPhones/DSLRs
+	maxUploadBytes = 50 << 20
 )
+
+// heicMagic identifies HEIC/HEIF files by their ftyp box.
+// HEIC files start with a 4-byte length, then "ftyp", then a brand like "heic", "heix", "mif1", etc.
+func isHEIC(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+	if string(data[4:8]) != "ftyp" {
+		return false
+	}
+	brand := strings.ToLower(string(data[8:12]))
+	return brand == "heic" || brand == "heix" || brand == "hevc" ||
+		brand == "mif1" || brand == "msf1" || brand == "avif"
+}
 
 type Service struct {
 	uploadDir string
 }
 
 func NewService(uploadDir string) *Service {
-	for _, d := range []string{"avatar", "cover", "posts", "instance"} {
+	for _, d := range []string{"avatar", "cover", "posts", "instance", "albums"} {
 		os.MkdirAll(filepath.Join(uploadDir, d), 0755)
 	}
 	return &Service{uploadDir: uploadDir}
@@ -65,22 +83,38 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error) {
-	r.ParseMultipartForm(20 << 20)
+	// Allow up to 50MB in memory/temp
+	r.ParseMultipartForm(maxUploadBytes)
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
-		return "", fmt.Errorf("no file in request")
+		return "", fmt.Errorf("no file attached — make sure you selected an image")
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(file)
+	// Limit read to 50MB to avoid memory exhaustion
+	limited := io.LimitReader(file, maxUploadBytes+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return "", fmt.Errorf("could not read file")
+	}
+	if int64(len(data)) > maxUploadBytes {
+		return "", fmt.Errorf("file is too large (max 50 MB) — try reducing the image size before uploading")
+	}
+
+	// HEIC/HEIF check before content-type detection (Go doesn't recognise these)
+	if isHEIC(data) {
+		return "", fmt.Errorf(
+			"HEIC/HEIF photos (used by iPhone by default) aren't supported yet. " +
+				"On iPhone: go to Settings → Camera → Formats and choose \"Most Compatible\" to shoot in JPEG. " +
+				"On Mac: open the photo in Preview, then File → Export and choose JPEG.")
 	}
 
 	contentType := http.DetectContentType(data)
 	if !strings.HasPrefix(contentType, "image/") {
-		return "", fmt.Errorf("only image files are allowed")
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		return "", fmt.Errorf(
+			"unsupported file type (%s). Please upload a JPEG, PNG, or GIF image.", ext)
 	}
 
 	var maxW, maxH int
@@ -89,44 +123,60 @@ func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error
 		maxW, maxH = maxAvatarSize, maxAvatarSize
 	case "cover":
 		maxW, maxH = maxCoverWidth, maxCoverHeight
+	case "albums":
+		maxW, maxH = maxAlbumWidth, maxAlbumHeight
 	default:
 		maxW, maxH = maxPostWidth, maxPostHeight
 	}
 
-	// GIFs saved as-is; everything else decoded, resized, re-encoded as JPEG
-	var outData []byte
-	ext := ".jpg"
-
+	// GIFs saved as-is
 	if contentType == "image/gif" {
-		ext = ".gif"
-		outData = data
-	} else {
-		img, _, decErr := image.Decode(bytes.NewReader(data))
-		if decErr != nil {
-			// Fallback: save raw (e.g. webp on old Go)
-			ext = ".bin"
-			outData = data
-		} else {
-			resized := resizeToFit(img, maxW, maxH)
-			var buf bytes.Buffer
-			if encErr := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: jpegQuality}); encErr != nil {
-				return "", fmt.Errorf("could not encode image")
-			}
-			outData = buf.Bytes()
-		}
+		filename := uuid.New().String() + ".gif"
+		return s.saveBytes(data, category, filename)
 	}
 
-	filename := uuid.New().String() + ext
+	// Decode, resize, re-encode as JPEG
+	img, _, decErr := image.Decode(bytes.NewReader(data))
+	if decErr != nil {
+		// WebP or other format Go can't decode — save raw with detected extension
+		ext := extensionFor(contentType)
+		filename := uuid.New().String() + ext
+		return s.saveBytes(data, category, filename)
+	}
+
+	resized := resizeToFit(img, maxW, maxH)
+	var buf bytes.Buffer
+	if encErr := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: jpegQuality}); encErr != nil {
+		return "", fmt.Errorf("could not process image")
+	}
+
+	filename := uuid.New().String() + ".jpg"
+	return s.saveBytes(buf.Bytes(), category, filename)
+}
+
+func (s *Service) saveBytes(data []byte, category, filename string) (string, error) {
 	dir := filepath.Join(s.uploadDir, category)
 	os.MkdirAll(dir, 0755)
-
-	if err := os.WriteFile(filepath.Join(dir, filename), outData, 0644); err != nil {
-		return "", fmt.Errorf("could not save file")
+	if err := os.WriteFile(filepath.Join(dir, filename), data, 0644); err != nil {
+		return "", fmt.Errorf("could not save file — disk may be full")
 	}
 	return fmt.Sprintf("/uploads/%s/%s", category, filename), nil
 }
 
+func extensionFor(contentType string) string {
+	switch contentType {
+	case "image/webp":
+		return ".webp"
+	case "image/png":
+		return ".png"
+	default:
+		return ".bin"
+	}
+}
+
 // resizeToFit scales img down to fit within maxW×maxH preserving aspect ratio.
+// Uses a fast box-filter (average of source pixels) for large downscales,
+// and bilinear for small adjustments.
 func resizeToFit(img image.Image, maxW, maxH int) image.Image {
 	b := img.Bounds()
 	srcW, srcH := b.Dx(), b.Dy()
@@ -142,6 +192,13 @@ func resizeToFit(img image.Image, maxW, maxH int) image.Image {
 	dstW := max1(int(float64(srcW)*scale), 1)
 	dstH := max1(int(float64(srcH)*scale), 1)
 
+	// For large downscales (scale < 0.5), use box filter — much faster than bilinear
+	// on e.g. a 12MP → 800px resize.
+	if scale < 0.5 {
+		return boxResize(img, dstW, dstH)
+	}
+
+	// Bilinear for gentle resizes
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	for y := 0; y < dstH; y++ {
 		for x := 0; x < dstW; x++ {
@@ -167,6 +224,42 @@ func resizeToFit(img image.Image, maxW, maxH int) image.Image {
 	return dst
 }
 
+// boxResize averages blocks of source pixels — fast and good quality for large downscales.
+func boxResize(src image.Image, dstW, dstH int) image.Image {
+	b := src.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+	scaleX := float64(srcW) / float64(dstW)
+	scaleY := float64(srcH) / float64(dstH)
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	for dy := 0; dy < dstH; dy++ {
+		sy0 := int(float64(dy) * scaleY)
+		sy1 := int(float64(dy+1) * scaleY)
+		if sy1 > srcH { sy1 = srcH }
+		if sy1 <= sy0 { sy1 = sy0 + 1 }
+		for dx := 0; dx < dstW; dx++ {
+			sx0 := int(float64(dx) * scaleX)
+			sx1 := int(float64(dx+1) * scaleX)
+			if sx1 > srcW { sx1 = srcW }
+			if sx1 <= sx0 { sx1 = sx0 + 1 }
+			var rSum, gSum, bSum float64
+			count := float64((sx1 - sx0) * (sy1 - sy0))
+			for sy := sy0; sy < sy1; sy++ {
+				for sx := sx0; sx < sx1; sx++ {
+					c := rgbaF(src.At(b.Min.X+sx, b.Min.Y+sy))
+					rSum += c[0]; gSum += c[1]; bSum += c[2]
+				}
+			}
+			dst.SetRGBA(dx, dy, color.RGBA{
+				R: clamp(rSum / count),
+				G: clamp(gSum / count),
+				B: clamp(bSum / count),
+				A: 255,
+			})
+		}
+	}
+	return dst
+}
+
 func rgbaF(c color.Color) [4]float64 {
 	r, g, bb, a := c.RGBA()
 	if a == 0 {
@@ -179,10 +272,10 @@ func rgbaF(c color.Color) [4]float64 {
 		255,
 	}
 }
-func lerp(a, b, t float64) float64       { return a + (b-a)*t }
+func lerp(a, b, t float64) float64            { return a + (b-a)*t }
 func lerp2(a, b, c, d, fx, fy float64) float64 { return lerp(lerp(a, b, fx), lerp(c, d, fx), fy) }
 func clamp(v float64) uint8 {
-	if v < 0 { return 0 }
+	if v < 0   { return 0 }
 	if v > 255 { return 255 }
 	return uint8(v)
 }

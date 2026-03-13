@@ -24,6 +24,8 @@ import ListFeedPage        from './pages/ListFeedPage'
 import GroupsPage          from './pages/GroupsPage'
 import GroupPage           from './pages/GroupPage'
 import InvitePage          from './pages/InvitePage'
+import AlbumsPage          from './pages/AlbumsPage'
+import AlbumPage           from './pages/AlbumPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -84,6 +86,8 @@ function AppRoutes() {
         <Route path="/groups"               element={<GroupsPage />} />
         <Route path="/groups/:slug"         element={<GroupPage />} />
         <Route path="/invite/:token"        element={<InvitePage />} />
+        <Route path="/albums"               element={<AlbumsPage />} />
+        <Route path="/albums/:id"           element={<AlbumPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

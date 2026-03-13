@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/albums"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/notifications"
@@ -19,13 +20,19 @@ import (
 var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
 type Service struct {
-	db    *store.DB
-	notif *notifications.Service
-	media *media.Service
+	db     *store.DB
+	notif  *notifications.Service
+	media  *media.Service
+	albums *albums.Service
 }
 
 func NewService(db *store.DB, notif *notifications.Service, media *media.Service) *Service {
 	return &Service{db: db, notif: notif, media: media}
+}
+
+// SetAlbums wires in the albums service after construction (avoids init-order issues).
+func (s *Service) SetAlbums(a *albums.Service) {
+	s.albums = a
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
@@ -248,6 +255,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyMentions(req.Content, userID, id)
+
+	// Add image to user's Timeline Photos album
+	if req.ImageURL != "" && s.albums != nil {
+		go s.albums.AddToTimelineAlbum(userID, req.ImageURL)
+	}
+
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 

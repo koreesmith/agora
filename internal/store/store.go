@@ -336,4 +336,30 @@ var schema = []string{
 
 	// Track when remote user profiles were last synced
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
+
+	`CREATE TABLE IF NOT EXISTS albums (
+		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		owner_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		title       VARCHAR(100) NOT NULL,
+		description TEXT        NOT NULL DEFAULT '',
+		cover_url   TEXT        NOT NULL DEFAULT '',
+		visibility  VARCHAR(20) NOT NULL DEFAULT 'friends'
+		                CHECK (visibility IN ('public','friends','private')),
+		photo_count INT         NOT NULL DEFAULT 0,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_albums_owner   ON albums(owner_id, created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_albums_public  ON albums(visibility, created_at DESC)`,
+
+	`CREATE TABLE IF NOT EXISTS album_photos (
+		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		album_id    UUID        NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+		uploader_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		url         TEXT        NOT NULL,
+		caption     TEXT        NOT NULL DEFAULT '',
+		position    INT         NOT NULL DEFAULT 0,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_album_photos_album ON album_photos(album_id, position ASC, created_at ASC)`,
 }

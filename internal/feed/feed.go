@@ -255,10 +255,77 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	id       := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
 
+	// First fetch the post's core fields to check access before running the full query
+	var authorID, visibility string
+	var communityGroupID *string
+	var parentID *string
+	err := s.db.QueryRow(`
+		SELECT author_id, visibility, community_group_id, parent_id
+		FROM posts WHERE id = $1 AND deleted_at IS NULL
+	`, id).Scan(&authorID, &visibility, &communityGroupID, &parentID)
+	if err != nil {
+		writeError(w, 404, "post not found")
+		return
+	}
+
+	// If this is a comment (has parent_id), redirect caller to the parent post
+	if parentID != nil {
+		writeJSON(w, 200, map[string]any{"redirect_to_post": *parentID})
+		return
+	}
+
+	// Access control
+	if authorID != viewerID {
+		switch visibility {
+		case "private":
+			writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private"})
+			return
+		case "friends", "group":
+			// Check friendship
+			var isFriend bool
+			s.db.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM friendships
+					WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+					AND status = 'accepted'
+				)
+			`, viewerID, authorID).Scan(&isFriend)
+			if !isFriend {
+				writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "not_friends"})
+				return
+			}
+		}
+
+		// Group post — additionally check group membership
+		if communityGroupID != nil {
+			var isMember bool
+			s.db.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM community_group_members
+					WHERE group_id = $1 AND user_id = $2
+				)
+			`, *communityGroupID, viewerID).Scan(&isMember)
+			if !isMember {
+				// Get group name and slug for a helpful message
+				var groupName, groupSlug string
+				s.db.QueryRow(`SELECT name, slug FROM community_groups WHERE id = $1`, *communityGroupID).
+					Scan(&groupName, &groupSlug)
+				writeJSON(w, 403, map[string]any{
+					"error":      "access_denied",
+					"reason":     "not_group_member",
+					"group_name": groupName,
+					"group_slug": groupSlug,
+				})
+				return
+			}
+		}
+	}
+
+	// Access granted — run the full query
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id,
-			       cg.name, cg.slug,
+			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
 		       p.created_at, p.updated_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,

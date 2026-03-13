@@ -128,9 +128,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 @{post.repost_of_id ? post.repost_author_username : post.author_username}
               </span>
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
-              <span className="text-agora-400 text-xs">
+              <Link to={`/post/${post.repost_of_id ? post.repost_of_id : post.id}`}
+                className="text-agora-400 text-xs hover:underline">
                 {formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}
-              </span>
+              </Link>
               <span className="text-agora-300 dark:text-agora-600 flex items-center gap-0.5 text-xs">
                 {visIcons[post.visibility]}
               </span>

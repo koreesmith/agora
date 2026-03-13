@@ -242,7 +242,11 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
                 {post.author_role === 'owner' && <span className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 px-1.5 py-0.5 rounded-full">👑 Owner</span>}
                 {post.author_role === 'mod'   && <span className="text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded-full">🛡 Mod</span>}
               </div>
-              <p className="text-xs text-agora-400">{formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}</p>
+              <p className="text-xs text-agora-400">
+                <Link to={`/post/${post.id}`} className="hover:underline">
+                  {formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}
+                </Link>
+              </p>
             </div>
           </div>
 

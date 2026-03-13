@@ -48,6 +48,7 @@ docker run --rm \
     --email "$EMAIL" \
     --agree-tos \
     --no-eff-email \
+    --keep-until-expiring \
     -d "$DOMAIN"
 
 CERTBOT_EXIT=$?

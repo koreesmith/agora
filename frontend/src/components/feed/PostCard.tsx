@@ -224,7 +224,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                       <img
                         src={url}
                         alt=""
-                        className="w-full max-h-80 object-cover rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in"
+                        className="w-full max-h-[32rem] object-contain rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in bg-agora-50 dark:bg-agora-900"
                       />
                     </button>
                     {lightboxUrl === url && (
@@ -241,7 +241,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                         <img
                           src={url}
                           alt=""
-                          className="max-w-3xl max-h-[85vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
+                          className="max-w-[90vw] max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
                           onClick={e => e.stopPropagation()}
                         />
                       </div>

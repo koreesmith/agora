@@ -229,11 +229,11 @@ export default function AlbumPage() {
           )}
 
           {/* Image */}
-          <div className="max-w-4xl max-h-[90vh] flex flex-col items-center gap-3 px-16" onClick={e => e.stopPropagation()}>
+          <div className="max-w-[90vw] max-h-[90vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
             <img
               src={photos[lightbox].url}
               alt={photos[lightbox].caption}
-              className="max-w-full max-h-[75vh] object-contain rounded-lg shadow-2xl"
+              className="max-w-full max-h-[80vh] w-auto h-auto object-contain rounded-lg shadow-2xl"
             />
             {/* Caption */}
             <div className="w-full max-w-lg text-center">

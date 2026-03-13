@@ -70,7 +70,7 @@ export default function CreatePost() {
 
       {imageUrl && (
         <div className="relative ml-13">
-          <img src={imageUrl} alt="" className="rounded-lg w-full max-h-48 object-cover" />
+          <img src={imageUrl} alt="" className="rounded-lg w-full max-h-48 object-contain bg-agora-50 dark:bg-agora-900" />
           <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80">
             <X size={12} />
           </button>

@@ -207,7 +207,7 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
           </div>
           {imageUrl && (
             <div className="relative">
-              <img src={imageUrl} alt="" className="rounded-lg w-full max-h-40 object-cover" />
+              <img src={imageUrl} alt="" className="rounded-lg w-full max-h-40 object-contain bg-agora-50 dark:bg-agora-900" />
               <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center"><X size={12} /></button>
             </div>
           )}
@@ -254,7 +254,7 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
           </div>
 
           {post.content && <p className="text-sm whitespace-pre-wrap break-words">{renderContent(post.content)}</p>}
-          {post.image_url && <img src={post.image_url} alt="" className="rounded-lg w-full max-h-80 object-cover" />}
+          {post.image_url && <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain bg-agora-50 dark:bg-agora-900" />}
 
           <div className="flex items-center gap-4 pt-1 border-t border-agora-100 dark:border-agora-700">
             <button onClick={() => likePost.mutate({ id: post.id, liked: post.liked })}

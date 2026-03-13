@@ -227,7 +227,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           ) : (
             <>
               <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
-              {c.image_url && <img src={c.image_url} alt="" className="mt-1 rounded-lg max-h-48 object-cover" />}
+              {c.image_url && <img src={c.image_url} alt="" className="mt-1 rounded-lg max-h-64 object-contain bg-agora-50 dark:bg-agora-900" />}
             </>
           )}
         </div>

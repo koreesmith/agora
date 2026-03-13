@@ -344,7 +344,8 @@ type DiscoverUser struct {
 	AvatarURL      string   `json:"avatar_url"`
 	Bio            string   `json:"bio"`
 	MutualCount    int      `json:"mutual_count"`
-	MutualFriends  []string `json:"mutual_friends"` // display names of up to 3
+	MutualFriends  []string `json:"mutual_friends"`
+	FriendStatus   string   `json:"friend_status"` // "", "pending", "pending_incoming"
 }
 
 func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
@@ -354,7 +355,6 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Show all non-friends on the instance, sorted by mutual count desc
 	rows, err := s.db.Query(`
 		WITH my_friends AS (
 			SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END AS fid
@@ -362,7 +362,18 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 			WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
 		)
 		SELECT u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.bio,''),
-		       COUNT(DISTINCT f.id) AS mutual_count
+		       COUNT(DISTINCT f.id) AS mutual_count,
+		       COALESCE((
+		           SELECT CASE
+		               WHEN fs.requester_id = $1 THEN 'pending'
+		               ELSE 'pending_incoming'
+		           END
+		           FROM friendships fs
+		           WHERE ((fs.requester_id = $1 AND fs.addressee_id = u.id)
+		               OR (fs.addressee_id = $1 AND fs.requester_id = u.id))
+		             AND fs.status = 'pending'
+		           LIMIT 1
+		       ), '') AS friend_status
 		FROM users u
 		LEFT JOIN friendships f ON f.status = 'accepted'
 			AND (
@@ -387,7 +398,7 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 	var results []DiscoverUser
 	for rows.Next() {
 		var u DiscoverUser
-		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.MutualCount)
+		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.MutualCount, &u.FriendStatus)
 		results = append(results, u)
 	}
 

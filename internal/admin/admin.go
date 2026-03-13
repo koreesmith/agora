@@ -53,6 +53,13 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/admin/federation/instances",               s.ListInstances)
 	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
 	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
+
+	// Instance rules
+	r.Get("/admin/rules",             s.ListRules)
+	r.Post("/admin/rules",            s.CreateRule)
+	r.Patch("/admin/rules/{id}",      s.UpdateRule)
+	r.Delete("/admin/rules/{id}",     s.DeleteRule)
+	r.Patch("/admin/rules/{id}/move", s.MoveRule)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -424,4 +431,98 @@ func randomHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ── Instance Rules ────────────────────────────────────────────────────────────
+
+type Rule struct {
+	ID        string `json:"id"`
+	Position  int    `json:"position"`
+	Text      string `json:"text"`
+	CreatedAt string `json:"created_at"`
+}
+
+func (s *Service) ListRules(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`SELECT id, position, text, created_at FROM instance_rules ORDER BY position ASC, created_at ASC`)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+	var rules []Rule
+	for rows.Next() {
+		var rule Rule
+		rows.Scan(&rule.ID, &rule.Position, &rule.Text, &rule.CreatedAt)
+		rules = append(rules, rule)
+	}
+	if rules == nil { rules = []Rule{} }
+	writeJSON(w, 200, map[string]any{"rules": rules})
+}
+
+func (s *Service) CreateRule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		writeError(w, 400, "text required"); return
+	}
+	var maxPos int
+	s.db.QueryRow(`SELECT COALESCE(MAX(position), 0) FROM instance_rules`).Scan(&maxPos)
+	var id string
+	err := s.db.QueryRow(`INSERT INTO instance_rules (position, text) VALUES ($1, $2) RETURNING id`,
+		maxPos+1, strings.TrimSpace(req.Text)).Scan(&id)
+	if err != nil {
+		writeError(w, 500, "could not create rule"); return
+	}
+	writeJSON(w, 201, map[string]string{"id": id})
+}
+
+func (s *Service) UpdateRule(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		writeError(w, 400, "text required"); return
+	}
+	s.db.Exec(`UPDATE instance_rules SET text = $1 WHERE id = $2`, strings.TrimSpace(req.Text), id)
+	writeJSON(w, 200, map[string]string{"message": "updated"})
+}
+
+func (s *Service) DeleteRule(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s.db.Exec(`DELETE FROM instance_rules WHERE id = $1`, id)
+	writeJSON(w, 200, map[string]string{"message": "deleted"})
+}
+
+func (s *Service) MoveRule(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Direction string `json:"direction"` // "up" or "down"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json"); return
+	}
+	if req.Direction != "up" && req.Direction != "down" {
+		writeError(w, 400, "direction must be 'up' or 'down'"); return
+	}
+
+	var pos int
+	s.db.QueryRow(`SELECT position FROM instance_rules WHERE id = $1`, id).Scan(&pos)
+	if pos == 0 {
+		writeError(w, 404, "rule not found"); return
+	}
+
+	var swapID string
+	var swapPos int
+	if req.Direction == "up" {
+		s.db.QueryRow(`SELECT id, position FROM instance_rules WHERE position < $1 ORDER BY position DESC LIMIT 1`, pos).Scan(&swapID, &swapPos)
+	} else {
+		s.db.QueryRow(`SELECT id, position FROM instance_rules WHERE position > $1 ORDER BY position ASC LIMIT 1`, pos).Scan(&swapID, &swapPos)
+	}
+	if swapID == "" {
+		writeJSON(w, 200, map[string]string{"message": "already at boundary"}); return
+	}
+	s.db.Exec(`UPDATE instance_rules SET position = $1 WHERE id = $2`, swapPos, id)
+	s.db.Exec(`UPDATE instance_rules SET position = $1 WHERE id = $2`, pos, swapID)
+	writeJSON(w, 200, map[string]string{"message": "moved"})
 }

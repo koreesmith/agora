@@ -485,7 +485,8 @@ var _ = sql.ErrNoRows
 // ── Instance info (public) ────────────────────────────────────────────────────
 
 func RegisterInstanceRoute(r chi.Router, s *Service) {
-	r.Get("/instance", s.InstanceInfo)
+	r.Get("/instance",       s.InstanceInfo)
+	r.Get("/instance/rules", s.InstanceRules)
 }
 
 func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
@@ -495,4 +496,25 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 		info[k] = s.getSetting(k)
 	}
 	writeJSON(w, 200, info)
+}
+
+func (s *Service) InstanceRules(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`SELECT id, position, text FROM instance_rules ORDER BY position ASC, created_at ASC`)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+	type Rule struct {
+		ID       string `json:"id"`
+		Position int    `json:"position"`
+		Text     string `json:"text"`
+	}
+	var rules []Rule
+	for rows.Next() {
+		var rule Rule
+		rows.Scan(&rule.ID, &rule.Position, &rule.Text)
+		rules = append(rules, rule)
+	}
+	if rules == nil { rules = []Rule{} }
+	writeJSON(w, 200, map[string]any{"rules": rules})
 }

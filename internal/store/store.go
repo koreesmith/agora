@@ -313,4 +313,12 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_cgjr_user  ON community_group_join_requests(user_id)`,
 
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`,
+
+	`CREATE TABLE IF NOT EXISTS instance_rules (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		position   INT         NOT NULL DEFAULT 0,
+		text       TEXT        NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_rules_position ON instance_rules(position ASC)`,
 }

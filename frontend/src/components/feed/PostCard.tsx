@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { feedApi, moderationApi } from '../../api'
+import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
+import ReportModal from './ReportModal'
 
 interface Post {
   id: string
@@ -46,6 +47,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const qc = useQueryClient()
   const [showComments, setShowComments] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
+  const [showReport, setShowReport] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editContent, setEditContent] = useState(post.content)
 
@@ -71,17 +73,14 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
     onSuccess: invalidate,
   })
 
-  const report = useMutation({
-    mutationFn: (reason: string) => moderationApi.createReport({
-      reported_post_id: post.id, reason,
-    }),
-  })
-
   const isOwn = user?.id === post.author_id
   const canDelete = isOwn || user?.role === 'admin' || user?.role === 'moderator'
 
   return (
     <div className={`card p-4 ${post.group_slug ? 'border-l-4 border-agora-400 dark:border-agora-500' : ''}`}>
+      {showReport && (
+        <ReportModal postId={post.id} onClose={() => setShowReport(false)} />
+      )}
       {/* Group banner */}
       {post.group_slug && (
         <Link
@@ -158,11 +157,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                     </button>
                   )}
                   {!isOwn && (
-                    <button onClick={() => {
-                      const reason = prompt('Report reason (spam, harassment, misinformation, other):') || 'other'
-                      report.mutate(reason)
-                      setShowMenu(false)
-                    }}
+                    <button onClick={() => { setShowReport(true); setShowMenu(false) }}
                       className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
                       <Flag size={14} /> Report
                     </button>

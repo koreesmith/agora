@@ -164,11 +164,18 @@ export const adminApi = {
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),
   unblockInstance:        (id: string)          => api.post(`/admin/federation/instances/${id}/unblock`),
   resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
+  // Instance rules
+  listRules:   ()                               => api.get('/admin/rules'),
+  createRule:  (text: string)                   => api.post('/admin/rules', { text }),
+  updateRule:  (id: string, text: string)       => api.patch(`/admin/rules/${id}`, { text }),
+  deleteRule:  (id: string)                     => api.delete(`/admin/rules/${id}`),
+  moveRule:    (id: string, direction: 'up'|'down') => api.patch(`/admin/rules/${id}/move`, { direction }),
 }
 
 
 // ── Instance ──────────────────────────────────────────────────────────────────
 export const instanceApi = {
-  getInfo: () => api.get('/instance'),
+  getInfo:  () => api.get('/instance'),
+  getRules: () => api.get('/instance/rules'),
 }
 

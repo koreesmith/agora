@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List } from 'lucide-react'
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'federation'|'invites'>('overview')
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'federation'|'invites'|'rules'>('overview')
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
   const qc = useQueryClient()
@@ -16,6 +16,7 @@ export default function AdminPage() {
   const { data: repsData } = useQuery({ queryKey:['admin-reports'],  queryFn: ()=>moderationApi.listReports('pending').then(r=>r.data), enabled: tab==='reports' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
+  const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
 
   // Populate settings form when data loads (RQ v5: no onSuccess in useQuery)
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
@@ -37,6 +38,7 @@ export default function AdminPage() {
     { id:'reports',    label:'Reports',     icon: Flag },
     { id:'federation', label:'Federation',  icon: Link2 },
     { id:'invites',    label:'Invites',     icon: Ticket },
+    { id:'rules',      label:'Rules',       icon: List },
   ]
 
   const sf = (k:string) => (e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>) =>
@@ -180,6 +182,108 @@ export default function AdminPage() {
           ))}
         </div>
       )}
+
+      {tab==='rules' && (
+        <RulesPanel rules={rulesData?.rules ?? []} onChanged={()=>qc.invalidateQueries({queryKey:['admin-rules']})} />
+      )}
+    </div>
+  )
+}
+
+// ── Rules Panel ───────────────────────────────────────────────────────────────
+
+function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void }) {
+  const [newText, setNewText] = useState('')
+  const [editingId, setEditingId] = useState<string|null>(null)
+  const [editText, setEditText] = useState('')
+
+  const create = useMutation({
+    mutationFn: () => adminApi.createRule(newText),
+    onSuccess: () => { setNewText(''); onChanged() },
+  })
+  const update = useMutation({
+    mutationFn: () => adminApi.updateRule(editingId!, editText),
+    onSuccess: () => { setEditingId(null); onChanged() },
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => adminApi.deleteRule(id),
+    onSuccess: onChanged,
+  })
+  const move = useMutation({
+    mutationFn: ({ id, direction }: { id: string, direction: 'up'|'down' }) => adminApi.moveRule(id, direction),
+    onSuccess: onChanged,
+  })
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Instance Rules</h3>
+        <p className="text-sm text-agora-500">Rules are shown to users when they register and when filing reports.</p>
+
+        {rules.length === 0 && (
+          <p className="text-sm text-agora-400 italic">No rules yet. Add your first rule below.</p>
+        )}
+
+        <div className="space-y-2">
+          {rules.map((rule: any, i: number) => (
+            <div key={rule.id} className="flex items-start gap-2 bg-agora-50 dark:bg-agora-700/50 rounded-lg px-3 py-2.5">
+              <span className="text-sm font-bold text-agora-400 w-5 flex-shrink-0 mt-0.5">{i + 1}.</span>
+              <div className="flex-1 min-w-0">
+                {editingId === rule.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      className="input w-full text-sm resize-none"
+                      rows={2}
+                      value={editText}
+                      onChange={e => setEditText(e.target.value)}
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => update.mutate()} disabled={!editText.trim() || update.isPending}
+                        className="btn-primary text-xs py-1 px-3">Save</button>
+                      <button onClick={() => setEditingId(null)} className="btn-secondary text-xs py-1 px-3">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm">{rule.text}</p>
+                )}
+              </div>
+              {editingId !== rule.id && (
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button onClick={() => move.mutate({ id: rule.id, direction: 'up' })} disabled={i === 0}
+                    className="btn-ghost p-1 text-agora-400 disabled:opacity-30" title="Move up">↑</button>
+                  <button onClick={() => move.mutate({ id: rule.id, direction: 'down' })} disabled={i === rules.length - 1}
+                    className="btn-ghost p-1 text-agora-400 disabled:opacity-30" title="Move down">↓</button>
+                  <button onClick={() => { setEditingId(rule.id); setEditText(rule.text) }}
+                    className="btn-ghost p-1 text-agora-400 hover:text-agora-600 text-xs">Edit</button>
+                  <button onClick={() => { if (confirm('Delete this rule?')) remove.mutate(rule.id) }}
+                    className="btn-ghost p-1 text-red-400 hover:text-red-600 text-xs">Delete</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Add new rule */}
+        <div className="pt-2 border-t border-agora-100 dark:border-agora-700 space-y-2">
+          <label className="label">Add a rule</label>
+          <textarea
+            className="input w-full text-sm resize-none"
+            rows={2}
+            placeholder="e.g. No harassment or hate speech"
+            value={newText}
+            onChange={e => setNewText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && e.metaKey && newText.trim()) create.mutate() }}
+          />
+          <button
+            onClick={() => create.mutate()}
+            disabled={!newText.trim() || create.isPending}
+            className="btn-primary text-sm"
+          >
+            {create.isPending ? 'Adding…' : 'Add Rule'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

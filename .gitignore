@@ -9,3 +9,7 @@ frontend/dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Generated at deploy time by setup-ssl.sh — contains real domain, never commit
+docker-compose.ssl.yml
+nginx/nginx.conf

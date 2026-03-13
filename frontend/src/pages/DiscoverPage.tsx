@@ -1,7 +1,8 @@
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { usersApi, friendsApi } from '../api'
-import { UserPlus, Users, Compass } from 'lucide-react'
+import { UserPlus, Users, Compass, Check, Clock } from 'lucide-react'
 
 export default function DiscoverPage() {
   const qc = useQueryClient()
@@ -9,11 +10,6 @@ export default function DiscoverPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['discover'],
     queryFn: () => usersApi.discover().then(r => r.data),
-  })
-
-  const sendReq = useMutation({
-    mutationFn: (userId: string) => friendsApi.sendRequest(userId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['discover'] }),
   })
 
   const users: any[] = data?.users || []
@@ -40,60 +36,85 @@ export default function DiscoverPage() {
 
       <div className="grid gap-3 sm:grid-cols-2">
         {users.map((u: any) => (
-          <div key={u.id} className="card p-4 flex gap-3">
-            {/* Avatar */}
-            <Link to={`/profile/${u.username}`} className="flex-shrink-0">
-              <div className="w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
-                {u.avatar_url
-                  ? <img src={u.avatar_url} alt="" className="w-full h-full object-cover" />
-                  : <div className="w-full h-full flex items-center justify-center text-agora-400 font-bold text-lg">
-                      {(u.display_name || u.username).charAt(0).toUpperCase()}
-                    </div>
-                }
-              </div>
-            </Link>
-
-            {/* Info */}
-            <div className="flex-1 min-w-0">
-              <Link to={`/profile/${u.username}`} className="font-semibold hover:underline block truncate">
-                {u.display_name || u.username}
-              </Link>
-              <Link to={`/profile/${u.username}`} className="text-xs text-agora-400 block">
-                @{u.username}
-              </Link>
-              {u.bio && (
-                <p className="text-xs text-agora-500 mt-1 line-clamp-1">{u.bio}</p>
-              )}
-
-              {/* Mutual friends */}
-              <div className="flex items-center gap-1 mt-1.5 text-xs text-agora-500">
-                <Users size={11} />
-                {u.mutual_count > 0 ? (
-                  <span>
-                    {u.mutual_count} mutual friend{u.mutual_count !== 1 ? 's' : ''}
-                    {u.mutual_friends?.length > 0 && (
-                      <span className="text-agora-400">
-                        {' '}· {u.mutual_friends.slice(0, 3).join(', ')}
-                        {u.mutual_count > 3 ? ` +${u.mutual_count - 3} more` : ''}
-                      </span>
-                    )}
-                  </span>
-                ) : (
-                  <span className="text-agora-400">Member of this instance</span>
-                )}
-              </div>
-
-              {/* Add friend button */}
-              <button
-                onClick={() => sendReq.mutate(u.id)}
-                disabled={sendReq.isPending}
-                className="btn-primary text-xs py-1 px-3 mt-2 flex items-center gap-1"
-              >
-                <UserPlus size={12} /> Add friend
-              </button>
-            </div>
-          </div>
+          <UserCard key={u.id} user={u} onRequestSent={() => qc.invalidateQueries({ queryKey: ['discover'] })} />
         ))}
+      </div>
+    </div>
+  )
+}
+
+function UserCard({ user: u, onRequestSent }: { user: any, onRequestSent: () => void }) {
+  // Optimistic local state — starts from server-provided status
+  const [status, setStatus] = useState<string>(u.friend_status || '')
+
+  const sendReq = useMutation({
+    mutationFn: () => friendsApi.sendRequest(u.id),
+    onMutate: () => setStatus('pending'),
+    onError: () => setStatus(''),
+    onSuccess: onRequestSent,
+  })
+
+  return (
+    <div className="card p-4 flex gap-3">
+      <Link to={`/profile/${u.username}`} className="flex-shrink-0">
+        <div className="w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
+          {u.avatar_url
+            ? <img src={u.avatar_url} alt="" className="w-full h-full object-cover" />
+            : <div className="w-full h-full flex items-center justify-center text-agora-400 font-bold text-lg">
+                {(u.display_name || u.username).charAt(0).toUpperCase()}
+              </div>
+          }
+        </div>
+      </Link>
+
+      <div className="flex-1 min-w-0">
+        <Link to={`/profile/${u.username}`} className="font-semibold hover:underline block truncate">
+          {u.display_name || u.username}
+        </Link>
+        <Link to={`/profile/${u.username}`} className="text-xs text-agora-400 block">
+          @{u.username}
+        </Link>
+        {u.bio && (
+          <p className="text-xs text-agora-500 mt-1 line-clamp-1">{u.bio}</p>
+        )}
+
+        <div className="flex items-center gap-1 mt-1.5 text-xs text-agora-500">
+          <Users size={11} />
+          {u.mutual_count > 0 ? (
+            <span>
+              {u.mutual_count} mutual friend{u.mutual_count !== 1 ? 's' : ''}
+              {u.mutual_friends?.length > 0 && (
+                <span className="text-agora-400">
+                  {' '}· {u.mutual_friends.slice(0, 3).join(', ')}
+                  {u.mutual_count > 3 ? ` +${u.mutual_count - 3} more` : ''}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="text-agora-400">Member of this instance</span>
+          )}
+        </div>
+
+        <div className="mt-2">
+          {status === 'pending' ? (
+            <span className="inline-flex items-center gap-1.5 text-xs text-agora-400 font-medium py-1 px-3 rounded-lg bg-agora-100 dark:bg-agora-700">
+              <Clock size={12} /> Request sent
+            </span>
+          ) : status === 'pending_incoming' ? (
+            <Link to={`/profile/${u.username}`}
+              className="inline-flex items-center gap-1.5 text-xs text-agora-600 dark:text-agora-400 font-medium py-1 px-3 rounded-lg bg-agora-100 dark:bg-agora-700">
+              <Check size={12} /> Respond to request
+            </Link>
+          ) : (
+            <button
+              onClick={() => sendReq.mutate()}
+              disabled={sendReq.isPending}
+              className="btn-primary text-xs py-1 px-3 flex items-center gap-1"
+            >
+              <UserPlus size={12} /> Add friend
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

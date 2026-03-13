@@ -1,7 +1,6 @@
 package federation
 
 import (
-	"strings"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -12,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,16 +24,15 @@ type Service struct {
 	cfg *config.Config
 }
 
-// feedSvc and userSvc are accepted for future use (cross-package circular-dep avoidance)
 func NewService(db *store.DB, cfg *config.Config, _, _ any) *Service {
 	return &Service{db: db, cfg: cfg}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/agora-instance", s.InstanceInfo)
-	r.Post("/federation/inbox",           s.Inbox)
+	r.Post("/federation/inbox",          s.Inbox)
 	r.Get("/federation/users/{handle}",  s.GetUser)
-	r.Get("/federation/search",           s.Search)
+	r.Get("/federation/search",          s.Search)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────
@@ -57,6 +56,19 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	var userCount int
 	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false AND is_suspended = false`).Scan(&userCount)
 
+	// Include instance rules
+	rows, _ := s.db.Query(`SELECT text FROM instance_rules ORDER BY position ASC`)
+	var rules []string
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var t string
+			rows.Scan(&t)
+			rules = append(rules, t)
+		}
+	}
+	if rules == nil { rules = []string{} }
+
 	writeJSON(w, 200, map[string]any{
 		"domain":      domainFromURL(s.cfg.InstanceDomain),
 		"name":        name,
@@ -65,6 +77,7 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 		"api_version": "1",
 		"user_count":  userCount,
 		"software":    "agora",
+		"rules":       rules,
 	})
 }
 
@@ -97,14 +110,12 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify signature
 	if err := s.verifyActivity(body, activity); err != nil {
 		log.Printf("federation: signature verification failed from %s: %v", activity.InstanceID, err)
 		writeError(w, 401, "invalid signature")
 		return
 	}
 
-	// Check not blocked
 	var status string
 	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, activity.InstanceID).Scan(&status)
 	if status == "blocked" {
@@ -112,19 +123,12 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update last seen
-	s.db.Exec(`
-		UPDATE federated_instances SET last_seen_at = NOW() WHERE domain = $1
-	`, activity.InstanceID)
+	s.db.Exec(`UPDATE federated_instances SET last_seen_at = NOW() WHERE domain = $1`, activity.InstanceID)
 
-	// Log activity
 	payload, _ := json.Marshal(activity)
-	s.db.Exec(`
-		INSERT INTO audit_log (action, target_type, target_id, details)
-		VALUES ('federation_inbox', 'activity', $1, $2)
-	`, activity.Type, string(payload))
+	s.db.Exec(`INSERT INTO audit_log (action, target_type, target_id, details) VALUES ('federation_inbox', 'activity', $1, $2)`,
+		activity.Type, string(payload))
 
-	// Dispatch
 	switch activity.Type {
 	case "post":
 		s.handleInboundPost(activity)
@@ -134,6 +138,8 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		s.handleInboundFriendRequest(activity)
 	case "friend_accept":
 		s.handleInboundFriendAccept(activity)
+	case "profile_update":
+		s.handleInboundProfileUpdate(activity)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -148,12 +154,8 @@ func (s *Service) handleInboundPost(a Activity) {
 		AuthorID   string `json:"author_handle"`
 		CreatedAt  string `json:"created_at"`
 	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil {
-		return
-	}
-	if obj.Visibility != "public" {
-		return // only federate public posts
-	}
+	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
+	if obj.Visibility != "public" { return }
 
 	authorID := s.getOrCreateRemoteUser(obj.AuthorID, a.InstanceID)
 	s.db.Exec(`
@@ -174,16 +176,12 @@ func (s *Service) handleInboundFriendRequest(a Activity) {
 		FromHandle string `json:"from_handle"`
 		ToHandle   string `json:"to_handle"`
 	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil {
-		return
-	}
+	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
 
 	remoteUserID := s.getOrCreateRemoteUser(obj.FromHandle, a.InstanceID)
 	var localUserID string
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
-	if localUserID == "" {
-		return
-	}
+	if localUserID == "" { return }
 
 	s.db.Exec(`
 		INSERT INTO friendships (requester_id, addressee_id, status)
@@ -197,16 +195,12 @@ func (s *Service) handleInboundFriendAccept(a Activity) {
 		FromHandle string `json:"from_handle"`
 		ToHandle   string `json:"to_handle"`
 	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil {
-		return
-	}
+	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
 
 	remoteUserID := s.getOrCreateRemoteUser(obj.FromHandle, a.InstanceID)
 	var localUserID string
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
-	if localUserID == "" || remoteUserID == "" {
-		return
-	}
+	if localUserID == "" || remoteUserID == "" { return }
 
 	s.db.Exec(`
 		UPDATE friendships SET status = 'accepted', updated_at = NOW()
@@ -214,31 +208,104 @@ func (s *Service) handleInboundFriendAccept(a Activity) {
 	`, localUserID, remoteUserID)
 }
 
-// ── Remote user lookup ────────────────────────────────────────────────────────
+// handleInboundProfileUpdate syncs a remote user's profile fields
+func (s *Service) handleInboundProfileUpdate(a Activity) {
+	var obj struct {
+		Handle      string `json:"handle"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+		Bio         string `json:"bio"`
+	}
+	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
 
+	s.db.Exec(`
+		UPDATE users
+		SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
+		WHERE remote_user_id = $4 AND remote_instance = $5
+	`, obj.DisplayName, obj.AvatarURL, obj.Bio, obj.Handle, a.InstanceID)
+}
+
+// ── Remote user lookup + sync ─────────────────────────────────────────────────
+
+// getOrCreateRemoteUser returns the local UUID for a remote handle, fetching
+// their profile from the remote instance if they don't exist yet.
 func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 	var id string
-	s.db.QueryRow(`
-		SELECT id FROM users WHERE remote_user_id = $1 AND remote_instance = $2
-	`, handle, instance).Scan(&id)
+	s.db.QueryRow(`SELECT id FROM users WHERE remote_user_id = $1 AND remote_instance = $2`, handle, instance).Scan(&id)
 	if id != "" {
 		return id
 	}
 
-	// Create a stub remote user
+	// Fetch profile from the remote instance
+	profile := s.fetchRemoteProfile(handle, instance)
+
+	displayName := profile["display_name"]
+	if displayName == "" { displayName = handle + "@" + instance }
+	avatarURL  := profile["avatar_url"]
+	bio        := profile["bio"]
+
 	s.db.QueryRow(`
-		INSERT INTO users (username, email, password_hash, display_name, email_verified,
-		                   is_remote, remote_user_id, remote_instance)
-		VALUES ($1, $2, '', $3, true, true, $4, $5)
-		ON CONFLICT (username) DO UPDATE SET remote_instance = $5
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
+		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at)
+		VALUES ($1, $2, '', $3, $4, $5, true, true, $6, $7, NOW())
+		ON CONFLICT (username) DO UPDATE
+		  SET display_name = $3, avatar_url = $4, bio = $5, remote_synced_at = NOW()
 		RETURNING id
 	`, handle+"@"+instance,
 		handle+"@"+instance,
-		handle+"@"+instance,
-		handle,
-		instance,
+		displayName, avatarURL, bio,
+		handle, instance,
 	).Scan(&id)
 	return id
+}
+
+// fetchRemoteProfile GETs /federation/users/{handle} on the remote instance.
+// Returns an empty map on any error (caller must handle gracefully).
+func (s *Service) fetchRemoteProfile(handle, instance string) map[string]string {
+	url := "https://" + instance + "/federation/users/" + handle
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil || resp.StatusCode != 200 {
+		return map[string]string{}
+	}
+	defer resp.Body.Close()
+
+	var profile map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return map[string]string{}
+	}
+	return profile
+}
+
+// syncStaleRemoteUsers re-fetches profiles for remote users not synced in 24h.
+func (s *Service) syncStaleRemoteUsers() {
+	rows, err := s.db.Query(`
+		SELECT remote_user_id, remote_instance
+		FROM users
+		WHERE is_remote = true
+		  AND (remote_synced_at IS NULL OR remote_synced_at < NOW() - INTERVAL '24 hours')
+		LIMIT 50
+	`)
+	if err != nil { return }
+	defer rows.Close()
+
+	type entry struct{ handle, instance string }
+	var stale []entry
+	for rows.Next() {
+		var e entry
+		rows.Scan(&e.handle, &e.instance)
+		stale = append(stale, e)
+	}
+	rows.Close()
+
+	for _, e := range stale {
+		profile := s.fetchRemoteProfile(e.handle, e.instance)
+		if len(profile) == 0 { continue }
+		s.db.Exec(`
+			UPDATE users SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
+			WHERE remote_user_id = $4 AND remote_instance = $5
+		`, profile["display_name"], profile["avatar_url"], profile["bio"], e.handle, e.instance)
+	}
 }
 
 // ── Federated user profile ────────────────────────────────────────────────────
@@ -276,7 +343,6 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Search local users
 	rows, err := s.db.Query(`
 		SELECT username, display_name, avatar_url
 		FROM users
@@ -309,21 +375,84 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"users": users})
 }
 
-// ── Outbound activity sender ──────────────────────────────────────────────────
+// ── Outbound queue ────────────────────────────────────────────────────────────
 
+// SendActivity enqueues an outbound activity for reliable delivery.
+// The background worker will sign and deliver it, retrying on failure.
 func (s *Service) SendActivity(instanceURL string, activity Activity) error {
-	_, privKey, err := s.getOrCreateKeyPair()
+	payload, err := json.Marshal(activity)
 	if err != nil {
 		return err
 	}
+	_, err = s.db.Exec(`
+		INSERT INTO federation_queue (instance_url, payload, next_attempt)
+		VALUES ($1, $2, NOW())
+	`, instanceURL, string(payload))
+	return err
+}
 
-	// Sign the payload
-	payload, _ := json.Marshal(activity)
-	sig := ed25519.Sign(privKey, payload)
-	activity.Signature = base64.StdEncoding.EncodeToString(sig)
+// drainQueue processes pending outbound activities, retrying with backoff.
+func (s *Service) drainQueue() {
+	_, privKey, err := s.getOrCreateKeyPair()
+	if err != nil {
+		log.Printf("federation: drainQueue: could not get key pair: %v", err)
+		return
+	}
 
-	signed, _ := json.Marshal(activity)
-	resp, err := http.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
+	rows, err := s.db.Query(`
+		SELECT id, instance_url, payload
+		FROM federation_queue
+		WHERE attempts < 10 AND next_attempt <= NOW()
+		ORDER BY next_attempt ASC
+		LIMIT 20
+	`)
+	if err != nil { return }
+	defer rows.Close()
+
+	type job struct {
+		id          string
+		instanceURL string
+		payload     []byte
+	}
+	var jobs []job
+	for rows.Next() {
+		var j job
+		rows.Scan(&j.id, &j.instanceURL, &j.payload)
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+
+	for _, j := range jobs {
+		var activity Activity
+		if err := json.Unmarshal(j.payload, &activity); err != nil {
+			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
+			continue
+		}
+
+		// Sign payload
+		sig := ed25519.Sign(privKey, j.payload)
+		activity.Signature = base64.StdEncoding.EncodeToString(sig)
+		signed, _ := json.Marshal(activity)
+
+		sendErr := s.deliverActivity(j.instanceURL, signed)
+		if sendErr == nil {
+			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
+		} else {
+			// Exponential backoff: 2^attempts minutes, capped at 24h
+			s.db.Exec(`
+				UPDATE federation_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
+				WHERE id = $2
+			`, sendErr.Error(), j.id)
+		}
+	}
+}
+
+func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
 	if err != nil {
 		return err
 	}
@@ -337,28 +466,19 @@ func (s *Service) SendActivity(instanceURL string, activity Activity) error {
 // ── Signature verification ────────────────────────────────────────────────────
 
 func (s *Service) verifyActivity(raw []byte, a Activity) error {
-	if a.Signature == "" {
-		return fmt.Errorf("no signature")
-	}
-	if a.InstanceID == "" {
-		return fmt.Errorf("no instance id")
-	}
+	if a.Signature == "" { return fmt.Errorf("no signature") }
+	if a.InstanceID == "" { return fmt.Errorf("no instance id") }
 
 	sig, err := base64.StdEncoding.DecodeString(a.Signature)
-	if err != nil {
-		return fmt.Errorf("bad signature encoding")
-	}
+	if err != nil { return fmt.Errorf("bad signature encoding") }
 
-	// Strip signature field before verifying
 	var m map[string]any
 	json.Unmarshal(raw, &m)
 	delete(m, "signature")
 	unsigned, _ := json.Marshal(m)
 
 	pubKey, err := s.getRemotePublicKey(a.InstanceID)
-	if err != nil {
-		return fmt.Errorf("could not get remote key: %w", err)
-	}
+	if err != nil { return fmt.Errorf("could not get remote key: %w", err) }
 
 	if !ed25519.Verify(pubKey, unsigned, sig) {
 		return fmt.Errorf("signature invalid")
@@ -371,17 +491,13 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 	s.db.QueryRow(`SELECT public_key FROM federated_instances WHERE domain = $1 AND status != 'blocked'`, domain).Scan(&keyB64)
 	if keyB64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(keyB64)
-		if err != nil {
-			return nil, err
-		}
+		if err != nil { return nil, err }
 		return ed25519.PublicKey(decoded), nil
 	}
 
-	// Fetch from remote
-	resp, err := http.Get("https://" + domain + "/.well-known/agora-instance")
-	if err != nil {
-		return nil, fmt.Errorf("could not reach instance: %w", err)
-	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://" + domain + "/.well-known/agora-instance")
+	if err != nil { return nil, fmt.Errorf("could not reach instance: %w", err) }
 	defer resp.Body.Close()
 
 	var info struct {
@@ -393,11 +509,8 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(info.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("bad public key")
-	}
+	if err != nil { return nil, fmt.Errorf("bad public key") }
 
-	// Store for future use
 	s.db.Exec(`
 		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
 		VALUES ($1, $2, $3, $4, 'active')
@@ -422,20 +535,13 @@ func (s *Service) getOrCreateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, e
 		}
 	}
 
-	// Generate new keypair
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
+	if err != nil { return nil, nil, err }
 
-	s.db.Exec(`
-		INSERT INTO instance_settings (key, value) VALUES ('federation_public_key', $1)
-		ON CONFLICT (key) DO UPDATE SET value = $1
-	`, base64.StdEncoding.EncodeToString(pub))
-	s.db.Exec(`
-		INSERT INTO instance_settings (key, value) VALUES ('federation_private_key', $1)
-		ON CONFLICT (key) DO UPDATE SET value = $1
-	`, base64.StdEncoding.EncodeToString(priv))
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_public_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`,
+		base64.StdEncoding.EncodeToString(pub))
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_private_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`,
+		base64.StdEncoding.EncodeToString(priv))
 
 	log.Println("federation: generated new Ed25519 keypair")
 	return pub, priv, nil
@@ -444,36 +550,44 @@ func (s *Service) getOrCreateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, e
 // ── Background sync ───────────────────────────────────────────────────────────
 
 func (s *Service) StartBackgroundSync(ctx context.Context) {
-	if !s.federationEnabled() {
-		return
-	}
-	ticker := time.NewTicker(15 * time.Minute)
-	defer ticker.Stop()
+	if !s.federationEnabled() { return }
+
+	queueTicker  := time.NewTicker(30 * time.Second)  // drain outbound queue
+	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
+	profileTicker := time.NewTicker(6 * time.Hour)    // sync stale remote profiles
+
+	defer queueTicker.Stop()
+	defer syncTicker.Stop()
+	defer profileTicker.Stop()
+
+	// Run immediately on start
+	go s.drainQueue()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.refreshInstances()
+		case <-queueTicker.C:
+			go s.drainQueue()
+		case <-syncTicker.C:
+			go s.refreshInstances()
+		case <-profileTicker.C:
+			go s.syncStaleRemoteUsers()
 		}
 	}
 }
 
 func (s *Service) refreshInstances() {
 	rows, _ := s.db.Query(`SELECT domain FROM federated_instances WHERE status = 'active'`)
-	if rows == nil {
-		return
-	}
+	if rows == nil { return }
 	defer rows.Close()
 	for rows.Next() {
 		var domain string
 		rows.Scan(&domain)
-		// Ping to keep last_seen fresh
 		go func(d string) {
-			resp, err := http.Get("https://" + d + "/.well-known/agora-instance")
-			if err != nil {
-				return
-			}
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Get("https://" + d + "/.well-known/agora-instance")
+			if err != nil { return }
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
 				s.db.Exec(`UPDATE federated_instances SET last_seen_at = NOW() WHERE domain = $1`, d)

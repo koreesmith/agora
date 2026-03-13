@@ -137,6 +137,7 @@ export const groupsApi = {
 // ── Search ────────────────────────────────────────────────────────────────────
 export const searchApi = {
   searchUsers: (q: string, scope = 'local') => api.get('/search/users', { params: { q, scope } }),
+  searchPosts: (q: string, page = 0)        => api.get('/search/posts', { params: { q, page } }),
 }
 
 // ── Moderation ────────────────────────────────────────────────────────────────

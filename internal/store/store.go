@@ -321,4 +321,19 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_rules_position ON instance_rules(position ASC)`,
+
+	// Outbound federation queue — retry table for failed/pending sends
+	`CREATE TABLE IF NOT EXISTS federation_queue (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		instance_url  TEXT        NOT NULL,
+		payload       JSONB       NOT NULL,
+		attempts      INT         NOT NULL DEFAULT 0,
+		last_error    TEXT        NOT NULL DEFAULT '',
+		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fed_queue_next ON federation_queue(next_attempt ASC) WHERE attempts < 10`,
+
+	// Track when remote user profiles were last synced
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
 }

@@ -1,0 +1,74 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
+    limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
+
+    server {
+        listen 80;
+        server_name DOMAIN_PLACEHOLDER _;
+
+        client_max_body_size 55M;
+
+        gzip on;
+        gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+        gzip_min_length 1024;
+
+        # ── File uploads ──────────────────────────────────────────────────────
+        location /uploads/ {
+            alias /data/uploads/;
+            expires 30d;
+            add_header Cache-Control "public";
+            access_log off;
+        }
+
+        # ── API ───────────────────────────────────────────────────────────────
+        location /api/auth/ {
+            limit_req zone=auth burst=5 nodelay;
+            proxy_pass         http://frontend:80/api/auth/;
+            proxy_http_version 1.1;
+            proxy_set_header Host               $host;
+            proxy_set_header X-Real-IP          $remote_addr;
+            proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  $scheme;
+        }
+
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            proxy_pass         http://frontend:80/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host               $host;
+            proxy_set_header X-Real-IP          $remote_addr;
+            proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  $scheme;
+            proxy_read_timeout  30s;
+            proxy_send_timeout  30s;
+            proxy_connect_timeout 10s;
+        }
+
+        location /.well-known/ {
+            proxy_pass http://frontend:80/.well-known/;
+            proxy_http_version 1.1;
+            proxy_set_header Host      $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /federation/ {
+            proxy_pass http://frontend:80/federation/;
+            proxy_http_version 1.1;
+            proxy_set_header Host      $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location / {
+            proxy_pass         http://frontend:80;
+            proxy_http_version 1.1;
+            proxy_set_header Host               $host;
+            proxy_set_header X-Real-IP          $remote_addr;
+            proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  $scheme;
+        }
+    }
+}

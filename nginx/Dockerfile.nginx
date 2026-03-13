@@ -1,7 +1,9 @@
 FROM nginx:1.25-alpine
 
-ARG DOMAIN
-RUN test -n "$DOMAIN" || (echo "ERROR: DOMAIN build arg is required" && exit 1)
+COPY nginx.ssl.template  /etc/nginx/nginx.ssl.template
+COPY nginx.http.template /etc/nginx/nginx.http.template
+COPY docker-entrypoint-nginx.sh /docker-entrypoint-nginx.sh
+RUN chmod +x /docker-entrypoint-nginx.sh
 
-COPY nginx.conf.template /etc/nginx/nginx.conf.template
-RUN sed "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+ENTRYPOINT ["/docker-entrypoint-nginx.sh"]
+CMD ["nginx", "-g", "daemon off;"]

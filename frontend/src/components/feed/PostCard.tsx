@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X } from 'lucide-react'
+import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { feedApi, moderationApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -27,6 +27,7 @@ interface Post {
   liked: boolean
   reposted: boolean
   created_at: string
+  edited_at?: string
 }
 
 const visIcons: Record<string, React.ReactNode> = {
@@ -42,6 +43,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const qc = useQueryClient()
   const [showComments, setShowComments] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editContent, setEditContent] = useState(post.content)
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
 
@@ -53,6 +56,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const del = useMutation({
     mutationFn: () => feedApi.deletePost(post.id),
     onSuccess: invalidate,
+  })
+
+  const edit = useMutation({
+    mutationFn: () => feedApi.editPost(post.id, { content: editContent }),
+    onSuccess: () => { setEditing(false); invalidate() },
   })
 
   const repost = useMutation({
@@ -122,6 +130,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {showMenu && (
                 <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
                   onBlur={() => setShowMenu(false)}>
+                  {isOwn && !post.repost_of_id && (
+                    <button onClick={() => { setEditing(true); setEditContent(post.content); setShowMenu(false) }}
+                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
+                      <Pencil size={14} /> Edit
+                    </button>
+                  )}
                   {canDelete && (
                     <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
                       className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
@@ -143,57 +157,89 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </div>
           </div>
 
-          {/* Content */}
-          {(post.repost_of_id ? post.repost_content : post.content) && (
-            <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-              {renderContent(post.repost_of_id ? post.repost_content! : post.content)}
-            </p>
-          )}
-
-          {/* Reposter's comment */}
-          {post.repost_of_id && post.content && (
-            <p className="text-sm text-agora-500 dark:text-agora-400 mt-2 italic">
-              "{renderContent(post.content)}"
-            </p>
-          )}
-
-          {/* Image */}
-          {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
-            const url = post.repost_of_id ? post.repost_image_url : post.image_url
-            return (
-              <>
+          {/* Inline editor */}
+          {editing ? (
+            <div className="mt-2 space-y-2">
+              <textarea
+                className="input w-full resize-none text-sm"
+                rows={3}
+                value={editContent}
+                onChange={e => setEditContent(e.target.value)}
+                autoFocus
+              />
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => setEditing(false)} className="btn-secondary text-xs py-1 px-3">Cancel</button>
                 <button
-                  onClick={() => setLightboxUrl(url!)}
-                  className="mt-2 block w-full rounded-lg overflow-hidden focus:outline-none"
+                  onClick={() => edit.mutate()}
+                  disabled={edit.isPending || !editContent.trim()}
+                  className="btn-primary text-xs py-1 px-3"
                 >
-                  <img
-                    src={url}
-                    alt=""
-                    className="w-full max-h-80 object-cover rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in"
-                  />
+                  {edit.isPending ? 'Saving…' : 'Save'}
                 </button>
-                {lightboxUrl === url && (
-                  <div
-                    className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
-                    onClick={() => setLightboxUrl(null)}
-                  >
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Content */}
+              {(post.repost_of_id ? post.repost_content : post.content) && (
+                <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
+                  {renderContent(post.repost_of_id ? post.repost_content! : post.content)}
+                </p>
+              )}
+
+              {/* Reposter's comment */}
+              {post.repost_of_id && post.content && (
+                <p className="text-sm text-agora-500 dark:text-agora-400 mt-2 italic">
+                  "{renderContent(post.content)}"
+                </p>
+              )}
+
+              {/* Edited label */}
+              {post.edited_at && !post.repost_of_id && (
+                <p className="text-xs text-agora-400 mt-0.5 italic">
+                  edited {formatDistanceToNow(new Date(post.edited_at), { addSuffix: true })}
+                </p>
+              )}
+
+              {/* Image */}
+              {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
+                const url = post.repost_of_id ? post.repost_image_url : post.image_url
+                return (
+                  <>
                     <button
-                      className="absolute top-4 right-4 text-white bg-black/40 rounded-full p-1.5 hover:bg-black/70"
-                      onClick={() => setLightboxUrl(null)}
+                      onClick={() => setLightboxUrl(url!)}
+                      className="mt-2 block w-full rounded-lg overflow-hidden focus:outline-none"
                     >
-                      <X size={20} />
+                      <img
+                        src={url}
+                        alt=""
+                        className="w-full max-h-80 object-cover rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in"
+                      />
                     </button>
-                    <img
-                      src={url}
-                      alt=""
-                      className="max-w-3xl max-h-[85vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
-                      onClick={e => e.stopPropagation()}
-                    />
-                  </div>
-                )}
-              </>
-            )
-          })()}
+                    {lightboxUrl === url && (
+                      <div
+                        className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+                        onClick={() => setLightboxUrl(null)}
+                      >
+                        <button
+                          className="absolute top-4 right-4 text-white bg-black/40 rounded-full p-1.5 hover:bg-black/70"
+                          onClick={() => setLightboxUrl(null)}
+                        >
+                          <X size={20} />
+                        </button>
+                        <img
+                          src={url}
+                          alt=""
+                          className="max-w-3xl max-h-[85vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
+            </>
+          )}
 
           {/* Actions */}
           <div className="flex items-center gap-4 mt-3 text-agora-400 dark:text-agora-500">

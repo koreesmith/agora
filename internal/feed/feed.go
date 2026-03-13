@@ -3,6 +3,7 @@ package feed
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -32,12 +33,14 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts",                             s.CreatePost)
 	r.Get("/posts/{id}",                         s.GetPost)
 	r.Delete("/posts/{id}",                      s.DeletePost)
+	r.Patch("/posts/{id}",                       s.EditPost)
 	r.Post("/posts/{id}/like",                   s.LikePost)
 	r.Delete("/posts/{id}/like",                 s.UnlikePost)
 	r.Post("/posts/{id}/repost",                 s.Repost)
 	r.Get("/posts/{id}/comments",                s.GetComments)
 	r.Post("/posts/{id}/comments",               s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
+	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
 	r.Get("/users/{username}/posts",             s.GetUserPosts)
 }
 
@@ -57,7 +60,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.group_id,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at,
+			       p.created_at, p.updated_at, p.edited_at,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -90,7 +93,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.group_id,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at,
+			       p.created_at, p.updated_at, p.edited_at,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -164,7 +167,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.group_id,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at,
+		       p.created_at, p.updated_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -236,7 +239,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.group_id,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at,
+		       p.created_at, p.updated_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -349,7 +352,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.created_at,
+		       p.content, p.image_url, p.created_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked
 		FROM posts p
@@ -364,23 +367,24 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Comment struct {
-		ID          string `json:"id"`
-		AuthorID    string `json:"author_id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
-		Content     string `json:"content"`
-		ImageURL    string `json:"image_url"`
-		CreatedAt   string `json:"created_at"`
-		LikeCount   int    `json:"like_count"`
-		Liked       bool   `json:"liked"`
+		ID          string  `json:"id"`
+		AuthorID    string  `json:"author_id"`
+		Username    string  `json:"username"`
+		DisplayName string  `json:"display_name"`
+		AvatarURL   string  `json:"avatar_url"`
+		Content     string  `json:"content"`
+		ImageURL    string  `json:"image_url"`
+		CreatedAt   string  `json:"created_at"`
+		EditedAt    *string `json:"edited_at,omitempty"`
+		LikeCount   int     `json:"like_count"`
+		Liked       bool    `json:"liked"`
 	}
 
 	var comments []Comment
 	for rows.Next() {
 		var c Comment
 		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.LikeCount, &c.Liked)
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.LikeCount, &c.Liked)
 		comments = append(comments, c)
 	}
 	if comments == nil { comments = []Comment{} }
@@ -450,6 +454,78 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
+// ── Edit ──────────────────────────────────────────────────────────────────────
+
+func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var authorID string
+	var repostOfID *string
+	s.db.QueryRow(`SELECT author_id, repost_of_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&authorID, &repostOfID)
+	if authorID == "" {
+		writeError(w, 404, "post not found"); return
+	}
+	if authorID != userID {
+		writeError(w, 403, "forbidden"); return
+	}
+	if repostOfID != nil {
+		writeError(w, 400, "reposts cannot be edited"); return
+	}
+
+	var req struct {
+		Content  *string `json:"content"`
+		ImageURL *string `json:"image_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json"); return
+	}
+	if req.Content == nil && req.ImageURL == nil {
+		writeError(w, 400, "nothing to update"); return
+	}
+
+	var sets []string
+	var args []any
+	i := 1
+	if req.Content != nil {
+		sets = append(sets, fmt.Sprintf("content = $%d", i)); args = append(args, *req.Content); i++
+	}
+	if req.ImageURL != nil {
+		sets = append(sets, fmt.Sprintf("image_url = $%d", i)); args = append(args, *req.ImageURL); i++
+	}
+	sets = append(sets, "edited_at = NOW()")
+	args = append(args, id)
+	s.db.Exec(fmt.Sprintf("UPDATE posts SET %s WHERE id = $%d", strings.Join(sets, ", "), i), args...)
+	writeJSON(w, 200, map[string]string{"message": "updated"})
+}
+
+func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+	commentID := chi.URLParam(r, "commentID")
+
+	var authorID string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`,
+		commentID, postID).Scan(&authorID)
+	if authorID == "" {
+		writeError(w, 404, "comment not found"); return
+	}
+	if authorID != userID {
+		writeError(w, 403, "forbidden"); return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		writeError(w, 400, "content required"); return
+	}
+
+	s.db.Exec(`UPDATE posts SET content = $1, edited_at = NOW() WHERE id = $2`, req.Content, commentID)
+	writeJSON(w, 200, map[string]string{"message": "updated"})
+}
+
 // ── Scan helpers ──────────────────────────────────────────────────────────────
 
 type Post struct {
@@ -467,6 +543,7 @@ type Post struct {
 	RemoteInstance string  `json:"remote_instance,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
+	EditedAt       *string `json:"edited_at,omitempty"`
 	LikeCount      int     `json:"like_count"`
 	CommentCount   int     `json:"comment_count"`
 	RepostCount    int     `json:"repost_count"`
@@ -492,7 +569,7 @@ func scanPosts(rows interface {
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
-			&p.CreatedAt, &p.UpdatedAt,
+			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,

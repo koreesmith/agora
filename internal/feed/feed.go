@@ -350,7 +350,32 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
 
-	rows, err := s.db.Query(`
+	type Comment struct {
+		ID          string    `json:"id"`
+		AuthorID    string    `json:"author_id"`
+		Username    string    `json:"username"`
+		DisplayName string    `json:"display_name"`
+		AvatarURL   string    `json:"avatar_url"`
+		Content     string    `json:"content"`
+		ImageURL    string    `json:"image_url"`
+		CreatedAt   string    `json:"created_at"`
+		EditedAt    *string   `json:"edited_at,omitempty"`
+		LikeCount   int       `json:"like_count"`
+		Liked       bool      `json:"liked"`
+		Replies     []Comment `json:"replies"`
+	}
+
+	scanComment := func(rows interface {
+		Scan(...any) error
+	}) Comment {
+		var c Comment
+		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.AvatarURL,
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.LikeCount, &c.Liked)
+		c.Replies = []Comment{}
+		return c
+	}
+
+	const commentSQL = `
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       p.content, p.image_url, p.created_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -359,35 +384,38 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		JOIN users u ON u.id = p.author_id
 		WHERE p.parent_id = $2 AND p.deleted_at IS NULL
 		ORDER BY p.created_at ASC
-	`, viewerID, postID)
+	`
+
+	// Top-level comments
+	rows, err := s.db.Query(commentSQL, viewerID, postID)
 	if err != nil {
-		writeError(w, 500, "db error")
-		return
+		writeError(w, 500, "db error"); return
 	}
 	defer rows.Close()
 
-	type Comment struct {
-		ID          string  `json:"id"`
-		AuthorID    string  `json:"author_id"`
-		Username    string  `json:"username"`
-		DisplayName string  `json:"display_name"`
-		AvatarURL   string  `json:"avatar_url"`
-		Content     string  `json:"content"`
-		ImageURL    string  `json:"image_url"`
-		CreatedAt   string  `json:"created_at"`
-		EditedAt    *string `json:"edited_at,omitempty"`
-		LikeCount   int     `json:"like_count"`
-		Liked       bool    `json:"liked"`
-	}
-
 	var comments []Comment
 	for rows.Next() {
-		var c Comment
-		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.LikeCount, &c.Liked)
-		comments = append(comments, c)
+		comments = append(comments, scanComment(rows))
 	}
-	if comments == nil { comments = []Comment{} }
+	rows.Close()
+
+	if comments == nil {
+		comments = []Comment{}
+	}
+
+	// Replies for each top-level comment
+	for i, c := range comments {
+		rrows, err := s.db.Query(commentSQL, viewerID, c.ID)
+		if err != nil { continue }
+		for rrows.Next() {
+			comments[i].Replies = append(comments[i].Replies, scanComment(rrows))
+		}
+		rrows.Close()
+		if comments[i].Replies == nil {
+			comments[i].Replies = []Comment{}
+		}
+	}
+
 	writeJSON(w, 200, map[string]any{"comments": comments})
 }
 
@@ -396,35 +424,60 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 
 	var req struct {
-		Content  string `json:"content"`
-		ImageURL string `json:"image_url"`
+		Content   string `json:"content"`
+		ImageURL  string `json:"image_url"`
+		ReplyToID string `json:"reply_to_id"` // if set, this is a reply to a comment
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Content == "" && req.ImageURL == "") {
 		writeError(w, 400, "content required")
 		return
 	}
 
-	// Inherit visibility from parent
-	var visibility, authorID string
+	// Validate the post exists and get its author/visibility
+	var visibility, postAuthorID string
 	s.db.QueryRow(`SELECT visibility, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, postID).
-		Scan(&visibility, &authorID)
-	if authorID == "" {
+		Scan(&visibility, &postAuthorID)
+	if postAuthorID == "" {
 		writeError(w, 404, "post not found")
 		return
+	}
+
+	// Determine parent: either a reply to a comment, or a top-level comment on the post
+	parentID := postID
+	var replyToAuthorID string
+	if req.ReplyToID != "" {
+		// Validate the comment being replied to is a direct child of this post (depth = 1)
+		var commentParentID string
+		s.db.QueryRow(`SELECT parent_id, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`,
+			req.ReplyToID).Scan(&commentParentID, &replyToAuthorID)
+		if commentParentID == "" {
+			writeError(w, 404, "comment not found")
+			return
+		}
+		if commentParentID != postID {
+			writeError(w, 400, "cannot reply to a reply")
+			return
+		}
+		parentID = req.ReplyToID
 	}
 
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, visibility, parent_id)
 		VALUES ($1, $2, $3, $4, $5) RETURNING id
-	`, userID, req.Content, req.ImageURL, visibility, postID).Scan(&id)
+	`, userID, req.Content, req.ImageURL, visibility, parentID).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not post comment")
 		return
 	}
 
-	if authorID != userID {
-		go s.notif.Create(authorID, userID, "post_comment", postID, "")
+	// Notify post author (if not self)
+	if postAuthorID != userID {
+		go s.notif.Create(postAuthorID, userID, "post_comment", postID, "")
+	}
+	// Notify comment author when someone replies to their comment (if different from post author and self)
+	if replyToAuthorID != "" && replyToAuthorID != userID && replyToAuthorID != postAuthorID {
+		go s.notif.Create(replyToAuthorID, userID, "comment_reply", postID, "")
 	}
 	go s.notifyMentions(req.Content, userID, postID)
 

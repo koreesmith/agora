@@ -117,6 +117,7 @@ export const groupsApi = {
   setRole:        (slug: string, userID: string, role: string) => api.patch(`/groups/${slug}/members/${userID}/role`, { role }),
   removeMember:   (slug: string, userID: string)             => api.delete(`/groups/${slug}/members/${userID}`),
   addMember:      (slug: string, username: string)           => api.post(`/groups/${slug}/members/add`, { username }),
+  memberSearch:   (slug: string, q: string)                  => api.get(`/groups/${slug}/member-search`, { params: { q } }),
   getFeed:        (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
   createPost:     (slug: string, data: { content: string, image_url?: string }) => api.post(`/groups/${slug}/posts`, data),
   // Invite links

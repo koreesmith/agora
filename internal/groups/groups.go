@@ -47,6 +47,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Patch("/groups/{slug}",                           s.UpdateGroup)
 	r.Delete("/groups/{slug}",                          s.DeleteGroup)
 	r.Get("/groups/{slug}/members",                     s.ListMembers)
+	r.Get("/groups/{slug}/member-search",               s.MemberSearch)
 	r.Post("/groups/{slug}/join",                       s.Join)
 	r.Delete("/groups/{slug}/leave",                    s.Leave)
 	r.Patch("/groups/{slug}/members/{userID}/role",     s.SetMemberRole)
@@ -85,7 +86,7 @@ type Group struct {
 
 func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
-	q := r.URL.Query().Get("q")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	filter := r.URL.Query().Get("filter")
 	limit := 20
 	offset := 0
@@ -93,72 +94,187 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		offset = p * limit
 	}
 
-	var query string
-	var args []any
+	// ── Search query: live autocomplete across all visible groups ──────────────
+	if q != "" {
+		rows, err := s.db.Query(`
+			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
+			       COALESCE(m.role,''), (m.user_id IS NOT NULL)
+			FROM community_groups g
+			LEFT JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
+			WHERE (g.name ILIKE $4 OR g.description ILIKE $4)
+			  AND (g.privacy = 'public' OR m.user_id IS NOT NULL)
+			ORDER BY
+			  (m.user_id IS NOT NULL) DESC,
+			  g.member_count DESC
+			LIMIT $2 OFFSET $3
+		`, userID, limit, offset, "%"+q+"%")
+		if err != nil {
+			writeError(w, 500, "db error"); return
+		}
+		defer rows.Close()
+		var groups []Group
+		for rows.Next() {
+			var g Group
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
+				&g.MemberRole, &g.IsMember)
+			groups = append(groups, g)
+		}
+		if groups == nil { groups = []Group{} }
+		writeJSON(w, 200, map[string]any{"groups": groups})
+		return
+	}
 
-	switch filter {
-	case "mine":
-		query = `
+	// ── My Groups (owned) ──────────────────────────────────────────────────────
+	if filter == "mine" {
+		rows, err := s.db.Query(`
 			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
 			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 			       m.role, true
 			FROM community_groups g
 			JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
 			WHERE m.role = 'owner'
-			ORDER BY g.created_at DESC LIMIT $2 OFFSET $3`
-		args = []any{userID, limit, offset}
-	case "joined":
-		query = `
+			ORDER BY g.created_at DESC LIMIT $2 OFFSET $3
+		`, userID, limit, offset)
+		if err != nil {
+			writeError(w, 500, "db error"); return
+		}
+		defer rows.Close()
+		var groups []Group
+		for rows.Next() {
+			var g Group
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
+				&g.MemberRole, &g.IsMember)
+			groups = append(groups, g)
+		}
+		if groups == nil { groups = []Group{} }
+		writeJSON(w, 200, map[string]any{"groups": groups})
+		return
+	}
+
+	// ── Joined ─────────────────────────────────────────────────────────────────
+	if filter == "joined" {
+		rows, err := s.db.Query(`
 			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
 			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 			       m.role, true
 			FROM community_groups g
 			JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
-			ORDER BY g.created_at DESC LIMIT $2 OFFSET $3`
-		args = []any{userID, limit, offset}
-	default:
-		if q != "" {
-			query = `
-				SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
-				       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
-				       COALESCE(m.role,''), (m.user_id IS NOT NULL)
-				FROM community_groups g
-				LEFT JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
-				WHERE (g.name ILIKE $4 OR g.description ILIKE $4)
-				  AND (g.privacy = 'public' OR m.user_id IS NOT NULL)
-				ORDER BY g.member_count DESC LIMIT $2 OFFSET $3`
-			args = []any{userID, limit, offset, "%" + q + "%"}
-		} else {
-			query = `
-				SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
-				       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
-				       COALESCE(m.role,''), (m.user_id IS NOT NULL)
-				FROM community_groups g
-				LEFT JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
-				WHERE g.privacy = 'public' OR m.user_id IS NOT NULL
-				ORDER BY g.member_count DESC LIMIT $2 OFFSET $3`
-			args = []any{userID, limit, offset}
+			ORDER BY g.created_at DESC LIMIT $2 OFFSET $3
+		`, userID, limit, offset)
+		if err != nil {
+			writeError(w, 500, "db error"); return
 		}
+		defer rows.Close()
+		var groups []Group
+		for rows.Next() {
+			var g Group
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
+				&g.MemberRole, &g.IsMember)
+			groups = append(groups, g)
+		}
+		if groups == nil { groups = []Group{} }
+		writeJSON(w, 200, map[string]any{"groups": groups})
+		return
 	}
 
-	rows, err := s.db.Query(query, args...)
+	// ── Discover: friends' groups first, then popular ──────────────────────────
+	// Section 1: Public groups where at least one friend is a member, user not already in
+	const friendsLimit = 10
+	friendRows, err := s.db.Query(`
+		SELECT DISTINCT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+		       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
+		       '', false,
+		       COUNT(DISTINCT cgm2.user_id) AS friend_count
+		FROM community_groups g
+		JOIN community_group_members cgm2 ON cgm2.group_id = g.id
+		JOIN friendships f ON (
+		    (f.requester_id = $1 AND f.addressee_id = cgm2.user_id)
+		    OR (f.addressee_id = $1 AND f.requester_id = cgm2.user_id)
+		) AND f.status = 'accepted'
+		WHERE g.privacy = 'public'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM community_group_members m WHERE m.group_id = g.id AND m.user_id = $1
+		  )
+		GROUP BY g.id
+		ORDER BY friend_count DESC, g.member_count DESC
+		LIMIT $2
+	`, userID, friendsLimit)
 	if err != nil {
 		writeError(w, 500, "db error"); return
 	}
-	defer rows.Close()
+	defer friendRows.Close()
 
-	var groups []Group
-	for rows.Next() {
-		var g Group
-		rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+	seenIDs := map[string]bool{}
+	type DiscoverGroup struct {
+		Group
+		FriendCount int `json:"friend_count"`
+	}
+	var friendGroups []DiscoverGroup
+	for friendRows.Next() {
+		var g DiscoverGroup
+		friendRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
 			&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
-			&g.MemberRole, &g.IsMember)
-		groups = append(groups, g)
+			&g.MemberRole, &g.IsMember, &g.FriendCount)
+		seenIDs[g.ID] = true
+		friendGroups = append(friendGroups, g)
 	}
-	if groups == nil {
-		groups = []Group{}
+	if friendGroups == nil { friendGroups = []DiscoverGroup{} }
+
+	// Section 2: Popular public groups user isn't in, excluding already shown
+	// Build exclusion list
+	excludeArgs := []any{userID}
+	excludePlaceholders := ""
+	if len(seenIDs) > 0 {
+		phs := []string{}
+		for id := range seenIDs {
+			excludeArgs = append(excludeArgs, id)
+			phs = append(phs, fmt.Sprintf("$%d", len(excludeArgs)))
+		}
+		excludePlaceholders = "AND g.id NOT IN (" + strings.Join(phs, ",") + ")"
 	}
-	writeJSON(w, 200, map[string]any{"groups": groups})
+	popularLimit := 20 - len(friendGroups)
+	if popularLimit < 5 { popularLimit = 5 }
+	excludeArgs = append(excludeArgs, popularLimit)
+	limitPlaceholder := fmt.Sprintf("$%d", len(excludeArgs))
+
+	popularQuery := fmt.Sprintf(`
+		SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+		       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
+		       '', false, 0
+		FROM community_groups g
+		WHERE g.privacy = 'public'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM community_group_members m WHERE m.group_id = g.id AND m.user_id = $1
+		  )
+		  %s
+		ORDER BY g.member_count DESC
+		LIMIT %s
+	`, excludePlaceholders, limitPlaceholder)
+
+	popularRows, err := s.db.Query(popularQuery, excludeArgs...)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer popularRows.Close()
+
+	var popularGroups []DiscoverGroup
+	for popularRows.Next() {
+		var g DiscoverGroup
+		popularRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+			&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
+			&g.MemberRole, &g.IsMember, &g.FriendCount)
+		popularGroups = append(popularGroups, g)
+	}
+	if popularGroups == nil { popularGroups = []DiscoverGroup{} }
+
+	writeJSON(w, 200, map[string]any{
+		"friend_groups":  friendGroups,
+		"popular_groups": popularGroups,
+	})
 }
 
 func (s *Service) GetGroup(w http.ResponseWriter, r *http.Request) {
@@ -828,6 +944,69 @@ func (s *Service) RejectRequest(w http.ResponseWriter, r *http.Request) {
 
 	s.notif.Create(targetUserID, callerID, "group_join_rejected", "", groupID)
 	writeJSON(w, 200, map[string]string{"message": "rejected"})
+}
+
+// ── Member Search (autocomplete for Add Member) ───────────────────────────────
+
+func (s *Service) MemberSearch(w http.ResponseWriter, r *http.Request) {
+	callerID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	if !s.hasRole(slug, callerID, "owner", "mod") {
+		writeError(w, 403, "forbidden"); return
+	}
+	if q == "" {
+		writeJSON(w, 200, map[string]any{"users": []any{}}); return
+	}
+
+	var groupID string
+	s.db.QueryRow(`SELECT id FROM community_groups WHERE slug = $1`, slug).Scan(&groupID)
+	if groupID == "" {
+		writeError(w, 404, "group not found"); return
+	}
+
+	rows, err := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url,
+		       EXISTS(
+		           SELECT 1 FROM friendships f
+		           WHERE ((f.requester_id = $1 AND f.addressee_id = u.id)
+		               OR (f.addressee_id = $1 AND f.requester_id = u.id))
+		           AND f.status = 'accepted'
+		       ) AS is_friend
+		FROM users u
+		WHERE u.id != $1
+		  AND u.deletion_scheduled_at IS NULL
+		  AND u.email_verified = true
+		  AND u.is_remote = false
+		  AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM community_group_members m
+		      WHERE m.group_id = $3 AND m.user_id = u.id
+		  )
+		ORDER BY is_friend DESC, u.username
+		LIMIT 8
+	`, callerID, "%"+q+"%", groupID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+
+	type UserSuggestion struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+		IsFriend    bool   `json:"is_friend"`
+	}
+	var users []UserSuggestion
+	for rows.Next() {
+		var u UserSuggestion
+		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.IsFriend)
+		users = append(users, u)
+	}
+	if users == nil { users = []UserSuggestion{} }
+	writeJSON(w, 200, map[string]any{"users": users})
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

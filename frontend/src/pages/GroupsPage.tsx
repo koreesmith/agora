@@ -1,22 +1,40 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { groupsApi } from '../api'
-import { Users, Lock, Globe, Plus, Search } from 'lucide-react'
+import { Users, Lock, Globe, Plus, Search, TrendingUp, UserCheck } from 'lucide-react'
 import CreateGroupModal from '../components/groups/CreateGroupModal'
 
 export default function GroupsPage() {
   const [filter, setFilter] = useState<'discover'|'joined'|'mine'>('discover')
-  const [q, setQ] = useState('')
-  const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const qc = useQueryClient()
+  const debounceTimer = useRef<ReturnType<typeof setTimeout>>()
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['groups', filter, search],
-    queryFn: () => groupsApi.list({ filter: filter === 'discover' ? '' : filter, q: search }).then(r => r.data),
+  // Debounce search input — fires 300ms after user stops typing
+  useEffect(() => {
+    clearTimeout(debounceTimer.current)
+    debounceTimer.current = setTimeout(() => setDebouncedSearch(searchInput), 300)
+    return () => clearTimeout(debounceTimer.current)
+  }, [searchInput])
+
+  const isSearching = debouncedSearch.trim().length > 0
+
+  const { data: searchData, isFetching: searchFetching } = useQuery({
+    queryKey: ['groups-search', debouncedSearch],
+    queryFn: () => groupsApi.list({ q: debouncedSearch }).then(r => r.data),
+    enabled: isSearching,
   })
-  const groups = data?.groups ?? []
+
+  const { data: browseData, isLoading: browseLoading } = useQuery({
+    queryKey: ['groups-browse', filter],
+    queryFn: () => groupsApi.list({ filter: filter === 'discover' ? undefined : filter }).then(r => r.data),
+    enabled: !isSearching,
+  })
+
+  const refresh = () => qc.invalidateQueries({ queryKey: ['groups-browse'] })
 
   const filters = [
     { id: 'discover', label: 'Discover' },
@@ -33,63 +51,134 @@ export default function GroupsPage() {
         </button>
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
-        {filters.map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id as any)}
-            className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === f.id ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
-            {f.label}
-          </button>
-        ))}
+      {/* Search bar — always visible */}
+      <div className="relative">
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-agora-400" />
+        <input className="input pl-9 text-sm" placeholder="Search groups…"
+          value={searchInput} onChange={e => setSearchInput(e.target.value)} />
+        {searchFetching && (
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-agora-400 animate-pulse">searching…</span>
+        )}
       </div>
 
-      {/* Search */}
-      {filter === 'discover' && (
-        <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-agora-400" />
-          <input className="input pl-9 text-sm" placeholder="Search groups…"
-            value={q} onChange={e => setQ(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && setSearch(q)} />
-        </div>
+      {isSearching ? (
+        <SearchResults groups={searchData?.groups ?? []} loading={searchFetching} onJoinLeave={refresh} />
+      ) : (
+        <>
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            {filters.map(f => (
+              <button key={f.id} onClick={() => setFilter(f.id as any)}
+                className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === f.id ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {browseLoading && <div className="text-center py-8 text-agora-400">Loading…</div>}
+
+          {!browseLoading && filter === 'discover' && (
+            <DiscoverView data={browseData} onJoinLeave={refresh} />
+          )}
+
+          {!browseLoading && filter !== 'discover' && (
+            <BrowseList groups={browseData?.groups ?? []} filter={filter} onJoinLeave={refresh} onCreateClick={() => setShowCreate(true)} />
+          )}
+        </>
       )}
 
-      {isLoading && <div className="text-center py-8 text-agora-400">Loading…</div>}
-
-      {!isLoading && groups.length === 0 && (
-        <div className="card p-10 text-center text-agora-400 space-y-2">
-          <Users size={32} className="mx-auto opacity-40" />
-          {filter === 'discover' && <><p className="font-medium">No groups found</p><p className="text-sm">Be the first — create a group!</p></>}
-          {filter === 'joined'   && <><p className="font-medium">You haven't joined any groups yet</p><p className="text-sm">Discover groups to get started.</p></>}
-          {filter === 'mine'     && <><p className="font-medium">You haven't created any groups yet</p><button onClick={() => setShowCreate(true)} className="btn-primary text-sm mt-2">Create a group</button></>}
-        </div>
+      {showCreate && (
+        <CreateGroupModal onClose={() => setShowCreate(false)} onCreated={() => { refresh(); setShowCreate(false) }} />
       )}
-
-      <div className="space-y-3">
-        {groups.map((g: any) => <GroupCard key={g.id} group={g} onJoinLeave={() => qc.invalidateQueries({ queryKey: ['groups'] })} />)}
-      </div>
-
-      {showCreate && <CreateGroupModal onClose={() => setShowCreate(false)} onCreated={(slug) => { qc.invalidateQueries({ queryKey: ['groups'] }); setShowCreate(false) }} />}
     </div>
   )
 }
 
-function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => void }) {
-  const qc = useQueryClient()
+function SearchResults({ groups, loading, onJoinLeave }: { groups: any[], loading: boolean, onJoinLeave: () => void }) {
+  if (loading) return <div className="text-center py-8 text-agora-400">Searching…</div>
+  if (groups.length === 0) return (
+    <div className="card p-10 text-center text-agora-400 space-y-1">
+      <Search size={28} className="mx-auto opacity-40" />
+      <p className="font-medium">No groups found</p>
+      <p className="text-sm">Try different keywords.</p>
+    </div>
+  )
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-agora-400 font-medium uppercase tracking-wide px-1">
+        {groups.length} result{groups.length !== 1 ? 's' : ''}
+      </p>
+      {groups.map((g: any) => <GroupCard key={g.id} group={g} onJoinLeave={onJoinLeave} />)}
+    </div>
+  )
+}
+
+function DiscoverView({ data, onJoinLeave }: { data: any, onJoinLeave: () => void }) {
+  const friendGroups: any[] = data?.friend_groups ?? []
+  const popularGroups: any[] = data?.popular_groups ?? []
+
+  if (friendGroups.length === 0 && popularGroups.length === 0) return (
+    <div className="card p-10 text-center text-agora-400 space-y-2">
+      <Users size={32} className="mx-auto opacity-40" />
+      <p className="font-medium">No groups to discover yet</p>
+      <p className="text-sm">Be the first — create a group!</p>
+    </div>
+  )
+
+  return (
+    <div className="space-y-5">
+      {friendGroups.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-agora-500 flex items-center gap-1.5 px-1">
+            <UserCheck size={14} /> Groups your friends are in
+          </h2>
+          {friendGroups.map((g: any) => (
+            <GroupCard key={g.id} group={g} onJoinLeave={onJoinLeave} friendCount={g.friend_count} />
+          ))}
+        </section>
+      )}
+
+      {popularGroups.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-agora-500 flex items-center gap-1.5 px-1">
+            <TrendingUp size={14} /> Popular groups
+          </h2>
+          {popularGroups.map((g: any) => (
+            <GroupCard key={g.id} group={g} onJoinLeave={onJoinLeave} />
+          ))}
+        </section>
+      )}
+    </div>
+  )
+}
+
+function BrowseList({ groups, filter, onJoinLeave, onCreateClick }: {
+  groups: any[], filter: string, onJoinLeave: () => void, onCreateClick: () => void
+}) {
+  if (groups.length === 0) return (
+    <div className="card p-10 text-center text-agora-400 space-y-2">
+      <Users size={32} className="mx-auto opacity-40" />
+      {filter === 'joined' && <><p className="font-medium">You haven't joined any groups yet</p><p className="text-sm">Discover groups to get started.</p></>}
+      {filter === 'mine'   && <><p className="font-medium">You haven't created any groups yet</p><button onClick={onCreateClick} className="btn-primary text-sm mt-2">Create a group</button></>}
+    </div>
+  )
+  return (
+    <div className="space-y-3">
+      {groups.map((g: any) => <GroupCard key={g.id} group={g} onJoinLeave={onJoinLeave} />)}
+    </div>
+  )
+}
+
+function GroupCard({ group: g, onJoinLeave, friendCount }: {
+  group: any, onJoinLeave: () => void, friendCount?: number
+}) {
   const [requestSent, setRequestSent] = useState(false)
 
-  const handleJoin = async () => {
-    await groupsApi.join(g.slug)
-    onJoinLeave()
-  }
+  const handleJoin = async () => { await groupsApi.join(g.slug); onJoinLeave() }
   const handleLeave = async () => {
     if (!confirm(`Leave "${g.name}"?`)) return
-    await groupsApi.leave(g.slug)
-    onJoinLeave()
+    await groupsApi.leave(g.slug); onJoinLeave()
   }
-  const handleRequest = async () => {
-    await groupsApi.requestJoin(g.slug)
-    setRequestSent(true)
-  }
+  const handleRequest = async () => { await groupsApi.requestJoin(g.slug); setRequestSent(true) }
 
   return (
     <div className="card overflow-hidden">
@@ -102,16 +191,20 @@ function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => v
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-2">
-            <div>
+            <div className="min-w-0">
               <Link to={`/groups/${g.slug}`} className="font-semibold hover:underline">{g.name}</Link>
-              <div className="flex items-center gap-1.5 text-xs text-agora-400 mt-0.5">
+              <div className="flex items-center gap-1.5 text-xs text-agora-400 mt-0.5 flex-wrap">
                 {g.privacy === 'private' ? <Lock size={11} /> : <Globe size={11} />}
                 <span className="capitalize">{g.privacy}</span>
                 <span>·</span>
                 <Users size={11} />
                 <span>{g.member_count} {g.member_count === 1 ? 'member' : 'members'}</span>
-                <span>·</span>
-                <span>{g.post_count} posts</span>
+                {g.post_count > 0 && <><span>·</span><span>{g.post_count} posts</span></>}
+                {friendCount != null && friendCount > 0 && (
+                  <span className="text-agora-600 dark:text-agora-400 font-medium">
+                    · {friendCount} {friendCount === 1 ? 'friend' : 'friends'} here
+                  </span>
+                )}
               </div>
             </div>
             <div className="flex-shrink-0">
@@ -127,11 +220,9 @@ function GroupCard({ group: g, onJoinLeave }: { group: any, onJoinLeave: () => v
           </div>
           {g.description && <p className="text-sm text-agora-500 mt-1.5 line-clamp-2">{g.description}</p>}
           {g.is_member && (
-            <div className="mt-2">
-              <Link to={`/groups/${g.slug}`} className="text-xs text-agora-600 dark:text-agora-400 hover:underline font-medium">
-                {g.member_role === 'owner' ? '👑 Owner' : g.member_role === 'mod' ? '🛡 Moderator' : 'Member'} · View group →
-              </Link>
-            </div>
+            <Link to={`/groups/${g.slug}`} className="inline-block mt-2 text-xs text-agora-600 dark:text-agora-400 hover:underline font-medium">
+              {g.member_role === 'owner' ? '👑 Owner' : g.member_role === 'mod' ? '🛡 Moderator' : 'Member'} · View group →
+            </Link>
           )}
         </div>
       </div>

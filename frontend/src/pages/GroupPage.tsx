@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
 import { groupsApi, feedApi } from '../api'
@@ -345,7 +345,6 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
   const [description, setDescription] = useState(group.description)
   const [privacy, setPrivacy] = useState(group.privacy)
   const [msg, setMsg] = useState('')
-  const [addUsername, setAddUsername] = useState('')
   const [addMsg, setAddMsg] = useState('')
   const [copiedToken, setCopiedToken] = useState('')
 
@@ -394,17 +393,7 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
   })
 
   // Direct add
-  const addMember = useMutation({
-    mutationFn: () => groupsApi.addMember(slug, addUsername),
-    onSuccess: () => {
-      setAddMsg('Member added!')
-      setAddUsername('')
-      qc.invalidateQueries({ queryKey: ['group-members', slug] })
-      qc.invalidateQueries({ queryKey: ['group', slug] })
-      setTimeout(() => setAddMsg(''), 2000)
-    },
-    onError: (e: any) => setAddMsg(e.response?.data?.error || 'Could not add member'),
-  })
+  // (handled by AddMemberTypeahead component below)
 
   return (
     <div className="space-y-4">
@@ -475,14 +464,12 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
       <div className="card p-4 space-y-3">
         <h3 className="font-semibold flex items-center gap-2"><UserPlus size={16} /> Add Member Directly</h3>
         {addMsg && <p className={`text-sm ${addMsg.includes('added') ? 'text-green-600' : 'text-red-500'}`}>{addMsg}</p>}
-        <div className="flex gap-2">
-          <input className="input flex-1 text-sm" placeholder="Username…"
-            value={addUsername} onChange={e => setAddUsername(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addUsername.trim() && addMember.mutate()} />
-          <button onClick={() => addMember.mutate()} disabled={!addUsername.trim() || addMember.isPending} className="btn-primary text-sm">
-            {addMember.isPending ? '…' : 'Add'}
-          </button>
-        </div>
+        <AddMemberTypeahead slug={slug} onAdded={() => {
+          qc.invalidateQueries({ queryKey: ['group-members', slug] })
+          qc.invalidateQueries({ queryKey: ['group', slug] })
+          setAddMsg('Member added!')
+          setTimeout(() => setAddMsg(''), 2000)
+        }} onError={(e) => setAddMsg(e)} />
       </div>
 
       {/* Group settings */}
@@ -517,6 +504,136 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Add Member Typeahead ───────────────────────────────────────────────────────
+
+function AddMemberTypeahead({ slug, onAdded, onError }: {
+  slug: string, onAdded: () => void, onError: (msg: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const [selected, setSelected] = useState<{ username: string, display_name: string, avatar_url: string } | null>(null)
+  const [open, setOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const debounceTimer = useRef<ReturnType<typeof setTimeout>>()
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    clearTimeout(debounceTimer.current)
+    debounceTimer.current = setTimeout(() => setDebouncedQuery(query), 250)
+    return () => clearTimeout(debounceTimer.current)
+  }, [query])
+
+  const { data, isFetching } = useQuery({
+    queryKey: ['group-member-search', slug, debouncedQuery],
+    queryFn: () => groupsApi.memberSearch(slug, debouncedQuery).then(r => r.data),
+    enabled: debouncedQuery.length >= 1 && !selected,
+  })
+  const suggestions: any[] = data?.users ?? []
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const handleSelect = (u: any) => {
+    setSelected(u)
+    setQuery(u.display_name || u.username)
+    setOpen(false)
+  }
+
+  const handleAdd = async () => {
+    if (!selected) return
+    setAdding(true)
+    try {
+      await groupsApi.addMember(slug, selected.username)
+      onAdded()
+      setSelected(null)
+      setQuery('')
+    } catch (e: any) {
+      onError(e.response?.data?.error || 'Could not add member')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const handleInputChange = (val: string) => {
+    setQuery(val)
+    setSelected(null)
+    setOpen(true)
+  }
+
+  return (
+    <div className="flex gap-2" ref={containerRef}>
+      <div className="relative flex-1">
+        <input
+          className="input text-sm w-full"
+          placeholder="Search by name or username…"
+          value={query}
+          onChange={e => handleInputChange(e.target.value)}
+          onFocus={() => { if (query && !selected) setOpen(true) }}
+          onKeyDown={e => { if (e.key === 'Escape') setOpen(false) }}
+          autoComplete="off"
+        />
+        {selected && (
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {selected.avatar_url
+              ? <img src={selected.avatar_url} className="w-5 h-5 rounded-full object-cover" alt="" />
+              : null}
+            <button onClick={() => { setSelected(null); setQuery('') }}
+              className="text-agora-400 hover:text-agora-600 ml-1">
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
+        {open && !selected && debouncedQuery.length >= 1 && (
+          <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-white dark:bg-agora-800 rounded-lg shadow-lg border border-agora-100 dark:border-agora-700 overflow-hidden max-h-52 overflow-y-auto">
+            {isFetching && (
+              <div className="px-3 py-2 text-xs text-agora-400">Searching…</div>
+            )}
+            {!isFetching && suggestions.length === 0 && (
+              <div className="px-3 py-2 text-xs text-agora-400">No users found</div>
+            )}
+            {suggestions.map((u: any) => (
+              <button key={u.id} onMouseDown={() => handleSelect(u)}
+                className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-agora-50 dark:hover:bg-agora-700 text-left transition-colors">
+                <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-600 overflow-hidden flex-shrink-0">
+                  {u.avatar_url
+                    ? <img src={u.avatar_url} alt="" className="w-full h-full object-cover" />
+                    : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">
+                        {(u.display_name || u.username)[0].toUpperCase()}
+                      </span>}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{u.display_name || u.username}</p>
+                  <p className="text-xs text-agora-400 truncate">@{u.username}{u.is_friend ? ' · friend' : ''}</p>
+                </div>
+                {u.is_friend && (
+                  <span className="text-xs text-agora-500 flex-shrink-0">👥</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={handleAdd}
+        disabled={!selected || adding}
+        className="btn-primary text-sm px-4 flex-shrink-0"
+      >
+        {adding ? '…' : 'Add'}
+      </button>
     </div>
   )
 }

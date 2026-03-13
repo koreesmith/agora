@@ -311,4 +311,6 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_cgjr_group ON community_group_join_requests(group_id, status)`,
 	`CREATE INDEX IF NOT EXISTS idx_cgjr_user  ON community_group_join_requests(user_id)`,
+
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`,
 }

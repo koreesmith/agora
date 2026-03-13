@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Heart } from 'lucide-react'
+import { Trash2, Send, Heart, Pencil } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 
@@ -69,43 +69,17 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
   return (
     <div className="mt-4 pt-4 border-t border-agora-100 dark:border-agora-700 space-y-3">
       {comments.map((c: any) => (
-        <div key={c.id} className="flex gap-2">
-          <Link to={`/profile/${c.username}`} className="flex-shrink-0">
-            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
-              {c.avatar_url
-                ? <img src={c.avatar_url} alt="" className="w-full h-full object-cover" />
-                : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
-                    {(c.display_name || c.username)[0].toUpperCase()}
-                  </span>}
-            </div>
-          </Link>
-          <div className="flex-1 min-w-0">
-            <div className="bg-agora-50 dark:bg-agora-700/50 rounded-xl px-3 py-2">
-              <Link to={`/profile/${c.username}`} className="text-xs font-semibold text-agora-800 dark:text-agora-200 hover:underline">
-                {c.display_name || c.username}
-              </Link>
-              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
-              {c.image_url && <img src={c.image_url} alt="" className="mt-1 rounded-lg max-h-48 object-cover" />}
-            </div>
-            <div className="flex items-center gap-3 mt-1 px-1">
-              <span className="text-xs text-agora-400">{formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}</span>
-
-              {/* Like button */}
-              <button
-                onClick={() => likeComment.mutate({ id: c.id, liked: c.liked })}
-                className={`flex items-center gap-1 text-xs transition-colors ${c.liked ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}>
-                <Heart size={12} className={c.liked ? 'fill-current' : ''} />
-                {c.like_count > 0 && <span>{c.like_count}</span>}
-              </button>
-
-              {(c.author_id === user?.id || user?.id === postAuthorId || user?.role === 'admin') && (
-                <button onClick={() => del.mutate(c.id)} className="text-xs text-agora-300 hover:text-red-500 transition-colors">
-                  <Trash2 size={12} />
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <CommentRow
+          key={c.id}
+          comment={c}
+          postId={postId}
+          postAuthorId={postAuthorId}
+          currentUserId={user?.id}
+          currentUserRole={user?.role}
+          onDelete={() => del.mutate(c.id)}
+          onLike={() => likeComment.mutate({ id: c.id, liked: c.liked })}
+          onEdited={() => qc.invalidateQueries({ queryKey: ['comments', postId] })}
+        />
       ))}
 
       {/* New comment input */}
@@ -131,6 +105,108 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
           <button onClick={() => create.mutate()} disabled={!text.trim() || create.isPending} className="btn-primary px-3 py-1.5">
             <Send size={14} />
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Comment Row ────────────────────────────────────────────────────────────────
+
+function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUserRole, onDelete, onLike, onEdited }: {
+  comment: any
+  postId: string
+  postAuthorId: string
+  currentUserId?: string
+  currentUserRole?: string
+  onDelete: () => void
+  onLike: () => void
+  onEdited: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [editContent, setEditContent] = useState(c.content)
+
+  const editMutation = useMutation({
+    mutationFn: () => feedApi.editComment(postId, c.id, editContent),
+    onSuccess: () => { setEditing(false); onEdited() },
+  })
+
+  const isOwn = c.author_id === currentUserId
+  const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
+
+  return (
+    <div className="flex gap-2">
+      <Link to={`/profile/${c.username}`} className="flex-shrink-0">
+        <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+          {c.avatar_url
+            ? <img src={c.avatar_url} alt="" className="w-full h-full object-cover" />
+            : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
+                {(c.display_name || c.username)[0].toUpperCase()}
+              </span>}
+        </div>
+      </Link>
+      <div className="flex-1 min-w-0">
+        <div className="bg-agora-50 dark:bg-agora-700/50 rounded-xl px-3 py-2">
+          <Link to={`/profile/${c.username}`} className="text-xs font-semibold text-agora-800 dark:text-agora-200 hover:underline">
+            {c.display_name || c.username}
+          </Link>
+          {editing ? (
+            <div className="mt-1 space-y-1.5">
+              <textarea
+                className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400"
+                rows={2}
+                value={editContent}
+                onChange={e => setEditContent(e.target.value)}
+                autoFocus
+              />
+              <div className="flex gap-1.5 justify-end">
+                <button onClick={() => setEditing(false)} className="text-xs text-agora-400 hover:text-agora-600 px-2 py-0.5">Cancel</button>
+                <button
+                  onClick={() => editMutation.mutate()}
+                  disabled={editMutation.isPending || !editContent.trim()}
+                  className="text-xs bg-agora-600 text-white rounded-md px-2 py-0.5 hover:bg-agora-700 disabled:opacity-50"
+                >
+                  {editMutation.isPending ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
+              {c.image_url && <img src={c.image_url} alt="" className="mt-1 rounded-lg max-h-48 object-cover" />}
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-1 px-1">
+          <span className="text-xs text-agora-400">
+            {formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}
+          </span>
+          {c.edited_at && (
+            <span className="text-xs text-agora-400 italic">edited</span>
+          )}
+
+          <button
+            onClick={onLike}
+            className={`flex items-center gap-1 text-xs transition-colors ${c.liked ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}>
+            <Heart size={12} className={c.liked ? 'fill-current' : ''} />
+            {c.like_count > 0 && <span>{c.like_count}</span>}
+          </button>
+
+          {isOwn && !editing && (
+            <button
+              onClick={() => { setEditing(true); setEditContent(c.content) }}
+              className="text-xs text-agora-300 hover:text-agora-500 transition-colors"
+              title="Edit comment"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
+
+          {canDelete && (
+            <button onClick={onDelete} className="text-xs text-agora-300 hover:text-red-500 transition-colors">
+              <Trash2 size={12} />
+            </button>
+          )}
         </div>
       </div>
     </div>

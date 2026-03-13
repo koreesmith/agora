@@ -42,12 +42,14 @@ export const feedApi = {
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
+  editPost:      (id: string, data: { content?: string, image_url?: string }) => api.patch(`/posts/${id}`, data),
   likePost:      (id: string)              => api.post(`/posts/${id}/like`),
   unlikePost:    (id: string)              => api.delete(`/posts/${id}/like`),
   repost:        (id: string, data?: any)  => api.post(`/posts/${id}/repost`, data || {}),
   getComments:   (id: string)              => api.get(`/posts/${id}/comments`),
   createComment: (id: string, data: any)  => api.post(`/posts/${id}/comments`, data),
   deleteComment: (postId: string, commentId: string) => api.delete(`/posts/${postId}/comments/${commentId}`),
+  editComment:   (postId: string, commentId: string, content: string) => api.patch(`/posts/${postId}/comments/${commentId}`, { content }),
   getUserPosts:  (username: string, params?: any) => api.get(`/users/${username}/posts`, { params }),
   uploadMedia:   (file: File, category = 'posts') => {
     const form = new FormData()

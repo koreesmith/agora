@@ -16,6 +16,9 @@ interface Post {
   content: string
   image_url: string
   visibility: string
+  group_id?: string
+  group_name?: string
+  group_slug?: string
   repost_of_id?: string
   repost_author_username?: string
   repost_author_display_name?: string
@@ -78,7 +81,19 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const canDelete = isOwn || user?.role === 'admin' || user?.role === 'moderator'
 
   return (
-    <div className="card p-4">
+    <div className={`card p-4 ${post.group_slug ? 'border-l-4 border-agora-400 dark:border-agora-500' : ''}`}>
+      {/* Group banner */}
+      {post.group_slug && (
+        <Link
+          to={`/groups/${post.group_slug}`}
+          className="flex items-center gap-1.5 text-xs font-medium text-agora-600 dark:text-agora-400 bg-agora-50 dark:bg-agora-700/50 rounded-lg px-2.5 py-1.5 mb-3 hover:bg-agora-100 dark:hover:bg-agora-700 transition-colors w-fit"
+        >
+          <Users size={12} />
+          <span>{post.group_name}</span>
+          <span className="text-agora-400 dark:text-agora-500">· View in group →</span>
+        </Link>
+      )}
+
       {/* Repost header */}
       {post.repost_of_id && (
         <div className="flex items-center gap-1.5 text-xs text-agora-500 dark:text-agora-400 mb-3">

@@ -58,7 +58,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		// List feed: posts from members of a specific friend list owned by this user
 		rows, err = s.db.Query(`
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-			       p.content, p.image_url, p.visibility, p.group_id,
+			       p.content, p.image_url, p.visibility, p.community_group_id,
+			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
 			       p.created_at, p.updated_at, p.edited_at,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
@@ -72,6 +73,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -85,13 +87,21 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			    OR p.visibility = 'friends'
 			    OR (p.visibility = 'group' AND p.group_id = $4)
 			  )
+			  AND (
+			    p.community_group_id IS NULL
+			    OR EXISTS (
+			      SELECT 1 FROM community_group_members cgm
+			      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
+			    )
+			  )
 			ORDER BY p.created_at DESC
 			LIMIT $2 OFFSET $3
 		`, userID, limit, offset, listID)
 	} else {
 		rows, err = s.db.Query(`
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-			       p.content, p.image_url, p.visibility, p.group_id,
+			       p.content, p.image_url, p.visibility, p.community_group_id,
+			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
 			       p.created_at, p.updated_at, p.edited_at,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
@@ -105,6 +115,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -115,6 +126,13 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
 			          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
 			      AND f.status = 'accepted'
+			    )
+			  )
+			  AND (
+			    p.community_group_id IS NULL
+			    OR EXISTS (
+			      SELECT 1 FROM community_group_members cgm
+			      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
 			    )
 			  )
 			ORDER BY p.created_at DESC
@@ -165,7 +183,8 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.group_id,
+		       p.content, p.image_url, p.visibility, p.community_group_id,
+			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
 		       p.created_at, p.updated_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -176,6 +195,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND `+visFilter+`
 		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
@@ -219,7 +239,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, group_id)
+		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id)
 		VALUES ($1, $2, $3, $4, $5) RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, groupID).Scan(&id)
 	if err != nil {
@@ -237,7 +257,8 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.group_id,
+		       p.content, p.image_url, p.visibility, p.community_group_id,
+			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
 		       p.created_at, p.updated_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -251,6 +272,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
 		LEFT JOIN users rp_u ON rp_u.id = rp.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
 	`, id, viewerID)
 	if err != nil {
@@ -591,6 +613,8 @@ type Post struct {
 	ImageURL       string  `json:"image_url"`
 	Visibility     string  `json:"visibility"`
 	GroupID        *string `json:"group_id"`
+	GroupName      *string `json:"group_name,omitempty"`
+	GroupSlug      *string `json:"group_slug,omitempty"`
 	RepostOfID     *string `json:"repost_of_id"`
 	IsRemote       bool    `json:"is_remote"`
 	RemoteInstance string  `json:"remote_instance,omitempty"`
@@ -620,7 +644,7 @@ func scanPosts(rows interface {
 		var p Post
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
-			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID,
+			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,

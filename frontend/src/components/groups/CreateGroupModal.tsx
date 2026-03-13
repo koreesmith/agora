@@ -42,7 +42,7 @@ export default function CreateGroupModal({ onClose, onCreated }: { onClose: () =
           <div>
             <label className="label">Privacy</label>
             <div className="grid grid-cols-2 gap-2 mt-1">
-              {([['public', Globe, 'Public', 'Anyone can find and join'], ['private', Lock, 'Private', 'Invite-only']] as const).map(([val, Icon, label, desc]) => (
+              {([['public', Globe, 'Public', 'Anyone can find and join'], ['private', Lock, 'Private', 'Members only — content is hidden from non-members']] as const).map(([val, Icon, label, desc]) => (
                 <button key={val} onClick={() => setPrivacy(val)}
                   className={`flex flex-col items-start p-3 rounded-lg border-2 transition-colors text-left ${privacy === val ? 'border-agora-600 bg-agora-50 dark:bg-agora-700' : 'border-agora-200 dark:border-agora-600 hover:border-agora-300'}`}>
                   <div className="flex items-center gap-1.5 font-medium text-sm"><Icon size={14} />{label}</div>

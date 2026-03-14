@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil } from 'lucide-react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { feedApi } from '../../api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
@@ -20,7 +20,8 @@ interface Post {
   content: string
   image_url: string
   visibility: string
-  group_id?: string
+  group_id?: string        // community group id
+  friend_list_id?: string  // friend list id (when visibility=group)
   group_name?: string
   group_slug?: string
   repost_of_id?: string
@@ -53,6 +54,16 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReport, setShowReport] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editContent, setEditContent] = useState(post.content)
+  const [editVisibility, setEditVisibility] = useState(post.visibility)
+  const [editFriendListId, setEditFriendListId] = useState(post.friend_list_id || '')
+
+  // Only fetch friend lists when the edit UI is open
+  const { data: groupsData } = useQuery({
+    queryKey: ['friend-groups'],
+    queryFn: () => friendsApi.listGroups().then(r => r.data),
+    enabled: editing && !post.group_id, // don't fetch for community group posts
+  })
+  const friendLists: any[] = groupsData?.groups || []
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
 
@@ -67,7 +78,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   })
 
   const edit = useMutation({
-    mutationFn: () => feedApi.editPost(post.id, { content: editContent }),
+    mutationFn: () => feedApi.editPost(post.id, {
+      content: editContent,
+      visibility: editVisibility,
+      friend_list_id: editVisibility === 'group' ? editFriendListId : undefined,
+    }),
     onSuccess: () => { setEditing(false); invalidate() },
   })
 
@@ -150,7 +165,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
                   onBlur={() => setShowMenu(false)}>
                   {isOwn && !post.repost_of_id && (
-                    <button onClick={() => { setEditing(true); setEditContent(post.content); setShowMenu(false) }}
+                    <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setShowMenu(false) }}
                       className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
                       <Pencil size={14} /> Edit
                     </button>
@@ -182,11 +197,53 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onChange={e => setEditContent(e.target.value)}
                 autoFocus
               />
+              {/* Visibility picker — hidden for community group posts */}
+              {!post.group_id && (
+                <div className="space-y-1.5">
+                  <div className="flex gap-1.5">
+                    {([
+                      ['public',  'public',  <Globe size={12} />,  'Public'],
+                      ['friends', 'friends', <Users size={12} />,  'Friends'],
+                      ['group',   'group',   <Lock  size={12} />,  'Friend List'],
+                      ['private', 'private', <Lock  size={12} />,  'Private'],
+                    ] as [string, string, React.ReactNode, string][]).map(([key, val, icon, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setEditVisibility(val)}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-xs border transition-colors ${
+                          editVisibility === val
+                            ? 'border-agora-600 bg-agora-50 dark:bg-agora-700 text-agora-700 dark:text-agora-200'
+                            : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400'
+                        }`}
+                      >
+                        {icon} {label}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Friend list selector — shown when visibility=group */}
+                  {editVisibility === 'group' && (
+                    friendLists.length > 0
+                      ? <select
+                          value={editFriendListId}
+                          onChange={e => setEditFriendListId(e.target.value)}
+                          className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 w-full focus:outline-none"
+                        >
+                          <option value="">Select a list…</option>
+                          {friendLists.map((g: any) => (
+                            <option key={g.id} value={g.id}>{g.name}</option>
+                          ))}
+                        </select>
+                      : <p className="text-xs text-agora-400">
+                          No friend lists yet — <Link to="/friends" className="underline">create one</Link>
+                        </p>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2 justify-end">
                 <button onClick={() => setEditing(false)} className="btn-secondary text-xs py-1 px-3">Cancel</button>
                 <button
                   onClick={() => edit.mutate()}
-                  disabled={edit.isPending || !editContent.trim()}
+                  disabled={edit.isPending || (!editContent.trim() && !post.image_url) || (editVisibility === 'group' && !editFriendListId)}
                   className="btn-primary text-xs py-1 px-3"
                 >
                   {edit.isPending ? 'Saving…' : 'Save'}

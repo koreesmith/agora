@@ -70,7 +70,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		// List feed: posts from members of a specific friend list owned by this user
 		rows, err = s.db.Query(`
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-			       p.content, p.image_url, p.visibility, p.community_group_id,
+			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
 			       p.created_at, p.updated_at, p.edited_at,
@@ -112,7 +112,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	} else {
 		rows, err = s.db.Query(`
 			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-			       p.content, p.image_url, p.visibility, p.community_group_id,
+			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
 			       p.created_at, p.updated_at, p.edited_at,
@@ -195,7 +195,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.community_group_id,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
 		       p.created_at, p.updated_at, p.edited_at,
@@ -360,7 +360,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	// Access granted — run the full query
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.community_group_id,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
 		       p.created_at, p.updated_at, p.edited_at,
@@ -665,14 +665,34 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Content  *string `json:"content"`
-		ImageURL *string `json:"image_url"`
+		Content      *string `json:"content"`
+		ImageURL     *string `json:"image_url"`
+		Visibility   *string `json:"visibility"`
+		FriendListID *string `json:"friend_list_id"` // only relevant when visibility=group
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
-	if req.Content == nil && req.ImageURL == nil {
+	if req.Content == nil && req.ImageURL == nil && req.Visibility == nil {
 		writeError(w, 400, "nothing to update"); return
+	}
+
+	// Validate visibility value if provided
+	if req.Visibility != nil {
+		v := *req.Visibility
+		if v != "public" && v != "friends" && v != "group" && v != "private" {
+			writeError(w, 400, "invalid visibility — must be public, friends, group, or private"); return
+		}
+		// Don't allow changing visibility of community group posts
+		var communityGroupID *string
+		s.db.QueryRow(`SELECT community_group_id FROM posts WHERE id = $1`, id).Scan(&communityGroupID)
+		if communityGroupID != nil {
+			writeError(w, 400, "visibility of group posts cannot be changed"); return
+		}
+		// When switching to group visibility, friend_list_id is required
+		if v == "group" && (req.FriendListID == nil || *req.FriendListID == "") {
+			writeError(w, 400, "friend_list_id required when visibility is group"); return
+		}
 	}
 
 	var sets []string
@@ -683,6 +703,16 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ImageURL != nil {
 		sets = append(sets, fmt.Sprintf("image_url = $%d", i)); args = append(args, *req.ImageURL); i++
+	}
+	if req.Visibility != nil {
+		sets = append(sets, fmt.Sprintf("visibility = $%d", i)); args = append(args, *req.Visibility); i++
+		// Update group_id alongside visibility
+		if *req.Visibility == "group" && req.FriendListID != nil {
+			sets = append(sets, fmt.Sprintf("group_id = $%d", i)); args = append(args, *req.FriendListID); i++
+		} else if *req.Visibility != "group" {
+			// Clear friend list when switching away from group visibility
+			sets = append(sets, "group_id = NULL")
+		}
 	}
 	sets = append(sets, "edited_at = NOW()")
 	args = append(args, id)
@@ -727,7 +757,8 @@ type Post struct {
 	Content        string  `json:"content"`
 	ImageURL       string  `json:"image_url"`
 	Visibility     string  `json:"visibility"`
-	GroupID        *string `json:"group_id"`
+	GroupID        *string `json:"group_id"`         // community group id
+	FriendListID   *string `json:"friend_list_id"`   // friend list id (visibility=group)
 	GroupName      *string `json:"group_name,omitempty"`
 	GroupSlug      *string `json:"group_slug,omitempty"`
 	RepostOfID     *string `json:"repost_of_id"`
@@ -759,7 +790,7 @@ func scanPosts(rows interface {
 		var p Post
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
-			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.GroupName, &p.GroupSlug,
+			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,

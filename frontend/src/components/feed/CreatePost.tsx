@@ -1,11 +1,22 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle } from 'lucide-react'
-import { feedApi, friendsApi } from '../../api'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink } from 'lucide-react'
+import { feedApi, friendsApi, previewApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
+
+// Detect the first URL in a string
+const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/i
+
+interface Preview {
+  url: string
+  title: string
+  description: string
+  image: string
+  domain: string
+}
 
 export default function CreatePost() {
   const { user } = useAuthStore()
@@ -17,6 +28,13 @@ export default function CreatePost() {
   const [uploading, setUploading] = useState(false)
   const [twEnabled, setTwEnabled] = useState(false)
   const [twLabel, setTwLabel] = useState('')
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const [previewDismissed, setPreviewDismissed] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const [detectedUrl, setDetectedUrl] = useState('')
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastFetchedUrl = useRef('')
 
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
@@ -26,6 +44,54 @@ export default function CreatePost() {
   })
   const groups = groupsData?.groups || []
 
+  // Debounced URL detection — fires 800ms after user stops typing
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+
+    const match = content.match(URL_RE)
+    const url = match ? match[0].replace(/[.,!?)]+$/, '') : '' // strip trailing punctuation
+
+    if (!url) {
+      setPreview(null)
+      setPreviewError('')
+      setDetectedUrl('')
+      setPreviewDismissed(false)
+      lastFetchedUrl.current = ''
+      return
+    }
+
+    // Don't re-fetch the same URL, and don't fetch if user dismissed this URL
+    if (url === lastFetchedUrl.current) return
+    if (previewDismissed && url === detectedUrl) return
+
+    debounceRef.current = setTimeout(async () => {
+      lastFetchedUrl.current = url
+      setPreviewLoading(true)
+      setPreviewError('')
+      try {
+        const res = await previewApi.fetch(url)
+        if (res.data?.title || res.data?.description) {
+          setPreview(res.data)
+          setDetectedUrl(url)
+        } else {
+          setPreview(null)
+        }
+      } catch (err: any) {
+        setPreview(null)
+        const msg = err?.response?.data?.error
+        if (msg) setPreviewError(msg)
+      } finally {
+        setPreviewLoading(false)
+      }
+    }, 800)
+  }, [content, previewDismissed, detectedUrl])
+
+  const dismissPreview = () => {
+    setPreview(null)
+    setPreviewError('')
+    setPreviewDismissed(true)
+  }
+
   const create = useMutation({
     mutationFn: () => feedApi.createPost({
       content,
@@ -33,10 +99,16 @@ export default function CreatePost() {
       visibility,
       group_id: visibility === 'group' ? groupId : undefined,
       content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
+      link_url: preview ? preview.url : '',
+      link_title: preview ? preview.title : '',
+      link_description: preview ? preview.description : '',
+      link_image: preview ? preview.image : '',
+      link_domain: preview ? preview.domain : '',
     }),
     onSuccess: () => {
       setContent(''); setImageUrl(''); setGroupId('')
       setTwEnabled(false); setTwLabel('')
+      setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
   })
@@ -82,12 +154,58 @@ export default function CreatePost() {
         </div>
       </div>
 
+      {/* Uploaded image preview */}
       {imageUrl && (
         <div className="relative ml-13">
           <img src={imageUrl} alt="" className="rounded-lg w-full max-h-48 object-contain bg-agora-50 dark:bg-agora-900" />
           <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80">
             <X size={12} />
           </button>
+        </div>
+      )}
+
+      {/* Link preview loading */}
+      {previewLoading && !imageUrl && (
+        <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 flex items-center gap-2 text-xs text-agora-400">
+          <div className="w-3 h-3 border-2 border-agora-400 border-t-transparent rounded-full animate-spin" />
+          Fetching link preview…
+        </div>
+      )}
+
+      {/* Link preview error (only shown when backend returns a specific message) */}
+      {previewError && !previewLoading && !imageUrl && (
+        <div className="border border-agora-200 dark:border-agora-600 rounded-xl px-3 py-2 flex items-center justify-between text-xs text-agora-400">
+          <span>Could not load preview: {previewError}</span>
+          <button onClick={dismissPreview} className="text-agora-300 hover:text-agora-500"><X size={12} /></button>
+        </div>
+      )}
+
+      {/* Link preview card */}
+      {preview && !previewLoading && !imageUrl && (
+        <div className="relative border border-agora-200 dark:border-agora-600 rounded-xl overflow-hidden group">
+          <button
+            onClick={dismissPreview}
+            className="absolute top-2 right-2 z-10 bg-black/40 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/70"
+          >
+            <X size={10} />
+          </button>
+          <a href={preview.url} target="_blank" rel="noreferrer" className="flex gap-3 p-3 hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors">
+            {preview.image && (
+              <img
+                src={preview.image}
+                alt=""
+                className="w-20 h-20 object-cover rounded-lg flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+              />
+            )}
+            <div className="flex-1 min-w-0 space-y-0.5">
+              <p className="text-xs text-agora-400 flex items-center gap-1">
+                <ExternalLink size={10} /> {preview.domain}
+              </p>
+              {preview.title && <p className="text-sm font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">{preview.title}</p>}
+              {preview.description && <p className="text-xs text-agora-500 line-clamp-2">{preview.description}</p>}
+            </div>
+          </a>
         </div>
       )}
 
@@ -123,8 +241,7 @@ export default function CreatePost() {
               : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-amber-400 hover:text-amber-500'
           }`}
         >
-          <AlertTriangle size={13} />
-          TW
+          <AlertTriangle size={13} /> TW
         </button>
 
         {/* Visibility */}

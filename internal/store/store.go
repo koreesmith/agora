@@ -314,6 +314,11 @@ var schema = []string{
 
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS content_warning TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_url         TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_title       TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_description TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_image       TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_domain      TEXT NOT NULL DEFAULT ''`,
 
 	`CREATE TABLE IF NOT EXISTS instance_rules (
 		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),

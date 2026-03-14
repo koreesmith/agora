@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle } from 'lucide-react'
+import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -21,6 +21,11 @@ interface Post {
   image_url: string
   visibility: string
   content_warning: string
+  link_url: string
+  link_title: string
+  link_description: string
+  link_image: string
+  link_domain: string
   group_id?: string        // community group id
   friend_list_id?: string  // friend list id (when visibility=group)
   group_name?: string
@@ -330,6 +335,39 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <p className="text-xs text-agora-400 mt-0.5 italic">
                   edited {formatDistanceToNow(new Date(post.edited_at), { addSuffix: true })}
                 </p>
+              )}
+
+              {/* Link preview card */}
+              {post.link_url && !post.repost_of_id && (
+                <a
+                  href={post.link_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 flex gap-3 border border-agora-200 dark:border-agora-600 rounded-xl overflow-hidden hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                  onClick={e => e.stopPropagation()}
+                >
+                  {post.link_image && (
+                    <img
+                      src={post.link_image}
+                      alt=""
+                      className="w-20 h-20 object-cover flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                      onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    />
+                  )}
+                  <div className="flex-1 min-w-0 p-3 space-y-0.5">
+                    <p className="text-xs text-agora-400 flex items-center gap-1">
+                      <ExternalLink size={10} /> {post.link_domain}
+                    </p>
+                    {post.link_title && (
+                      <p className="text-sm font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">
+                        {post.link_title}
+                      </p>
+                    )}
+                    {post.link_description && (
+                      <p className="text-xs text-agora-500 line-clamp-2">{post.link_description}</p>
+                    )}
+                  </div>
+                </a>
               )}
 
               {/* Image */}

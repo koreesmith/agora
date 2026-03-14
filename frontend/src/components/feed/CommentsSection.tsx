@@ -8,12 +8,23 @@ import { Trash2, Send, Heart, Pencil, Reply, Image, X as XIcon } from 'lucide-re
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 
-// Render text with @mentions as clickable links
+// Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string) {
-  const parts = text.split(/(@[a-zA-Z0-9_-]+)/g)
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+)/g)
   return parts.map((part, i) => {
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
+    if (/^https?:\/\//i.test(part)) {
+      // Trim trailing punctuation that got caught in the regex
+      const url = part.replace(/[.,!?)]+$/, '')
+      const trailing = part.slice(url.length)
+      return (
+        <span key={i}>
+          <a href={url} target="_blank" rel="noreferrer noopener" className="text-agora-600 dark:text-agora-400 hover:underline break-all">{url}</a>
+          {trailing}
+        </span>
+      )
     }
     return <span key={i}>{part}</span>
   })

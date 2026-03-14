@@ -356,9 +356,29 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
   const [addMsg, setAddMsg] = useState('')
   const [copiedToken, setCopiedToken] = useState('')
 
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['group', slug] })
+
+  const uploadGroupCover = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return
+    try {
+      const res = await feedApi.uploadMedia(f, 'cover')
+      await groupsApi.update(slug, { cover_url: res.data.url })
+      invalidate()
+    } catch (err: any) { alert(err?.response?.data?.error || 'Upload failed') }
+  }
+
+  const uploadGroupAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return
+    try {
+      const res = await feedApi.uploadMedia(f, 'avatar')
+      await groupsApi.update(slug, { avatar_url: res.data.url })
+      invalidate()
+    } catch (err: any) { alert(err?.response?.data?.error || 'Upload failed') }
+  }
+
   const save = useMutation({
     mutationFn: () => groupsApi.update(slug, { name, description, ...(isOwner ? { privacy } : {}) }),
-    onSuccess: () => { setMsg('Saved!'); qc.invalidateQueries({ queryKey: ['group', slug] }); setTimeout(() => setMsg(''), 2000) },
+    onSuccess: () => { setMsg('Saved!'); invalidate(); setTimeout(() => setMsg(''), 2000) },
   })
 
   // Invite links
@@ -405,6 +425,36 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
 
   return (
     <div className="space-y-4">
+
+      {/* Group photos */}
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Group Photos</h3>
+
+        {/* Cover photo */}
+        <div>
+          <label className="label mb-1.5">Cover photo</label>
+          <div className="relative h-24 rounded-xl bg-gradient-to-r from-agora-300 to-agora-500 dark:from-agora-700 dark:to-agora-900 overflow-hidden">
+            {group.cover_url && <img src={group.cover_url} alt="" className="w-full h-full object-cover" />}
+            <label className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 hover:opacity-100 transition-opacity cursor-pointer">
+              <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded-lg">Change cover</span>
+              <input type="file" accept="image/*" className="hidden" onChange={uploadGroupCover} />
+            </label>
+          </div>
+        </div>
+
+        {/* Group avatar */}
+        <div className="flex items-center gap-3">
+          <div className="w-14 h-14 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+            {group.avatar_url
+              ? <img src={group.avatar_url} alt="" className="w-full h-full object-cover" />
+              : <span className="w-full h-full flex items-center justify-center text-xl font-bold text-agora-600">{group.name[0].toUpperCase()}</span>}
+          </div>
+          <label className="btn-secondary text-sm cursor-pointer">
+            Change group avatar
+            <input type="file" accept="image/*" className="hidden" onChange={uploadGroupAvatar} />
+          </label>
+        </div>
+      </div>
 
       {/* Join Requests */}
       {requests.length > 0 && (

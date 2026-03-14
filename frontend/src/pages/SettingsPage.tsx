@@ -40,6 +40,16 @@ export default function SettingsPage() {
     updateUser({ avatar_url: res.data.avatar_url }); ok('Avatar updated')
   }
 
+  const uploadCover = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return
+    try {
+      const res = await usersApi.uploadCover(f)
+      updateUser({ cover_url: res.data.cover_url }); ok('Cover photo updated')
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Upload failed')
+    }
+  }
+
   const exportData = async () => {
     const res = await usersApi.exportData()
     const url = URL.createObjectURL(res.data)
@@ -95,6 +105,19 @@ export default function SettingsPage() {
 
       {tab === 'profile' && (
         <div className="card p-4 space-y-4">
+          {/* Cover photo */}
+          <div>
+            <label className="label mb-1.5">Cover photo</label>
+            <div className="relative h-28 rounded-xl bg-gradient-to-r from-agora-300 to-agora-500 dark:from-agora-700 dark:to-agora-900 overflow-hidden">
+              {user?.cover_url && <img src={user.cover_url} alt="" className="w-full h-full object-cover" />}
+              <label className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 hover:opacity-100 transition-opacity cursor-pointer">
+                <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded-lg">Change cover photo</span>
+                <input type="file" accept="image/*" className="hidden" onChange={uploadCover} />
+              </label>
+            </div>
+          </div>
+
+          {/* Avatar */}
           <div className="flex items-center gap-4">
             <div className="w-16 h-16 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
               {user?.avatar_url ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />

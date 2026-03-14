@@ -175,6 +175,11 @@ export const adminApi = {
 }
 
 
+// ── Link preview ──────────────────────────────────────────────────────────────
+export const previewApi = {
+  fetch: (url: string) => api.get('/preview', { params: { url } }),
+}
+
 // ── Federation ────────────────────────────────────────────────────────────────
 export const federationApi = {
   lookupUser: (handle: string) => api.get('/federation/lookup', { params: { handle } }),

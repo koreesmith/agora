@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,6 +44,7 @@ func (s *Service) SetAlbums(a *albums.Service) { s.albums = a }
 func (s *Service) SetFed(f fedSender)          { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
+	r.Get("/preview",                             s.GetLinkPreview)
 	r.Get("/feed",                               s.GetFeed)
 	r.Post("/posts",                             s.CreatePost)
 	r.Get("/posts/{id}",                         s.GetPost)
@@ -73,7 +77,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -115,7 +119,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -198,7 +202,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -232,6 +236,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Visibility     string `json:"visibility"`
 		GroupID        string `json:"group_id"`
 		ContentWarning string `json:"content_warning"`
+		LinkURL        string `json:"link_url"`
+		LinkTitle      string `json:"link_title"`
+		LinkDescription string `json:"link_description"`
+		LinkImage      string `json:"link_image"`
+		LinkDomain     string `json:"link_domain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -252,9 +261,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning).Scan(&id)
+		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning,
+		                   link_url, link_title, link_description, link_image, link_domain)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id
+	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning,
+		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -364,7 +375,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -798,6 +809,11 @@ type Post struct {
 	UpdatedAt      string  `json:"updated_at"`
 	EditedAt       *string `json:"edited_at,omitempty"`
 	ContentWarning string  `json:"content_warning"`
+	LinkURL        string  `json:"link_url"`
+	LinkTitle      string  `json:"link_title"`
+	LinkDescription string `json:"link_description"`
+	LinkImage      string  `json:"link_image"`
+	LinkDomain     string  `json:"link_domain"`
 	LikeCount      int     `json:"like_count"`
 	CommentCount   int     `json:"comment_count"`
 	RepostCount    int     `json:"repost_count"`
@@ -824,6 +840,7 @@ func scanPosts(rows interface {
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
+			&p.LinkURL, &p.LinkTitle, &p.LinkDescription, &p.LinkImage, &p.LinkDomain,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,
@@ -849,6 +866,177 @@ func pageParams(r *http.Request) (limit, offset int) {
 		}
 	}
 	return
+}
+
+// ── Link preview ──────────────────────────────────────────────────────────────
+
+func (s *Service) GetLinkPreview(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		writeError(w, 400, "url required")
+		return
+	}
+	preview, err := fetchLinkPreview(rawURL)
+	if err != nil {
+		writeError(w, 422, err.Error())
+		return
+	}
+	writeJSON(w, 200, preview)
+}
+
+type LinkPreview struct {
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Image       string `json:"image"`
+	Domain      string `json:"domain"`
+}
+
+// fetchLinkPreview fetches a URL and extracts Open Graph / meta tags.
+// Blocks private/loopback IPs to prevent SSRF.
+func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("invalid URL")
+	}
+
+	// Resolve the hostname and check for private IPs (SSRF protection)
+	host := parsed.Hostname()
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve host")
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil { continue }
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return nil, fmt.Errorf("URL not allowed")
+		}
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 { return fmt.Errorf("too many redirects") }
+			return nil
+		},
+	}
+
+	req, _ := http.NewRequest("GET", rawURL, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Agora/1.0; +https://github.com/agora-social/agora) AppleWebKit/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+
+	resp, err := client.Do(req)
+	if err != nil { return nil, fmt.Errorf("could not fetch URL") }
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("remote returned %d", resp.StatusCode)
+	}
+
+	// Only parse HTML responses
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/html") && ct != "" {
+		return nil, fmt.Errorf("URL does not point to a web page")
+	}
+
+	// Read up to 512KB — enough to get the <head> without downloading the whole page
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil { return nil, fmt.Errorf("could not read response") }
+	html := string(body)
+
+	preview := &LinkPreview{
+		URL:    rawURL,
+		Domain: host,
+	}
+
+	// Extract OG tags and fallback meta tags with simple regex
+	// og:title → meta name="title" → <title>
+	if v := extractMeta(html, "og:title"); v != "" {
+		preview.Title = v
+	} else if v := extractMeta(html, "twitter:title"); v != "" {
+		preview.Title = v
+	} else {
+		preview.Title = extractTitle(html)
+	}
+
+	// og:description → meta name="description"
+	if v := extractMeta(html, "og:description"); v != "" {
+		preview.Description = v
+	} else {
+		preview.Description = extractMeta(html, "description")
+	}
+
+	// og:image → twitter:image
+	if v := extractMeta(html, "og:image"); v != "" {
+		preview.Image = resolveURL(rawURL, v)
+	} else if v := extractMeta(html, "twitter:image"); v != "" {
+		preview.Image = resolveURL(rawURL, v)
+	}
+
+	// Truncate long descriptions
+	if len(preview.Description) > 300 {
+		preview.Description = preview.Description[:297] + "…"
+	}
+	if len(preview.Title) > 120 {
+		preview.Title = preview.Title[:117] + "…"
+	}
+
+	return preview, nil
+}
+
+var (
+	ogPropertyRe = regexp.MustCompile(`(?i)<meta[^>]+property=["']([^"']+)["'][^>]+content=["']([^"']*?)["']`)
+	ogContentRe  = regexp.MustCompile(`(?i)<meta[^>]+content=["']([^"']*?)["'][^>]+property=["']([^"']+)["']`)
+	metaNameRe   = regexp.MustCompile(`(?i)<meta[^>]+name=["']([^"']+)["'][^>]+content=["']([^"']*?)["']`)
+	metaNameRe2  = regexp.MustCompile(`(?i)<meta[^>]+content=["']([^"']*?)["'][^>]+name=["']([^"']+)["']`)
+	titleRe      = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
+)
+
+func extractMeta(html, key string) string {
+	lkey := strings.ToLower(key)
+	for _, re := range []*regexp.Regexp{ogPropertyRe, ogContentRe} {
+		for _, m := range re.FindAllStringSubmatch(html, -1) {
+			if strings.ToLower(m[1]) == lkey { return htmlUnescape(m[2]) }
+			if strings.ToLower(m[2]) == lkey { return htmlUnescape(m[1]) }
+		}
+	}
+	for _, re := range []*regexp.Regexp{metaNameRe, metaNameRe2} {
+		for _, m := range re.FindAllStringSubmatch(html, -1) {
+			if strings.ToLower(m[1]) == lkey { return htmlUnescape(m[2]) }
+			if strings.ToLower(m[2]) == lkey { return htmlUnescape(m[1]) }
+		}
+	}
+	return ""
+}
+
+func extractTitle(html string) string {
+	if m := titleRe.FindStringSubmatch(html); len(m) > 1 {
+		return htmlUnescape(strings.TrimSpace(m[1]))
+	}
+	return ""
+}
+
+func htmlUnescape(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&apos;", "'")
+	return s
+}
+
+func resolveURL(base, ref string) string {
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return ref
+	}
+	b, err := url.Parse(base)
+	if err != nil { return ref }
+	r, err := url.Parse(ref)
+	if err != nil { return ref }
+	return b.ResolveReference(r).String()
 }
 
 func timeNow() string { return time.Now().UTC().Format(time.RFC3339) }

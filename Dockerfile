@@ -8,7 +8,7 @@ RUN go mod tidy && go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o agora ./cmd/server
 
 FROM alpine:3.19
-RUN apk --no-cache add ca-certificates tzdata netcat-openbsd
+RUN apk --no-cache add ca-certificates tzdata netcat-openbsd libheif-tools
 WORKDIR /app
 
 COPY --from=builder /app/agora .

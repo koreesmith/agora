@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -102,15 +103,19 @@ func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error
 		return "", fmt.Errorf("file is too large (max 50 MB) — try reducing the image size before uploading")
 	}
 
-	// HEIC/HEIF check before content-type detection (Go doesn't recognise these)
+	// HEIC/HEIF — convert to JPEG transparently using heif-convert
+	var contentType string
 	if isHEIC(data) {
-		return "", fmt.Errorf(
-			"HEIC/HEIF photos (used by iPhone by default) aren't supported yet. " +
-				"On iPhone: go to Settings → Camera → Formats and choose \"Most Compatible\" to shoot in JPEG. " +
-				"On Mac: open the photo in Preview, then File → Export and choose JPEG.")
+		converted, err := convertHEIC(data)
+		if err != nil {
+			return "", fmt.Errorf("could not convert HEIC photo — try exporting as JPEG from your Photos app")
+		}
+		data = converted
+		contentType = "image/jpeg"
+	} else {
+		contentType = http.DetectContentType(data)
 	}
 
-	contentType := http.DetectContentType(data)
 	if !strings.HasPrefix(contentType, "image/") {
 		ext := strings.ToLower(filepath.Ext(header.Filename))
 		return "", fmt.Errorf(
@@ -172,6 +177,34 @@ func extensionFor(contentType string) string {
 	default:
 		return ".bin"
 	}
+}
+
+// convertHEIC converts HEIC/HEIF image data to JPEG using heif-convert.
+// Writes to a temp file, runs the conversion, reads the result back.
+func convertHEIC(data []byte) ([]byte, error) {
+	// Write input to temp file
+	in, err := os.CreateTemp("", "heic-in-*.heic")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(in.Name())
+	if _, err := in.Write(data); err != nil {
+		in.Close()
+		return nil, err
+	}
+	in.Close()
+
+	// Output path
+	outPath := in.Name() + ".jpg"
+	defer os.Remove(outPath)
+
+	// heif-convert <input> <output>
+	cmd := exec.Command("heif-convert", "-q", "88", in.Name(), outPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("heif-convert: %w — %s", err, string(out))
+	}
+
+	return os.ReadFile(outPath)
 }
 
 // resizeToFit scales img down to fit within maxW×maxH preserving aspect ratio.

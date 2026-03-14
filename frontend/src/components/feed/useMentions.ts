@@ -8,6 +8,8 @@ export interface MentionUser {
   display_name: string
   avatar_url: string
   is_friend: boolean
+  is_remote?: boolean
+  remote_instance?: string
 }
 
 export function useMentions() {

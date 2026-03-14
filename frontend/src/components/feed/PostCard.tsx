@@ -7,6 +7,7 @@ import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
 import ReportModal from './ReportModal'
+import { handle } from '../../utils/handle'
 
 interface Post {
   id: string
@@ -14,6 +15,8 @@ interface Post {
   author_username: string
   author_display_name: string
   author_avatar_url: string
+  is_remote?: boolean
+  remote_instance?: string
   content: string
   image_url: string
   visibility: string
@@ -125,7 +128,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
               </Link>
               <span className="text-agora-400 text-xs">
-                @{post.repost_of_id ? post.repost_author_username : post.author_username}
+                {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
+                  !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
               </span>
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               <Link to={`/post/${post.repost_of_id ? post.repost_of_id : post.id}`}

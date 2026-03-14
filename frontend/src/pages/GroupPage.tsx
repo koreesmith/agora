@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
+import { handle } from '../utils/handle'
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
 import { groupsApi, feedApi } from '../api'
 import { useAuthStore } from '../store/auth'
@@ -322,7 +323,7 @@ function GroupMembers({ slug, group, canManage, isOwner, currentUserID }: {
           </Link>
           <div className="flex-1 min-w-0">
             <Link to={`/profile/${m.username}`} className="font-medium text-sm hover:underline">{m.display_name || m.username}</Link>
-            <p className="text-xs text-agora-400">@{m.username} · {roleLabel[m.role]}</p>
+            <p className="text-xs text-agora-400">{handle(m.username, m.is_remote, m.remote_instance)} · {roleLabel[m.role]}</p>
           </div>
           {canManage && m.id !== currentUserID && m.role !== 'owner' && (
             <div className="flex items-center gap-1">
@@ -623,7 +624,7 @@ function AddMemberTypeahead({ slug, onAdded, onError }: {
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate">{u.display_name || u.username}</p>
-                  <p className="text-xs text-agora-400 truncate">@{u.username}{u.is_friend ? ' · friend' : ''}</p>
+                  <p className="text-xs text-agora-400 truncate">{handle(u.username, u.is_remote, u.remote_instance)}{u.is_friend ? ' · friend' : ''}</p>
                 </div>
                 {u.is_friend && (
                   <span className="text-xs text-agora-500 flex-shrink-0">👥</span>

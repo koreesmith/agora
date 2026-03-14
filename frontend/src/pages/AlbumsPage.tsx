@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { Image as ImageIcon, Plus, Globe, Users, Lock, X } from 'lucide-react'
+import { handle } from '../utils/handle'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={11} />,
@@ -123,7 +124,7 @@ function AlbumCard({ album: a, currentUserId }: { album: any, currentUserId?: st
         <div className="flex items-center gap-1.5 text-xs text-agora-400 mt-0.5">
           {visIcon[a.visibility]}
           <span>{a.photo_count} photo{a.photo_count !== 1 ? 's' : ''}</span>
-          {!isOwn && <><span>·</span><span className="truncate">@{a.owner_username}</span></>}
+          {!isOwn && <><span>·</span><span className="truncate">{handle(a.owner_username, a.is_remote, a.remote_instance)}</span></>}
         </div>
       </div>
     </Link>

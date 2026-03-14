@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
+import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users } from 'lucide-react'
 
 const visIcon: Record<string, React.ReactNode> = {
@@ -99,7 +100,7 @@ export default function ProfilePage() {
             </div>
           </div>
           <h1 className="text-xl font-bold">{profile.display_name}</h1>
-          <p className="text-agora-500 text-sm">@{profile.username}</p>
+          <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300">{profile.bio}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
             <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>

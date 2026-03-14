@@ -3,9 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { searchApi, friendsApi, federationApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2 } from 'lucide-react'
+import { handle } from '../utils/handle'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
+import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2 } from 'lucide-react'
 
 export default function SearchPage() {
   const [input, setInput] = useState('')
@@ -168,7 +169,7 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
           {u.display_name || u.username}
         </Link>
         <p className="text-xs text-agora-400 truncate">
-          @{u.username}{u.is_remote && u.remote_instance ? ` · ${u.remote_instance}` : ''}
+          {handle(u.username, u.is_remote, u.remote_instance)}
         </p>
         {u.bio && <p className="text-xs text-agora-500 truncate mt-0.5">{u.bio}</p>}
       </div>

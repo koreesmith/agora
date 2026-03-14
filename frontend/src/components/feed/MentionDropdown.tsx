@@ -1,4 +1,5 @@
 import type { MentionUser } from './useMentions'
+import { handle } from '../../utils/handle'
 
 interface Props {
   users: MentionUser[]
@@ -25,7 +26,7 @@ export default function MentionDropdown({ users, onSelect }: Props) {
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">{u.display_name || u.username}</p>
-            <p className="text-xs text-agora-400 truncate">@{u.username}</p>
+            <p className="text-xs text-agora-400 truncate">{handle(u.username, u.is_remote, u.remote_instance)}</p>
           </div>
           {u.is_friend && <span className="ml-auto text-xs text-agora-400 flex-shrink-0">Friend</span>}
         </button>

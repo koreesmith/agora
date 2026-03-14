@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { usersApi, friendsApi } from '../api'
 import { UserPlus, Users, Compass, Check, Clock } from 'lucide-react'
+import { handle } from '../utils/handle'
 
 export default function DiscoverPage() {
   const qc = useQueryClient()
@@ -72,7 +73,7 @@ function UserCard({ user: u, onRequestSent }: { user: any, onRequestSent: () => 
           {u.display_name || u.username}
         </Link>
         <Link to={`/profile/${u.username}`} className="text-xs text-agora-400 block">
-          @{u.username}
+          {handle(u.username, u.is_remote, u.remote_instance)}
         </Link>
         {u.bio && (
           <p className="text-xs text-agora-500 mt-1 line-clamp-1">{u.bio}</p>

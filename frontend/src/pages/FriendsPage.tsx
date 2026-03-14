@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { friendsApi } from '../api'
+import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List } from 'lucide-react'
 
 export default function FriendsPage() {
@@ -79,7 +80,7 @@ export default function FriendsPage() {
               <Avatar u={f} />
               <div className="flex-1 min-w-0">
                 <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name || f.username}</Link>
-                <p className="text-xs text-agora-400">@{f.username}</p>
+                <p className="text-xs text-agora-400">{handle(f.username, f.is_remote, f.remote_instance)}</p>
               </div>
               <button onClick={() => { if (confirm('Unfriend?')) unfriend.mutate(f.id) }} className="btn-ghost p-1.5 text-agora-400 hover:text-red-500">
                 <Trash2 size={15} />
@@ -99,7 +100,7 @@ export default function FriendsPage() {
                 <Avatar u={f} />
                 <div className="flex-1 min-w-0">
                   <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name || f.username}</Link>
-                  <p className="text-xs text-agora-400">@{f.username}</p>
+                  <p className="text-xs text-agora-400">{handle(f.username, f.is_remote, f.remote_instance)}</p>
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => accept.mutate(f.id)} className="btn-primary text-xs py-1 px-2"><UserCheck size={13} /> Accept</button>
@@ -220,7 +221,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className="text-sm font-medium truncate">{m.display_name || m.username}</span>
-                    <span className="text-xs text-agora-400 ml-1.5">@{m.username}</span>
+                    <span className="text-xs text-agora-400 ml-1.5">{handle(m.username, m.is_remote, m.remote_instance)}</span>
                   </div>
                   <button onClick={() => onRemove(m.id)} className="btn-ghost p-1 text-agora-300 hover:text-red-500" title="Remove from list">
                     <UserMinus size={14} />
@@ -243,7 +244,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className="text-sm font-medium truncate">{f.display_name || f.username}</span>
-                    <span className="text-xs text-agora-400 ml-1.5">@{f.username}</span>
+                    <span className="text-xs text-agora-400 ml-1.5">{handle(f.username, f.is_remote, f.remote_instance)}</span>
                   </div>
                   <button onClick={() => onAdd(f.id)} className="btn-ghost p-1 text-agora-400 hover:text-agora-600 dark:hover:text-agora-200" title="Add to list">
                     <Plus size={14} />

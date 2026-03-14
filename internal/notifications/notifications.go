@@ -184,39 +184,40 @@ func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 
 	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
+	baseURL := s.email.instanceBaseURL()
 
-	subject, body := notifEmailContent(notifType, actorName, instanceName, domain)
+	subject, body := notifEmailContent(notifType, actorName, instanceName, baseURL)
 	if subject == "" { return }
 
-	s.email.Send(toEmail, subject, buildBody(displayName, instanceName, domain, body))
+	s.email.Send(toEmail, subject, buildBody(displayName, instanceName, domain, baseURL, body))
 }
 
-func notifEmailContent(t, actorName, instanceName, domain string) (subject, body string) {
+func notifEmailContent(t, actorName, instanceName, baseURL string) (subject, body string) {
 	switch t {
 	case "friend_request":
 		return fmt.Sprintf("New friend request on %s", instanceName),
-			fmt.Sprintf("%s sent you a friend request!\n\nHead to %s/friends to accept or decline.", actorName, domain)
+			fmt.Sprintf("%s sent you a friend request!\n\nHead to %s/friends to accept or decline.", actorName, baseURL)
 	case "friend_accepted":
 		return fmt.Sprintf("%s accepted your friend request!", actorName),
 			fmt.Sprintf("Great news — %s accepted your friend request on %s.\n\nView their profile: %s/profile/%s",
-				actorName, instanceName, domain, strings.ToLower(strings.ReplaceAll(actorName, " ", "-")))
+				actorName, instanceName, baseURL, strings.ToLower(strings.ReplaceAll(actorName, " ", "-")))
 	case "post_like":
 		return fmt.Sprintf("%s liked your post", actorName),
 			fmt.Sprintf("%s liked one of your posts on %s.", actorName, instanceName)
 	case "post_comment":
 		return fmt.Sprintf("%s commented on your post", actorName),
-			fmt.Sprintf("%s left a comment on your post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, domain)
+			fmt.Sprintf("%s left a comment on your post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, baseURL)
 	case "post_repost":
 		return fmt.Sprintf("%s shared your post", actorName),
 			fmt.Sprintf("%s shared one of your posts on %s.", actorName, instanceName)
 	case "post_mention":
 		return fmt.Sprintf("%s mentioned you in a post", actorName),
-			fmt.Sprintf("%s mentioned you in a post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, domain)
+			fmt.Sprintf("%s mentioned you in a post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, baseURL)
 	}
 	return "", ""
 }
 
-func buildBody(displayName, instanceName, domain, content string) string {
+func buildBody(displayName, instanceName, _, baseURL, content string) string {
 	return fmt.Sprintf(`Hi %s,
 
 %s
@@ -224,7 +225,7 @@ func buildBody(displayName, instanceName, domain, content string) string {
 ──────────────────────────────
 This notification was sent by %s (%s).
 To turn off email notifications, go to Settings → Notifications.
-`, displayName, content, instanceName, domain)
+`, displayName, content, instanceName, baseURL)
 }
 
 // ── Transactional emails (verification, password reset) ───────────────────────
@@ -234,7 +235,8 @@ func (s *Service) SendEmailVerification(_, email, displayName, token string) {
 	if !s.email.enabled() { return }
 	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
-	link := fmt.Sprintf("https://%s/verify-email?token=%s", domain, token)
+	baseURL := s.email.instanceBaseURL()
+	link := fmt.Sprintf("%s/verify-email?token=%s", baseURL, token)
 	body := fmt.Sprintf(`Hi %s,
 
 Welcome to %s! Please verify your email address by clicking the link below:
@@ -253,7 +255,8 @@ func (s *Service) SendPasswordReset(_, email, displayName, token string) {
 	if !s.email.enabled() { return }
 	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
-	link := fmt.Sprintf("https://%s/reset-password?token=%s", domain, token)
+	baseURL := s.email.instanceBaseURL()
+	link := fmt.Sprintf("%s/reset-password?token=%s", baseURL, token)
 	body := fmt.Sprintf(`Hi %s,
 
 You requested a password reset for your account on %s.
@@ -313,8 +316,26 @@ func (e *EmailService) enabled() bool {
 func (e *EmailService) instanceDomain() string {
 	var val string
 	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&val)
-	if val == "" { return e.cfg.InstanceDomain }
+	if val == "" { val = e.cfg.InstanceDomain }
+	// Strip protocol — return bare domain only (e.g. "ameth.social")
+	val = strings.TrimPrefix(val, "https://")
+	val = strings.TrimPrefix(val, "http://")
+	val = strings.TrimSuffix(val, "/")
 	return val
+}
+
+// instanceBaseURL returns the full base URL for use in links, inferring https
+// unless the stored value explicitly uses http (for local/dev environments).
+func (e *EmailService) instanceBaseURL() string {
+	var val string
+	e.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&val)
+	if val == "" { val = e.cfg.InstanceDomain }
+	val = strings.TrimSuffix(val, "/")
+	// If already has a protocol, use it as-is
+	if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
+		return val
+	}
+	return "https://" + val
 }
 
 func (e *EmailService) instanceName() string {

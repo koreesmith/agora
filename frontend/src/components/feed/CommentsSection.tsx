@@ -56,9 +56,15 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
           if (c.id === id) return { ...c, liked: !liked, like_count: c.like_count + (liked ? -1 : 1) }
           return {
             ...c,
-            replies: c.replies?.map((r: any) =>
-              r.id === id ? { ...r, liked: !liked, like_count: r.like_count + (liked ? -1 : 1) } : r
-            ),
+            replies: c.replies?.map((r: any) => {
+              if (r.id === id) return { ...r, liked: !liked, like_count: r.like_count + (liked ? -1 : 1) }
+              return {
+                ...r,
+                replies: r.replies?.map((rr: any) =>
+                  rr.id === id ? { ...rr, liked: !liked, like_count: rr.like_count + (liked ? -1 : 1) } : rr
+                ),
+              }
+            }),
           }
         }),
       }))
@@ -88,23 +94,44 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             depth={0}
           />
 
-          {/* Replies — indented */}
+          {/* Depth-1 replies — indented */}
           {c.replies?.length > 0 && (
             <div className="ml-10 mt-2 space-y-2 border-l-2 border-agora-100 dark:border-agora-700 pl-3">
               {c.replies.map((reply: any) => (
-                <CommentRow
-                  key={reply.id}
-                  comment={reply}
-                  postId={postId}
-                  postAuthorId={postAuthorId}
-                  currentUserId={user?.id}
-                  currentUserRole={user?.role}
-                  onDelete={() => del.mutate(reply.id)}
-                  onLike={() => likeComment.mutate({ id: reply.id, liked: reply.liked })}
-                  onEdited={invalidate}
-                  onReplyCreated={invalidate}
-                  depth={1}
-                />
+                <div key={reply.id}>
+                  <CommentRow
+                    comment={reply}
+                    postId={postId}
+                    postAuthorId={postAuthorId}
+                    currentUserId={user?.id}
+                    currentUserRole={user?.role}
+                    onDelete={() => del.mutate(reply.id)}
+                    onLike={() => likeComment.mutate({ id: reply.id, liked: reply.liked })}
+                    onEdited={invalidate}
+                    onReplyCreated={invalidate}
+                    depth={1}
+                  />
+                  {/* Depth-2 replies — further indented */}
+                  {reply.replies?.length > 0 && (
+                    <div className="ml-8 mt-2 space-y-2 border-l-2 border-agora-100 dark:border-agora-700 pl-3">
+                      {reply.replies.map((r2: any) => (
+                        <CommentRow
+                          key={r2.id}
+                          comment={r2}
+                          postId={postId}
+                          postAuthorId={postAuthorId}
+                          currentUserId={user?.id}
+                          currentUserRole={user?.role}
+                          onDelete={() => del.mutate(r2.id)}
+                          onLike={() => likeComment.mutate({ id: r2.id, liked: r2.liked })}
+                          onEdited={invalidate}
+                          onReplyCreated={invalidate}
+                          depth={2}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -186,7 +213,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
 
   const isOwn = c.author_id === currentUserId
   const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
-  const avatarSize = depth === 0 ? 'w-8 h-8' : 'w-6 h-6'
+  const avatarSize = depth === 0 ? 'w-8 h-8' : depth === 1 ? 'w-6 h-6' : 'w-5 h-5'
 
   return (
     <div className="flex gap-2">
@@ -246,8 +273,8 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             {c.like_count > 0 && <span>{c.like_count}</span>}
           </button>
 
-          {/* Reply button — only on depth-0 comments */}
-          {depth === 0 && (
+          {/* Reply button — depth 0 and 1, not at depth 2 */}
+          {depth < 2 && (
             <button
               onClick={openReply}
               className="flex items-center gap-1 text-xs text-agora-400 hover:text-agora-600 transition-colors"

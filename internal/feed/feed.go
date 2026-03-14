@@ -73,7 +73,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at, p.edited_at,
+			       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -115,7 +115,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
-			       p.created_at, p.updated_at, p.edited_at,
+			       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
@@ -198,7 +198,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at, p.edited_at,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -227,10 +227,11 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	var req struct {
-		Content    string `json:"content"`
-		ImageURL   string `json:"image_url"`
-		Visibility string `json:"visibility"`
-		GroupID    string `json:"group_id"`
+		Content        string `json:"content"`
+		ImageURL       string `json:"image_url"`
+		Visibility     string `json:"visibility"`
+		GroupID        string `json:"group_id"`
+		ContentWarning string `json:"content_warning"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -251,9 +252,9 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, groupID).Scan(&id)
+		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -363,7 +364,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
-		       p.created_at, p.updated_at, p.edited_at,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
@@ -685,15 +686,16 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Content      *string `json:"content"`
-		ImageURL     *string `json:"image_url"`
-		Visibility   *string `json:"visibility"`
-		FriendListID *string `json:"friend_list_id"` // only relevant when visibility=group
+		Content        *string `json:"content"`
+		ImageURL       *string `json:"image_url"`
+		Visibility     *string `json:"visibility"`
+		FriendListID   *string `json:"friend_list_id"`
+		ContentWarning *string `json:"content_warning"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
-	if req.Content == nil && req.ImageURL == nil && req.Visibility == nil {
+	if req.Content == nil && req.ImageURL == nil && req.Visibility == nil && req.ContentWarning == nil {
 		writeError(w, 400, "nothing to update"); return
 	}
 
@@ -733,6 +735,9 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 			// Clear friend list when switching away from group visibility
 			sets = append(sets, "group_id = NULL")
 		}
+	}
+	if req.ContentWarning != nil {
+		sets = append(sets, fmt.Sprintf("content_warning = $%d", i)); args = append(args, *req.ContentWarning); i++
 	}
 	sets = append(sets, "edited_at = NOW()")
 	args = append(args, id)
@@ -787,6 +792,7 @@ type Post struct {
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	EditedAt       *string `json:"edited_at,omitempty"`
+	ContentWarning string  `json:"content_warning"`
 	LikeCount      int     `json:"like_count"`
 	CommentCount   int     `json:"comment_count"`
 	RepostCount    int     `json:"repost_count"`
@@ -812,7 +818,7 @@ func scanPosts(rows interface {
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
-			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt,
+			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,

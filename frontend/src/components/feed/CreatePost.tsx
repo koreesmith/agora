@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock } from 'lucide-react'
+import { Image, X, Globe, Users, Lock, AlertTriangle } from 'lucide-react'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
@@ -15,6 +15,8 @@ export default function CreatePost() {
   const [visibility, setVisibility] = useState('friends')
   const [groupId, setGroupId] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [twEnabled, setTwEnabled] = useState(false)
+  const [twLabel, setTwLabel] = useState('')
 
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
@@ -25,8 +27,18 @@ export default function CreatePost() {
   const groups = groupsData?.groups || []
 
   const create = useMutation({
-    mutationFn: () => feedApi.createPost({ content, image_url: imageUrl, visibility, group_id: visibility === 'group' ? groupId : undefined }),
-    onSuccess: () => { setContent(''); setImageUrl(''); setGroupId(''); qc.invalidateQueries({ queryKey: ['feed'] }) },
+    mutationFn: () => feedApi.createPost({
+      content,
+      image_url: imageUrl,
+      visibility,
+      group_id: visibility === 'group' ? groupId : undefined,
+      content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
+    }),
+    onSuccess: () => {
+      setContent(''); setImageUrl(''); setGroupId('')
+      setTwEnabled(false); setTwLabel('')
+      qc.invalidateQueries({ queryKey: ['feed'] })
+    },
   })
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -45,6 +57,8 @@ export default function CreatePost() {
     { value: 'friends', icon: Users,  label: 'Friends' },
     { value: 'group',   icon: Lock,   label: 'Friend List' },
   ]
+
+  const canPost = (content.trim() || imageUrl) && !create.isPending && !uploading && (!twEnabled || twLabel.trim())
 
   return (
     <div className="card p-4 space-y-3">
@@ -77,15 +91,49 @@ export default function CreatePost() {
         </div>
       )}
 
+      {/* Trigger warning label input */}
+      {twEnabled && (
+        <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
+          <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />
+          <input
+            className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
+            placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
+            value={twLabel}
+            onChange={e => setTwLabel(e.target.value)}
+            autoFocus
+            maxLength={120}
+          />
+        </div>
+      )}
+
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
+        {/* Image upload */}
         <label className="btn-ghost p-2 cursor-pointer" title="Add image">
           <Image size={18} />
           <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
         </label>
+
+        {/* Trigger warning toggle */}
+        <button
+          onClick={() => { setTwEnabled(v => !v); if (twEnabled) setTwLabel('') }}
+          title="Trigger warning"
+          className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+            twEnabled
+              ? 'bg-amber-100 dark:bg-amber-900/30 border-amber-400 text-amber-700 dark:text-amber-400'
+              : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-amber-400 hover:text-amber-500'
+          }`}
+        >
+          <AlertTriangle size={13} />
+          TW
+        </button>
+
+        {/* Visibility */}
         <select value={visibility} onChange={e => setVisibility(e.target.value)}
           className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
           {visOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+
+        {/* Friend list picker */}
         {visibility === 'group' && (
           groups.length > 0
             ? <select value={groupId} onChange={e => setGroupId(e.target.value)}
@@ -95,7 +143,8 @@ export default function CreatePost() {
               </select>
             : <span className="text-xs text-agora-400">No lists yet — <Link to="/friends" className="underline">create one</Link></span>
         )}
-        <button onClick={() => create.mutate()} disabled={(!content.trim() && !imageUrl) || create.isPending || uploading} className="ml-auto btn-primary text-sm">
+
+        <button onClick={() => create.mutate()} disabled={!canPost} className="ml-auto btn-primary text-sm">
           {create.isPending ? 'Posting…' : 'Post'}
         </button>
       </div>

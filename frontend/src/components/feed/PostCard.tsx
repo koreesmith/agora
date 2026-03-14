@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil } from 'lucide-react'
+import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -20,6 +20,7 @@ interface Post {
   content: string
   image_url: string
   visibility: string
+  content_warning: string
   group_id?: string        // community group id
   friend_list_id?: string  // friend list id (when visibility=group)
   group_name?: string
@@ -47,6 +48,7 @@ const visIcons: Record<string, React.ReactNode> = {
 
 export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+  const [twExpanded, setTwExpanded] = useState(false)
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [showComments, setShowComments] = useState(false)
@@ -56,6 +58,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [editContent, setEditContent] = useState(post.content)
   const [editVisibility, setEditVisibility] = useState(post.visibility)
   const [editFriendListId, setEditFriendListId] = useState(post.friend_list_id || '')
+  const [editTwEnabled, setEditTwEnabled] = useState(!!post.content_warning)
+  const [editTwLabel, setEditTwLabel] = useState(post.content_warning || '')
 
   // Only fetch friend lists when the edit UI is open
   const { data: groupsData } = useQuery({
@@ -82,6 +86,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
       content: editContent,
       visibility: editVisibility,
       friend_list_id: editVisibility === 'group' ? editFriendListId : undefined,
+      content_warning: editTwEnabled ? editTwLabel : '',
     }),
     onSuccess: () => { setEditing(false); invalidate() },
   })
@@ -165,7 +170,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
                   onBlur={() => setShowMenu(false)}>
                   {isOwn && !post.repost_of_id && (
-                    <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setShowMenu(false) }}
+                    <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
                       className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
                       <Pencil size={14} /> Edit
                     </button>
@@ -187,6 +192,34 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </div>
           </div>
 
+          {/* Trigger warning banner — shown when post has a content warning and not yet expanded */}
+          {post.content_warning && !editing && !twExpanded && (
+            <div className="mt-3 flex items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl px-4 py-3">
+              <AlertTriangle size={18} className="text-amber-500 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">Trigger Warning</p>
+                <p className="text-xs text-amber-600 dark:text-amber-400 truncate">{post.content_warning}</p>
+              </div>
+              <button
+                onClick={() => setTwExpanded(true)}
+                className="flex-shrink-0 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-600 rounded-lg px-3 py-1.5 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+              >
+                Show post
+              </button>
+            </div>
+          )}
+
+          {/* Collapse button when TW post is expanded */}
+          {post.content_warning && !editing && twExpanded && (
+            <div className="mt-2 flex items-center gap-1.5">
+              <AlertTriangle size={12} className="text-amber-400" />
+              <span className="text-xs text-amber-500">{post.content_warning}</span>
+              <button onClick={() => setTwExpanded(false)} className="ml-auto text-xs text-agora-400 hover:text-agora-600">
+                Hide
+              </button>
+            </div>
+          )}
+
           {/* Inline editor */}
           {editing ? (
             <div className="mt-2 space-y-2">
@@ -197,6 +230,29 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onChange={e => setEditContent(e.target.value)}
                 autoFocus
               />
+              {/* Trigger warning toggle in edit mode */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { setEditTwEnabled(v => !v); if (editTwEnabled) setEditTwLabel('') }}
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                    editTwEnabled
+                      ? 'bg-amber-100 dark:bg-amber-900/30 border-amber-400 text-amber-700 dark:text-amber-400'
+                      : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-amber-400 hover:text-amber-500'
+                  }`}
+                >
+                  <AlertTriangle size={12} /> TW
+                </button>
+                {editTwEnabled && (
+                  <input
+                    className="flex-1 input text-xs py-1"
+                    placeholder="Describe the trigger…"
+                    value={editTwLabel}
+                    onChange={e => setEditTwLabel(e.target.value)}
+                    maxLength={120}
+                  />
+                )}
+              </div>
+
               {/* Visibility picker — hidden for community group posts */}
               {!post.group_id && (
                 <div className="space-y-1.5">
@@ -252,6 +308,9 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </div>
           ) : (
             <>
+              {/* Content — hidden behind TW gate until expanded */}
+              {(!post.content_warning || twExpanded) && (
+                <>
               {/* Content */}
               {(post.repost_of_id ? post.repost_content : post.content) && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
@@ -310,6 +369,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   </>
                 )
               })()}
+                </>
+              )}
             </>
           )}
 

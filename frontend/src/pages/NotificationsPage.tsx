@@ -9,6 +9,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   friend_request:        <UserPlus size={16} className="text-blue-500" />,
   friend_accepted:       <UserCheck size={16} className="text-green-500" />,
   post_like:             <Heart size={16} className="text-red-500" />,
+  comment_like:          <Heart size={16} className="text-red-400" />,
   post_comment:          <MessageCircle size={16} className="text-agora-500" />,
   post_repost:           <Repeat2 size={16} className="text-green-500" />,
   post_mention:          <MessageCircle size={16} className="text-blue-500" />,
@@ -23,6 +24,7 @@ const notifText: Record<string, string> = {
   friend_request:        'sent you a friend request',
   friend_accepted:       'accepted your friend request',
   post_like:             'liked your post',
+  comment_like:          'liked your comment',
   post_comment:          'commented on your post',
   post_repost:           'shared your post',
   post_mention:          'mentioned you in a post',
@@ -39,6 +41,7 @@ function notifTarget(n: any): string | null {
     case 'friend_accepted':
       return n.actor_username ? `/profile/${n.actor_username}` : null
     case 'post_like':
+    case 'comment_like':
     case 'post_repost':
     case 'post_comment':
     case 'post_mention':

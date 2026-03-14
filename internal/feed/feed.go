@@ -434,9 +434,14 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, postID)
 
 	var authorID string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&authorID)
+	var parentID *string
+	s.db.QueryRow(`SELECT author_id, parent_id FROM posts WHERE id = $1`, postID).Scan(&authorID, &parentID)
 	if authorID != "" && authorID != userID {
-		go s.notif.Create(authorID, userID, "post_like", postID, "")
+		notifType := "post_like"
+		if parentID != nil {
+			notifType = "comment_like"
+		}
+		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
 	writeJSON(w, 200, map[string]string{"message": "liked"})
 }

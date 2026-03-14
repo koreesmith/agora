@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/albums"
@@ -19,21 +20,25 @@ import (
 
 var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
+// fedSender is the subset of federation.Service used here.
+type fedSender interface {
+	BroadcastToFriendInstances(userID string, activity any)
+}
+
 type Service struct {
 	db     *store.DB
 	notif  *notifications.Service
 	media  *media.Service
 	albums *albums.Service
+	fed    fedSender
 }
 
 func NewService(db *store.DB, notif *notifications.Service, media *media.Service) *Service {
 	return &Service{db: db, notif: notif, media: media}
 }
 
-// SetAlbums wires in the albums service after construction (avoids init-order issues).
-func (s *Service) SetAlbums(a *albums.Service) {
-	s.albums = a
-}
+func (s *Service) SetAlbums(a *albums.Service) { s.albums = a }
+func (s *Service) SetFed(f fedSender)          { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/feed",                               s.GetFeed)
@@ -261,6 +266,24 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		go s.albums.AddToTimelineAlbum(userID, req.ImageURL)
 	}
 
+	// Broadcast public posts to federated friend instances
+	if req.Visibility == "public" && s.fed != nil {
+		var username string
+		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+			"type":  "post",
+			"actor": username,
+			"object": map[string]any{
+				"id":           id,
+				"content":      req.Content,
+				"image_url":    req.ImageURL,
+				"visibility":   "public",
+				"author_handle": username,
+				"created_at":   timeNow(),
+			},
+		})
+	}
+
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
@@ -386,6 +409,18 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+
+	// Broadcast deletion to federated instances
+	if s.fed != nil {
+		var username string
+		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+			"type":  "delete_post",
+			"actor": username,
+			"object": map[string]string{"id": id},
+		})
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -753,6 +788,8 @@ func pageParams(r *http.Request) (limit, offset int) {
 	}
 	return
 }
+
+func timeNow() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

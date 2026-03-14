@@ -3,6 +3,7 @@ package friends
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -10,14 +11,23 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
+// fedSender is the subset of federation.Service used here (avoids import cycle).
+type fedSender interface {
+	BroadcastToFriendInstances(userID string, activity any)
+	SendToUserInstance(remoteInstance, instanceURL string, activity any)
+}
+
 type Service struct {
 	db    *store.DB
 	notif *notifications.Service
+	fed   fedSender
 }
 
 func NewService(db *store.DB, notif *notifications.Service) *Service {
 	return &Service{db: db, notif: notif}
 }
+
+func (s *Service) SetFed(f fedSender) { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	// Friendships
@@ -171,6 +181,27 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	go s.notif.Create(addresseeID, requesterID, "friend_request", "", "")
 
+	// If addressee is on a remote instance, send the request over federation
+	if s.fed != nil {
+		var isRemote bool
+		var remoteInstance, remoteUserID, requesterUsername string
+		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, addresseeID).
+			Scan(&isRemote, &remoteInstance, &remoteUserID)
+		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, requesterID).Scan(&requesterUsername)
+		if isRemote && remoteInstance != "" {
+			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
+				"type":       "friend_request",
+				"actor":      requesterUsername,
+				"instance_id": domainFromCfg(s.db),
+				"timestamp":  time.Now().Unix(),
+				"object": map[string]string{
+					"from_handle": requesterUsername,
+					"to_handle":   remoteUserID,
+				},
+			})
+		}
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "friend request sent"})
 }
 
@@ -193,6 +224,27 @@ func (s *Service) Accept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notif.Create(requesterID, userID, "friend_accepted", "", "")
+
+	// If requester is remote, send accept back to their instance
+	if s.fed != nil {
+		var isRemote bool
+		var remoteInstance, remoteUserID, accepterUsername string
+		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, requesterID).
+			Scan(&isRemote, &remoteInstance, &remoteUserID)
+		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&accepterUsername)
+		if isRemote && remoteInstance != "" {
+			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
+				"type":        "friend_accept",
+				"actor":       accepterUsername,
+				"instance_id": domainFromCfg(s.db),
+				"timestamp":   time.Now().Unix(),
+				"object": map[string]string{
+					"from_handle": accepterUsername,
+					"to_handle":   remoteUserID,
+				},
+			})
+		}
+	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request accepted"})
 }
@@ -367,4 +419,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func domainFromCfg(db *store.DB) string {
+	var domain string
+	db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&domain)
+	return domain
 }

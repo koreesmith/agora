@@ -151,20 +151,12 @@ export default function AdminPage() {
       )}
 
       {tab==='federation' && (
-        <div className="space-y-2">
-          {(fedData?.instances||[]).length===0&&<div className="card p-8 text-center text-agora-400">No federated instances yet.</div>}
-          {(fedData?.instances||[]).map((inst:any)=>(
-            <div key={inst.id} className="card p-3 flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm">{inst.name||inst.domain}</p>
-                <p className="text-xs text-agora-400">{inst.domain} · {inst.status}</p>
-              </div>
-              {inst.status==='active'
-                ?<button onClick={()=>blockInst.mutate(inst.id)} className="text-xs text-red-500 hover:underline">Block</button>
-                :<button onClick={()=>unblockInst.mutate(inst.id)} className="text-xs text-green-600 hover:underline">Unblock</button>}
-            </div>
-          ))}
-        </div>
+        <FederationPanel
+          instances={fedData?.instances||[]}
+          onAdd={()=>qc.invalidateQueries({queryKey:['admin-fed']})}
+          onBlock={(id)=>blockInst.mutate(id)}
+          onUnblock={(id)=>unblockInst.mutate(id)}
+        />
       )}
 
       {tab==='invites' && (
@@ -283,6 +275,88 @@ function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void 
             {create.isPending ? 'Adding…' : 'Add Rule'}
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Federation Panel ──────────────────────────────────────────────────────────
+
+function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
+  instances: any[], onAdd: () => void,
+  onBlock: (id: string) => void, onUnblock: (id: string) => void
+}) {
+  const [domain, setDomain] = useState('')
+  const [addMsg, setAddMsg] = useState('')
+  const [addErr, setAddErr] = useState('')
+
+  const add = useMutation({
+    mutationFn: () => adminApi.addInstance(domain.trim()),
+    onSuccess: (res) => {
+      setAddMsg(`✓ Added ${res.data.name || res.data.domain}`)
+      setDomain('')
+      setAddErr('')
+      onAdd()
+      setTimeout(() => setAddMsg(''), 4000)
+    },
+    onError: (e: any) => setAddErr(e.response?.data?.error || 'Could not add instance'),
+  })
+
+  return (
+    <div className="space-y-4">
+      {/* Add instance */}
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Add Federated Instance</h3>
+        <p className="text-sm text-agora-500">
+          Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
+        </p>
+        {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
+        {addErr && <p className="text-sm text-red-500">{addErr}</p>}
+        <div className="flex gap-2">
+          <input
+            className="input flex-1 text-sm"
+            placeholder="social.example.com"
+            value={domain}
+            onChange={e => { setDomain(e.target.value); setAddErr('') }}
+            onKeyDown={e => e.key === 'Enter' && domain.trim() && add.mutate()}
+          />
+          <button
+            onClick={() => add.mutate()}
+            disabled={!domain.trim() || add.isPending}
+            className="btn-primary text-sm"
+          >
+            {add.isPending ? 'Connecting…' : 'Add Instance'}
+          </button>
+        </div>
+      </div>
+
+      {/* Instance list */}
+      <div className="space-y-2">
+        {instances.length === 0 && (
+          <div className="card p-8 text-center text-agora-400 space-y-1">
+            <p className="font-medium">No federated instances yet</p>
+            <p className="text-sm">Add an instance above to start federating.</p>
+          </div>
+        )}
+        {instances.map((inst: any) => (
+          <div key={inst.id} className={`card p-3 flex items-center gap-3 ${inst.status === 'blocked' ? 'opacity-60' : ''}`}>
+            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 text-sm font-bold text-agora-500">
+              {(inst.name || inst.domain)[0].toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm truncate">{inst.name || inst.domain}</p>
+              <p className="text-xs text-agora-400">
+                {inst.domain}
+                <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${inst.status === 'active' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-100 dark:bg-red-900/30 text-red-600'}`}>
+                  {inst.status}
+                </span>
+              </p>
+            </div>
+            {inst.status === 'active'
+              ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Block</button>
+              : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline flex-shrink-0">Unblock</button>}
+          </div>
+        ))}
       </div>
     </div>
   )

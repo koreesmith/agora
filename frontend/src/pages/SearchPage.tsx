@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { searchApi, friendsApi } from '../api'
+import { searchApi, friendsApi, federationApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check } from 'lucide-react'
+import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 
@@ -21,17 +21,27 @@ export default function SearchPage() {
     return () => clearTimeout(debounceTimer.current)
   }, [input])
 
+  const isHandleLookup = /^[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q.trim())
+
   const enabled = q.length >= 2
 
   const { data: usersData, isFetching: usersFetching } = useQuery({
     queryKey: ['search-users', q],
     queryFn: () => searchApi.searchUsers(q).then(r => r.data),
-    enabled: enabled && tab === 'users',
+    enabled: enabled && tab === 'users' && !isHandleLookup,
   })
   const { data: postsData, isFetching: postsFetching } = useQuery({
     queryKey: ['search-posts', q],
     queryFn: () => searchApi.searchPosts(q).then(r => r.data),
-    enabled: enabled && tab === 'posts',
+    enabled: enabled && tab === 'posts' && !isHandleLookup,
+  })
+
+  // Cross-instance handle lookup: user@instance.com
+  const { data: lookupData, isFetching: lookupFetching, error: lookupError } = useQuery({
+    queryKey: ['federation-lookup', q],
+    queryFn: () => federationApi.lookupUser(q.trim()).then(r => r.data),
+    enabled: isHandleLookup,
+    retry: false,
   })
 
   const send = useMutation({
@@ -41,7 +51,7 @@ export default function SearchPage() {
 
   const users = usersData?.users || []
   const posts = postsData?.posts || []
-  const isFetching = tab === 'users' ? usersFetching : postsFetching
+  const isFetching = isHandleLookup ? lookupFetching : (tab === 'users' ? usersFetching : postsFetching)
 
   return (
     <div className="space-y-4">
@@ -62,49 +72,75 @@ export default function SearchPage() {
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
-        <button onClick={() => setTab('users')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'users' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
-          <Users size={13} /> People
-        </button>
-        <button onClick={() => setTab('posts')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'posts' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
-          <FileText size={13} /> Posts
-        </button>
-      </div>
-
-      {/* Empty state */}
-      {!enabled && (
-        <div className="card p-8 text-center text-agora-400 text-sm">
-          <Search size={28} className="mx-auto mb-2 opacity-40" />
-          Type at least 2 characters to search.
-        </div>
-      )}
-
-      {/* People tab */}
-      {tab === 'users' && enabled && (
-        <div className="space-y-2">
-          {users.length === 0 && !usersFetching && (
-            <div className="card p-8 text-center text-agora-400">No people found for "{q}".</div>
-          )}
-          {users.map((u: any) => (
-            <UserResult key={u.id} user={u} currentUserId={user?.id}
-              onAdd={() => send.mutate(u.id)} addPending={send.isPending} />
-          ))}
-        </div>
-      )}
-
-      {/* Posts tab */}
-      {tab === 'posts' && enabled && (
+      {/* Cross-instance handle lookup */}
+      {isHandleLookup ? (
         <div className="space-y-3">
-          {posts.length === 0 && !postsFetching && (
-            <div className="card p-8 text-center text-agora-400">No posts found for "{q}".</div>
+          <p className="text-xs text-agora-400 px-1 flex items-center gap-1.5">
+            <Link2 size={12} /> Looking up federated user
+          </p>
+          {lookupFetching && <div className="text-center py-6 text-agora-400 text-sm">Contacting remote instance…</div>}
+          {!lookupFetching && lookupError && (
+            <div className="card p-8 text-center text-agora-400 space-y-1">
+              <p className="font-medium">User not found</p>
+              <p className="text-sm">Make sure the handle is correct and the instance is reachable.</p>
+            </div>
           )}
-          {posts.map((p: any) => (
-            <PostResult key={p.id} post={p} query={q} />
-          ))}
+          {!lookupFetching && lookupData?.user && (
+            <UserResult
+              user={{ ...lookupData.user, friendship_status: '' }}
+              currentUserId={user?.id}
+              onAdd={() => {}}
+              addPending={false}
+            />
+          )}
         </div>
+      ) : (
+        <>
+          {/* Tabs */}
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            <button onClick={() => setTab('users')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'users' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              <Users size={13} /> People
+            </button>
+            <button onClick={() => setTab('posts')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'posts' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              <FileText size={13} /> Posts
+            </button>
+          </div>
+
+          {/* Empty state */}
+          {!enabled && (
+            <div className="card p-8 text-center text-agora-400 text-sm">
+              <Search size={28} className="mx-auto mb-2 opacity-40" />
+              Type at least 2 characters to search, or enter <span className="font-mono">user@instance.com</span> to find someone on another instance.
+            </div>
+          )}
+
+          {/* People tab */}
+          {tab === 'users' && enabled && (
+            <div className="space-y-2">
+              {users.length === 0 && !usersFetching && (
+                <div className="card p-8 text-center text-agora-400">No people found for "{q}".</div>
+              )}
+              {users.map((u: any) => (
+                <UserResult key={u.id} user={u} currentUserId={user?.id}
+                  onAdd={() => send.mutate(u.id)} addPending={send.isPending} />
+              ))}
+            </div>
+          )}
+
+          {/* Posts tab */}
+          {tab === 'posts' && enabled && (
+            <div className="space-y-3">
+              {posts.length === 0 && !postsFetching && (
+                <div className="card p-8 text-center text-agora-400">No posts found for "{q}".</div>
+              )}
+              {posts.map((p: any) => (
+                <PostResult key={p.id} post={p} query={q} />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )

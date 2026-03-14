@@ -60,6 +60,11 @@ func main() {
 	adminSvc  := admin.NewService(db, cfg, notifSvc)
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
 
+	// Wire federation into services that need to broadcast activities
+	friendSvc.SetFed(fedSvc)
+	feedSvc.SetFed(fedSvc)
+	userSvc.SetFed(fedSvc)
+
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

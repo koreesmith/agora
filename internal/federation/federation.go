@@ -33,6 +33,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/federation/inbox",          s.Inbox)
 	r.Get("/federation/users/{handle}",  s.GetUser)
 	r.Get("/federation/search",          s.Search)
+	r.Get("/federation/lookup",          s.LookupUser) // resolve user@instance.com
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────
@@ -373,6 +374,146 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	if users == nil { users = []User{} }
 	writeJSON(w, 200, map[string]any{"users": users})
+}
+
+// ── Cross-instance user lookup ────────────────────────────────────────────────
+
+// LookupUser resolves a user@instance handle by fetching their profile from the
+// remote instance and creating/updating the local stub. Returns the local profile.
+// Query param: handle=username@instance.com
+func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("handle")
+	if raw == "" {
+		writeError(w, 400, "handle required — format: username@instance.com")
+		return
+	}
+
+	parts := strings.SplitN(raw, "@", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeError(w, 400, "invalid handle — format: username@instance.com")
+		return
+	}
+	username, instance := parts[0], parts[1]
+
+	// Don't look up our own users this way
+	localDomain := domainFromURL(s.cfg.InstanceDomain)
+	if instance == localDomain {
+		var u struct {
+			Username    string `json:"username"`
+			DisplayName string `json:"display_name"`
+			AvatarURL   string `json:"avatar_url"`
+			Bio         string `json:"bio"`
+			ID          string `json:"id"`
+			IsRemote    bool   `json:"is_remote"`
+		}
+		s.db.QueryRow(`SELECT id, username, display_name, avatar_url, bio FROM users WHERE username = $1 AND is_remote = false AND deletion_scheduled_at IS NULL`, username).
+			Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio)
+		if u.ID == "" {
+			writeError(w, 404, "user not found")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"user": u, "local": true})
+		return
+	}
+
+	// Check if already cached locally
+	var localID string
+	s.db.QueryRow(`SELECT id FROM users WHERE remote_user_id = $1 AND remote_instance = $2`, username, instance).Scan(&localID)
+
+	// Fetch fresh profile from remote
+	profile := s.fetchRemoteProfile(username, instance)
+	if len(profile) == 0 && localID == "" {
+		writeError(w, 404, "user not found on remote instance — check the handle and try again")
+		return
+	}
+
+	// Create or update local stub
+	localID = s.getOrCreateRemoteUser(username, instance)
+
+	type Result struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+		Bio         string `json:"bio"`
+		IsRemote    bool   `json:"is_remote"`
+		Instance    string `json:"remote_instance"`
+	}
+	var u Result
+	s.db.QueryRow(`SELECT id, username, display_name, avatar_url, bio, is_remote, remote_instance FROM users WHERE id = $1`, localID).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.IsRemote, &u.Instance)
+
+	writeJSON(w, 200, map[string]any{"user": u, "local": false})
+}
+
+// ── Outbound helpers (called by other services) ───────────────────────────────
+
+// SendToUserInstance enqueues an activity to be delivered to a specific remote instance.
+// activity can be any JSON-serialisable value; the federation service will sign it.
+func (s *Service) SendToUserInstance(remoteInstance, instanceURL string, activity any) {
+	if !s.federationEnabled() { return }
+
+	payload, err := json.Marshal(activity)
+	if err != nil { return }
+
+	// Ensure the activity has our instance_id and timestamp set
+	var m map[string]any
+	json.Unmarshal(payload, &m)
+	if m["instance_id"] == nil { m["instance_id"] = domainFromURL(s.cfg.InstanceDomain) }
+	if m["timestamp"] == nil { m["timestamp"] = time.Now().Unix() }
+	payload, _ = json.Marshal(m)
+
+	s.db.Exec(`
+		INSERT INTO federation_queue (instance_url, payload, next_attempt)
+		VALUES ($1, $2, NOW())
+	`, instanceURL, string(payload))
+}
+
+// BroadcastToFriendInstances sends an activity to all remote instances where
+// the given user has at least one accepted friend.
+func (s *Service) BroadcastToFriendInstances(userID string, activity any) {
+	if !s.federationEnabled() { return }
+
+	payload, err := json.Marshal(activity)
+	if err != nil { return }
+
+	var m map[string]any
+	json.Unmarshal(payload, &m)
+	if m["instance_id"] == nil { m["instance_id"] = domainFromURL(s.cfg.InstanceDomain) }
+	if m["timestamp"] == nil { m["timestamp"] = time.Now().Unix() }
+	payload, _ = json.Marshal(m)
+
+	// Find distinct remote instances of accepted friends
+	rows, err := s.db.Query(`
+		SELECT DISTINCT u.remote_instance
+		FROM friendships f
+		JOIN users u ON u.id = CASE
+			WHEN f.requester_id = $1 THEN f.addressee_id
+			ELSE f.requester_id
+		END
+		WHERE (f.requester_id = $1 OR f.addressee_id = $1)
+		  AND f.status = 'accepted'
+		  AND u.is_remote = true
+		  AND u.remote_instance != ''
+	`, userID)
+	if err != nil { return }
+	defer rows.Close()
+
+	var instances []string
+	for rows.Next() {
+		var inst string
+		rows.Scan(&inst)
+		instances = append(instances, inst)
+	}
+	rows.Close()
+
+	for _, inst := range instances {
+		instanceURL := "https://" + inst
+		s.db.Exec(`
+			INSERT INTO federation_queue (instance_url, payload, next_attempt)
+			VALUES ($1, $2, NOW())
+		`, instanceURL, string(payload))
+	}
 }
 
 // ── Outbound queue ────────────────────────────────────────────────────────────

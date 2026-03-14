@@ -20,14 +20,21 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
+type fedSender interface {
+	BroadcastToFriendInstances(userID string, activity any)
+}
+
 type Service struct {
 	db    *store.DB
 	media *media.Service
+	fed   fedSender
 }
 
 func NewService(db *store.DB, media *media.Service) *Service {
 	return &Service{db: db, media: media}
 }
+
+func (s *Service) SetFed(f fedSender) { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/users/{username}",          s.GetProfile)
@@ -164,6 +171,23 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast profile update to federated friend instances
+	if s.fed != nil {
+		var username, displayName, avatarURL, bio string
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, bio FROM users WHERE id = $1`, userID).
+			Scan(&username, &displayName, &avatarURL, &bio)
+		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+			"type":  "profile_update",
+			"actor": username,
+			"object": map[string]string{
+				"handle":       username,
+				"display_name": displayName,
+				"avatar_url":   avatarURL,
+				"bio":          bio,
+			},
+		})
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "profile updated"})
 }
 
@@ -175,6 +199,16 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.Exec(`UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
+	if s.fed != nil {
+		var username, displayName, avatarURL, bio string
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, bio FROM users WHERE id = $1`, userID).
+			Scan(&username, &displayName, &avatarURL, &bio)
+		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+			"type":  "profile_update",
+			"actor": username,
+			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
+		})
+	}
 	writeJSON(w, 200, map[string]string{"avatar_url": url})
 }
 

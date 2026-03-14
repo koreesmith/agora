@@ -162,8 +162,9 @@ export const adminApi = {
   revokeInvite:    (id: string)                => api.delete(`/admin/invites/${id}`),
   getAuditLog:     ()                          => api.get('/admin/audit-log'),
   listInstances:   ()                          => api.get('/admin/federation/instances'),
+  addInstance:     (domain: string)            => api.post('/admin/federation/instances', { domain }),
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),
-  unblockInstance:        (id: string)          => api.post(`/admin/federation/instances/${id}/unblock`),
+  unblockInstance: (id: string)                => api.post(`/admin/federation/instances/${id}/unblock`),
   resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
   // Instance rules
   listRules:   ()                               => api.get('/admin/rules'),
@@ -173,6 +174,11 @@ export const adminApi = {
   moveRule:    (id: string, direction: 'up'|'down') => api.patch(`/admin/rules/${id}/move`, { direction }),
 }
 
+
+// ── Federation ────────────────────────────────────────────────────────────────
+export const federationApi = {
+  lookupUser: (handle: string) => api.get('/federation/lookup', { params: { handle } }),
+}
 
 // ── Albums ────────────────────────────────────────────────────────────────────
 export const albumsApi = {

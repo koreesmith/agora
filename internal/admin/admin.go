@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -51,6 +52,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 
 	// Federation
 	r.Get("/admin/federation/instances",               s.ListInstances)
+	r.Post("/admin/federation/instances",              s.AddInstance)
 	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
 	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
 
@@ -331,6 +333,50 @@ func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Federation ────────────────────────────────────────────────────────────────
+
+func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Domain) == "" {
+		writeError(w, 400, "domain required")
+		return
+	}
+	domain := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(req.Domain), "https://"), "http://")
+	domain = strings.Split(domain, "/")[0]
+
+	// Fetch instance info to verify it's a real Agora instance
+	instanceURL := "https://" + domain
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(instanceURL + "/.well-known/agora-instance")
+	if err != nil || resp.StatusCode != 200 {
+		writeError(w, 422, "could not reach instance — make sure it is an Agora instance with federation enabled")
+		return
+	}
+	defer resp.Body.Close()
+
+	var info struct {
+		Name      string `json:"name"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		writeError(w, 422, "invalid response from instance")
+		return
+	}
+
+	s.db.Exec(`
+		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
+		VALUES ($1, $2, $3, $4, 'active')
+		ON CONFLICT (domain) DO UPDATE
+		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW()
+	`, domain, info.Name, info.PublicKey, instanceURL)
+
+	actorID := auth.UserIDFromCtx(r.Context())
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'add_instance', 'instance', $2, $3)`,
+		actorID, domain, instanceURL)
+
+	writeJSON(w, 201, map[string]string{"message": "instance added", "domain": domain, "name": info.Name})
+}
 
 func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`

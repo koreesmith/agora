@@ -69,7 +69,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
 
   const likeComment = useMutation({
     mutationFn: ({ id, liked }: { id: string, liked: boolean }) =>
-      liked ? feedApi.unlikePost(id) : feedApi.likePost(id),
+      liked ? feedApi.unreactPost(id) : feedApi.reactPost(id, 'like'),
     onMutate: async ({ id, liked }) => {
       await qc.cancelQueries({ queryKey: ['comments', postId] })
       const prev = qc.getQueryData(['comments', postId])

@@ -52,6 +52,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Patch("/posts/{id}",                       s.EditPost)
 	r.Post("/posts/{id}/like",                   s.LikePost)
 	r.Delete("/posts/{id}/like",                 s.UnlikePost)
+	r.Post("/posts/{id}/react",                  s.ReactPost)
+	r.Delete("/posts/{id}/react",                s.UnreactPost)
+	r.Get("/posts/{id}/reactions",               s.GetReactions)
 	r.Post("/posts/{id}/repost",                 s.Repost)
 	r.Get("/posts/{id}/comments",                s.GetComments)
 	r.Post("/posts/{id}/comments",               s.CreateComment)
@@ -162,6 +165,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	posts := scanPosts(rows)
+	s.enrichReactions(posts, userID)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -223,6 +227,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	posts := scanPosts(rows)
+	s.enrichReactions(posts, viewerID)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -401,6 +406,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "post not found")
 		return
 	}
+	s.enrichReactions(posts, viewerID)
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -462,6 +468,97 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	writeJSON(w, 200, map[string]string{"message": "unliked"})
+}
+
+// ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
+
+var validReactions = map[string]bool{
+	"like": true, "love": true, "laugh": true, "angry": true,
+	"care": true, "pride": true, "thankful": true, "vomit": true,
+}
+
+func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var req struct {
+		Type string `json:"type"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if !validReactions[req.Type] {
+		writeError(w, 400, "invalid reaction type")
+		return
+	}
+
+	// Upsert — replaces any existing reaction from this user on this post
+	s.db.Exec(`
+		INSERT INTO reactions (user_id, post_id, reaction_type)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, post_id) DO UPDATE SET reaction_type = $3, created_at = NOW()
+	`, userID, postID, req.Type)
+
+	// Notification: find post author, fire if not self
+	var authorID string
+	var parentID *string
+	s.db.QueryRow(`SELECT author_id, parent_id FROM posts WHERE id = $1`, postID).Scan(&authorID, &parentID)
+	if authorID != "" && authorID != userID {
+		notifType := "post_reaction"
+		if parentID != nil {
+			notifType = "comment_reaction"
+		}
+		go s.notif.Create(authorID, userID, notifType, postID, req.Type)
+	}
+
+	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
+}
+
+func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	writeJSON(w, 200, map[string]string{"message": "unreacted"})
+}
+
+type ReactionUser struct {
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	AvatarURL   string `json:"avatar_url"`
+	Type        string `json:"type"`
+}
+
+func (s *Service) GetReactions(w http.ResponseWriter, r *http.Request) {
+	postID := chi.URLParam(r, "id")
+
+	rows, err := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, COALESCE(u.avatar_url,''), r.reaction_type
+		FROM reactions r
+		JOIN users u ON u.id = r.user_id
+		WHERE r.post_id = $1 AND u.deletion_scheduled_at IS NULL
+		ORDER BY r.created_at ASC
+	`, postID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	var reactions []ReactionUser
+	counts := map[string]int{}
+	for rows.Next() {
+		var ru ReactionUser
+		rows.Scan(&ru.UserID, &ru.Username, &ru.DisplayName, &ru.AvatarURL, &ru.Type)
+		reactions = append(reactions, ru)
+		counts[ru.Type]++
+	}
+	if reactions == nil {
+		reactions = []ReactionUser{}
+	}
+	writeJSON(w, 200, map[string]any{
+		"reactions": reactions,
+		"counts":    counts,
+		"total":     len(reactions),
+	})
 }
 
 // ── Reposts ───────────────────────────────────────────────────────────────────
@@ -819,6 +916,10 @@ type Post struct {
 	RepostCount    int     `json:"repost_count"`
 	Liked          bool    `json:"liked"`
 	Reposted       bool    `json:"reposted"`
+	// Reactions (AGORA-25)
+	ReactionCount  int     `json:"reaction_count"`
+	MyReaction     string  `json:"my_reaction"` // empty string = no reaction
+	ReactionCounts map[string]int `json:"reaction_counts"`
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
@@ -846,10 +947,73 @@ func scanPosts(rows interface {
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
 		)
+		p.ReactionCounts = map[string]int{}
 		posts = append(posts, p)
 	}
 	if posts == nil { return []Post{} }
 	return posts
+}
+
+// enrichReactions loads reaction counts and the current user's reaction for a slice of posts.
+func (s *Service) enrichReactions(posts []Post, userID string) {
+	if len(posts) == 0 {
+		return
+	}
+	// Build post ID list
+	ids := make([]string, len(posts))
+	idxMap := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxMap[p.ID] = i
+		if posts[i].ReactionCounts == nil {
+			posts[i].ReactionCounts = map[string]int{}
+		}
+	}
+
+	// Build $1,$2,... placeholders
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Aggregate reaction counts per post
+	rows, err := s.db.Query(
+		fmt.Sprintf(`SELECT post_id, reaction_type, COUNT(*) FROM reactions WHERE post_id IN (%s) GROUP BY post_id, reaction_type`, inClause),
+		args...,
+	)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var postID, rtype string
+			var cnt int
+			rows.Scan(&postID, &rtype, &cnt)
+			if idx, ok := idxMap[postID]; ok {
+				posts[idx].ReactionCounts[rtype] = cnt
+				posts[idx].ReactionCount += cnt
+			}
+		}
+	}
+
+	// Current user's reaction
+	if userID != "" {
+		urows, err := s.db.Query(
+			fmt.Sprintf(`SELECT post_id, reaction_type FROM reactions WHERE user_id = $1 AND post_id IN (%s)`, inClause),
+			append([]any{userID}, args...)...,
+		)
+		if err == nil {
+			defer urows.Close()
+			for urows.Next() {
+				var postID, rtype string
+				urows.Scan(&postID, &rtype)
+				if idx, ok := idxMap[postID]; ok {
+					posts[idx].MyReaction = rtype
+				}
+			}
+		}
+	}
 }
 
 func pageParams(r *http.Request) (limit, offset int) {

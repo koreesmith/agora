@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -8,6 +8,22 @@ import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
+
+// ── Reaction config ───────────────────────────────────────────────────────────
+
+const REACTIONS = [
+  { type: 'like',     emoji: '❤️',  label: 'Like'     },
+  { type: 'love',     emoji: '😍',  label: 'Love'     },
+  { type: 'laugh',    emoji: '😂',  label: 'Laugh'    },
+  { type: 'angry',    emoji: '😡',  label: 'Angry'    },
+  { type: 'care',     emoji: '🤗',  label: 'Care'     },
+  { type: 'pride',    emoji: '🏳️‍🌈', label: 'Pride'    },
+  { type: 'thankful', emoji: '🙏',  label: 'Thankful' },
+  { type: 'vomit',    emoji: '🤮',  label: 'Vomit'    },
+]
+const REACTION_MAP: Record<string, { emoji: string; label: string }> = Object.fromEntries(
+  REACTIONS.map(r => [r.type, { emoji: r.emoji, label: r.label }])
+)
 
 interface Post {
   id: string
@@ -26,8 +42,8 @@ interface Post {
   link_description: string
   link_image: string
   link_domain: string
-  group_id?: string        // community group id
-  friend_list_id?: string  // friend list id (when visibility=group)
+  group_id?: string
+  friend_list_id?: string
   group_name?: string
   group_slug?: string
   repost_of_id?: string
@@ -40,6 +56,10 @@ interface Post {
   repost_count: number
   liked: boolean
   reposted: boolean
+  // Reactions (AGORA-25)
+  reaction_count: number
+  my_reaction: string
+  reaction_counts: Record<string, number>
   created_at: string
   edited_at?: string
 }
@@ -51,6 +71,137 @@ const visIcons: Record<string, React.ReactNode> = {
   private: <Lock size={12} />,
 }
 
+// ── Reaction Picker ───────────────────────────────────────────────────────────
+
+function ReactionPicker({ onPick }: { onPick: (type: string) => void }) {
+  return (
+    <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
+      onMouseLeave={e => e.stopPropagation()}
+    >
+      {REACTIONS.map(r => (
+        <button
+          key={r.type}
+          title={r.label}
+          onClick={e => { e.stopPropagation(); onPick(r.type) }}
+          className="text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5"
+          style={{ lineHeight: 1 }}
+        >
+          {r.emoji}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Reactions Summary Bar ─────────────────────────────────────────────────────
+
+function ReactionBar({ counts, total, myReaction, onOpenModal }: {
+  counts: Record<string, number>
+  total: number
+  myReaction: string
+  onOpenModal: () => void
+}) {
+  if (total === 0 && !myReaction) return null
+  const sorted = Object.entries(counts).filter(([,c]) => c > 0).sort((a,b) => b[1]-a[1])
+  return (
+    <button
+      onClick={onOpenModal}
+      className="flex items-center gap-1 mt-1 px-1 hover:bg-agora-50 dark:hover:bg-agora-700/50 rounded-full transition-colors"
+    >
+      <span className="flex -space-x-0.5">
+        {sorted.slice(0,3).map(([type]) => (
+          <span key={type} className="text-sm leading-none">{REACTION_MAP[type]?.emoji}</span>
+        ))}
+      </span>
+      {total > 0 && (
+        <span className="text-xs text-agora-500 dark:text-agora-400 ml-0.5">{total}</span>
+      )}
+    </button>
+  )
+}
+
+// ── Reactions Synopsis Modal ──────────────────────────────────────────────────
+
+function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => void }) {
+  const [activeTab, setActiveTab] = useState<string>('all')
+  const { data } = useQuery({
+    queryKey: ['reactions', postId],
+    queryFn: () => feedApi.getReactions(postId).then(r => r.data),
+  })
+  const reactions: any[] = data?.reactions || []
+  const counts: Record<string, number> = data?.counts || {}
+  const total: number = data?.total || 0
+
+  const tabs = [
+    { key: 'all', label: `All ${total}` },
+    ...REACTIONS.filter(r => counts[r.type]).map(r => ({
+      key: r.type,
+      label: `${r.emoji} ${counts[r.type]}`,
+    })),
+  ]
+
+  const filtered = activeTab === 'all' ? reactions : reactions.filter(r => r.type === activeTab)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+      onClick={onClose}>
+      <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-sm"
+        onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 pt-4 pb-2">
+          <h3 className="font-semibold text-agora-900 dark:text-agora-100">Reactions</h3>
+          <button onClick={onClose} className="text-agora-400 hover:text-agora-600 transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+        {/* Tab strip */}
+        <div className="flex gap-1 px-3 pb-2 overflow-x-auto border-b border-agora-100 dark:border-agora-700">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              className={`flex-shrink-0 px-3 py-1 rounded-full text-sm transition-colors ${
+                activeTab === t.key
+                  ? 'bg-agora-600 text-white'
+                  : 'text-agora-500 hover:bg-agora-100 dark:hover:bg-agora-700'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {/* List */}
+        <div className="max-h-72 overflow-y-auto py-2">
+          {filtered.length === 0
+            ? <p className="text-center text-sm text-agora-400 py-6">No reactions yet</p>
+            : filtered.map((r: any) => (
+                <div key={r.user_id} className="flex items-center gap-3 px-4 py-2 hover:bg-agora-50 dark:hover:bg-agora-700/50">
+                  <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {r.avatar_url
+                      ? <img src={r.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
+                          {(r.display_name || r.username)[0].toUpperCase()}
+                        </span>
+                    }
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
+                      {r.display_name || r.username}
+                    </p>
+                    <p className="text-xs text-agora-400">@{r.username}</p>
+                  </div>
+                  <span className="text-lg leading-none">{REACTION_MAP[r.type]?.emoji}</span>
+                </div>
+              ))
+          }
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── PostCard ──────────────────────────────────────────────────────────────────
+
 export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const [twExpanded, setTwExpanded] = useState(false)
@@ -59,27 +210,40 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showComments, setShowComments] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showReport, setShowReport] = useState(false)
+  const [showReactionPicker, setShowReactionPicker] = useState(false)
+  const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editContent, setEditContent] = useState(post.content)
   const [editVisibility, setEditVisibility] = useState(post.visibility)
   const [editFriendListId, setEditFriendListId] = useState(post.friend_list_id || '')
   const [editTwEnabled, setEditTwEnabled] = useState(!!post.content_warning)
   const [editTwLabel, setEditTwLabel] = useState(post.content_warning || '')
+  const pickerHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Only fetch friend lists when the edit UI is open
   const { data: groupsData } = useQuery({
     queryKey: ['friend-groups'],
     queryFn: () => friendsApi.listGroups().then(r => r.data),
-    enabled: editing && !post.group_id, // don't fetch for community group posts
+    enabled: editing && !post.group_id,
   })
   const friendLists: any[] = groupsData?.groups || []
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
 
-  const like = useMutation({
-    mutationFn: () => post.liked ? feedApi.unlikePost(post.id) : feedApi.likePost(post.id),
+  // Reaction mutation — picks or removes
+  const react = useMutation({
+    mutationFn: (type: string | null) =>
+      type ? feedApi.reactPost(post.id, type) : feedApi.unreactPost(post.id),
     onSuccess: invalidate,
   })
+
+  const handleReactionPick = (type: string) => {
+    setShowReactionPicker(false)
+    if (post.my_reaction === type) {
+      react.mutate(null)  // toggle off
+    } else {
+      react.mutate(type)
+    }
+  }
 
   const del = useMutation({
     mutationFn: () => feedApi.deletePost(post.id),
@@ -413,30 +577,63 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
           )}
 
           {/* Actions */}
-          <div className="flex items-center gap-4 mt-3 text-agora-400 dark:text-agora-500">
-            <button
-              onClick={() => like.mutate()}
-              className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${post.liked ? 'text-red-500' : ''}`}>
-              <Heart size={16} fill={post.liked ? 'currentColor' : 'none'} />
-              <span>{post.like_count}</span>
-            </button>
+          <div className="mt-3">
+            <div className="flex items-center gap-4 text-agora-400 dark:text-agora-500">
+              {/* Reaction button + picker */}
+              <div
+                className="relative"
+                onMouseEnter={() => {
+                  if (pickerHideTimer.current) clearTimeout(pickerHideTimer.current)
+                  setShowReactionPicker(true)
+                }}
+                onMouseLeave={() => {
+                  pickerHideTimer.current = setTimeout(() => setShowReactionPicker(false), 300)
+                }}
+              >
+                <button
+                  onClick={() => post.my_reaction ? react.mutate(null) : setShowReactionPicker(p => !p)}
+                  className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${post.my_reaction ? 'text-red-500' : ''}`}
+                >
+                  <span className="text-base leading-none" style={{lineHeight:1}}>
+                    {post.my_reaction ? REACTION_MAP[post.my_reaction]?.emoji : '🤍'}
+                  </span>
+                  <span className="text-sm">{post.reaction_count || ''}</span>
+                </button>
+                {showReactionPicker && (
+                  <ReactionPicker onPick={handleReactionPick} />
+                )}
+              </div>
 
-            <button
-              onClick={() => setShowComments(c => !c)}
-              className="flex items-center gap-1.5 text-sm hover:text-agora-700 dark:hover:text-agora-200 transition-colors">
-              <MessageCircle size={16} />
-              <span>{post.comment_count}</span>
-            </button>
+              <button
+                onClick={() => setShowComments(c => !c)}
+                className="flex items-center gap-1.5 text-sm hover:text-agora-700 dark:hover:text-agora-200 transition-colors">
+                <MessageCircle size={16} />
+                <span>{post.comment_count}</span>
+              </button>
 
-            <button
-              onClick={() => repost.mutate()}
-              className={`flex items-center gap-1.5 text-sm transition-colors hover:text-green-500 ${post.reposted ? 'text-green-500' : ''}`}>
-              <Repeat2 size={16} />
-              <span>{post.repost_count}</span>
-            </button>
+              <button
+                onClick={() => repost.mutate()}
+                className={`flex items-center gap-1.5 text-sm transition-colors hover:text-green-500 ${post.reposted ? 'text-green-500' : ''}`}>
+                <Repeat2 size={16} />
+                <span>{post.repost_count}</span>
+              </button>
+            </div>
+
+            {/* Reaction summary bar */}
+            <ReactionBar
+              counts={post.reaction_counts || {}}
+              total={post.reaction_count || 0}
+              myReaction={post.my_reaction}
+              onOpenModal={() => setShowReactionsModal(true)}
+            />
           </div>
         </div>
       </div>
+
+      {/* Reactions synopsis modal */}
+      {showReactionsModal && (
+        <ReactionsModal postId={post.id} onClose={() => setShowReactionsModal(false)} />
+      )}
 
       {/* Comments */}
       {showComments && <CommentsSection postId={post.id} postAuthorId={post.author_id} />}

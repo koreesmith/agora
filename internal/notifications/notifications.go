@@ -204,6 +204,9 @@ func notifEmailContent(t, actorName, instanceName, baseURL string) (subject, bod
 	case "post_like":
 		return fmt.Sprintf("%s liked your post", actorName),
 			fmt.Sprintf("%s liked one of your posts on %s.", actorName, instanceName)
+	case "post_reaction", "comment_reaction":
+		return fmt.Sprintf("%s reacted to your post", actorName),
+			fmt.Sprintf("%s reacted to one of your posts on %s.", actorName, instanceName)
 	case "post_comment":
 		return fmt.Sprintf("%s commented on your post", actorName),
 			fmt.Sprintf("%s left a comment on your post on %s.\n\nHead to %s to see what they said.", actorName, instanceName, baseURL)

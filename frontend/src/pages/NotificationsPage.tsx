@@ -10,6 +10,8 @@ const typeIcon: Record<string, React.ReactNode> = {
   friend_accepted:       <UserCheck size={16} className="text-green-500" />,
   post_like:             <Heart size={16} className="text-red-500" />,
   comment_like:          <Heart size={16} className="text-red-400" />,
+  post_reaction:         <span style={{fontSize:15}}>✨</span>,
+  comment_reaction:      <span style={{fontSize:15}}>✨</span>,
   post_comment:          <MessageCircle size={16} className="text-agora-500" />,
   post_repost:           <Repeat2 size={16} className="text-green-500" />,
   post_mention:          <MessageCircle size={16} className="text-blue-500" />,
@@ -20,11 +22,18 @@ const typeIcon: Record<string, React.ReactNode> = {
   group_invite_accepted: <UserCheck size={16} className="text-green-500" />,
 }
 
+const REACTION_EMOJIS: Record<string, string> = {
+  like: '❤️', love: '😍', laugh: '😂', angry: '😡',
+  care: '🤗', pride: '🏳️‍🌈', thankful: '🙏', vomit: '🤮',
+}
+
 const notifText: Record<string, string> = {
   friend_request:        'sent you a friend request',
   friend_accepted:       'accepted your friend request',
   post_like:             'liked your post',
   comment_like:          'liked your comment',
+  post_reaction:         'reacted to your post',
+  comment_reaction:      'reacted to your comment',
   post_comment:          'commented on your post',
   post_repost:           'shared your post',
   post_mention:          'mentioned you in a post',
@@ -42,6 +51,8 @@ function notifTarget(n: any): string | null {
       return n.actor_username ? `/profile/${n.actor_username}` : null
     case 'post_like':
     case 'comment_like':
+    case 'post_reaction':
+    case 'comment_reaction':
     case 'post_repost':
     case 'post_comment':
     case 'post_mention':
@@ -178,11 +189,13 @@ function NotifAvatar({ n }: { n: any }) {
 }
 
 function NotifBody({ n }: { n: any }) {
+  const reactionEmoji = (n.type === 'post_reaction' || n.type === 'comment_reaction') && n.data
+    ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
   return (
     <div className="flex-1 min-w-0">
       <p className="text-sm">
         <span className="font-semibold">{n.actor_display_name || n.actor_username}</span>
-        {' '}{notifText[n.type] || ''}
+        {' '}{notifText[n.type] || ''}{reactionEmoji}
       </p>
       <p className="text-xs text-agora-400 mt-0.5">
         {formatDistanceToNow(new Date(n.created_at), { addSuffix: true })}

@@ -540,12 +540,24 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		comments = []Comment{}
 	}
 
-	// Replies for each top-level comment
+	// Replies for each top-level comment, and depth-2 replies for each depth-1 reply
 	for i, c := range comments {
 		rrows, err := s.db.Query(commentSQL, viewerID, c.ID)
 		if err != nil { continue }
 		for rrows.Next() {
-			comments[i].Replies = append(comments[i].Replies, scanComment(rrows))
+			reply := scanComment(rrows)
+			// Fetch depth-2 replies for this depth-1 reply
+			rrrows, err2 := s.db.Query(commentSQL, viewerID, reply.ID)
+			if err2 == nil {
+				for rrrows.Next() {
+					reply.Replies = append(reply.Replies, scanComment(rrrows))
+				}
+				rrrows.Close()
+			}
+			if reply.Replies == nil {
+				reply.Replies = []Comment{}
+			}
+			comments[i].Replies = append(comments[i].Replies, reply)
 		}
 		rrows.Close()
 		if comments[i].Replies == nil {
@@ -583,7 +595,6 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	parentID := postID
 	var replyToAuthorID string
 	if req.ReplyToID != "" {
-		// Validate the comment being replied to is a direct child of this post (depth = 1)
 		var commentParentID string
 		s.db.QueryRow(`SELECT parent_id, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`,
 			req.ReplyToID).Scan(&commentParentID, &replyToAuthorID)
@@ -591,11 +602,20 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "comment not found")
 			return
 		}
-		if commentParentID != postID {
-			writeError(w, 400, "cannot reply to a reply")
-			return
+		if commentParentID == postID {
+			// Replying to a depth-0 comment — fine
+			parentID = req.ReplyToID
+		} else {
+			// Replying to a depth-1 comment — check its parent is the post (depth-1 check)
+			var grandParentID string
+			s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`,
+				commentParentID).Scan(&grandParentID)
+			if grandParentID != postID {
+				writeError(w, 400, "maximum reply depth reached")
+				return
+			}
+			parentID = req.ReplyToID
 		}
-		parentID = req.ReplyToID
 	}
 
 	var id string

@@ -265,6 +265,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   }
 
   const isOwn = c.author_id === currentUserId
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
   const avatarSize = depth === 0 ? 'w-8 h-8' : depth === 1 ? 'w-6 h-6' : 'w-5 h-5'
 
@@ -307,7 +308,35 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           ) : (
             <>
               <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
-              {c.image_url && <img src={c.image_url} alt="" className="mt-1 rounded-lg max-h-64 object-contain bg-agora-50 dark:bg-agora-900" />}
+              {c.image_url && (
+                <>
+                  <img
+                    src={c.image_url}
+                    alt=""
+                    className="mt-1 rounded-lg max-h-64 object-contain bg-agora-50 dark:bg-agora-900 cursor-zoom-in"
+                    onClick={() => setLightboxUrl(c.image_url)}
+                  />
+                  {lightboxUrl === c.image_url && (
+                    <div
+                      className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
+                      onClick={() => setLightboxUrl(null)}
+                    >
+                      <button
+                        onClick={() => setLightboxUrl(null)}
+                        className="absolute top-4 right-4 bg-black/40 text-white rounded-full p-1.5 hover:bg-black/70"
+                      >
+                        <XIcon size={20} />
+                      </button>
+                      <img
+                        src={c.image_url}
+                        alt=""
+                        className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                        onClick={e => e.stopPropagation()}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
             </>
           )}
         </div>

@@ -8,6 +8,7 @@ export interface User {
   bio: string
   avatar_url: string
   cover_url: string
+  cover_position: string
   location: string
   website: string
   role: 'user' | 'moderator' | 'admin'

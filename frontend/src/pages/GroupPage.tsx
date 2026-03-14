@@ -8,6 +8,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 import CommentsSection from '../components/feed/CommentsSection'
 import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList } from 'lucide-react'
+import CoverPhoto from '../components/common/CoverPhoto'
 
 export default function GroupPage() {
   const { slug } = useParams<{ slug: string }>()!
@@ -15,6 +16,7 @@ export default function GroupPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [tab, setTab] = useState<'feed'|'members'|'settings'>('feed')
+  const [lightbox, setLightbox] = useState<string | null>(null)
   const [requestMsg, setRequestMsg] = useState('')
   const [showRequestModal, setShowRequestModal] = useState(false)
   const [requestSent, setRequestSent] = useState(false)
@@ -55,6 +57,7 @@ export default function GroupPage() {
   )
 
   return (
+    <>
     <div className="space-y-4">
       {/* Request to join modal */}
       {showRequestModal && (
@@ -83,12 +86,12 @@ export default function GroupPage() {
       {/* Header */}
       <div className="card overflow-hidden">
         {group.cover_url
-          ? <img src={group.cover_url} alt="" className="w-full h-32 object-cover" />
+          ? <img src={group.cover_url} alt="" className="w-full h-32 object-cover cursor-zoom-in" onClick={() => setLightbox(group.cover_url)} />
           : <div className="w-full h-16 bg-gradient-to-r from-agora-600 to-agora-400" />}
         <div className="p-4 flex gap-3 items-start">
           <div className="w-14 h-14 rounded-xl bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 -mt-8 ring-2 ring-white dark:ring-agora-800">
             {group.avatar_url
-              ? <img src={group.avatar_url} alt="" className="w-full h-full object-cover" />
+              ? <img src={group.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(group.avatar_url)} />
               : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-500">{group.name[0]}</span>}
           </div>
           <div className="flex-1 min-w-0">
@@ -136,6 +139,15 @@ export default function GroupPage() {
       {tab === 'members' && <GroupMembers slug={slug!} group={group} canManage={canManage} isOwner={isOwner} currentUserID={user?.id} />}
       {tab === 'settings' && canManage && <GroupSettings slug={slug!} group={group} isOwner={isOwner} onDelete={() => deleteGroup.mutate()} />}
     </div>
+    {lightbox && (
+      <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center" onClick={() => setLightbox(null)}>
+        <button onClick={() => setLightbox(null)} className="absolute top-4 right-4 bg-black/40 text-white rounded-full p-1.5 hover:bg-black/70">
+          <X size={20} />
+        </button>
+        <img src={lightbox} alt="" className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} />
+      </div>
+    )}
+  </>
   )
 }
 
@@ -367,6 +379,11 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
     } catch (err: any) { alert(err?.response?.data?.error || 'Upload failed') }
   }
 
+  const saveCoverPosition = async (pos: string) => {
+    await groupsApi.update(slug, { cover_position: pos })
+    invalidate()
+  }
+
   const uploadGroupAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return
     try {
@@ -433,12 +450,16 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
         {/* Cover photo */}
         <div>
           <label className="label mb-1.5">Cover photo</label>
-          <div className="relative h-24 rounded-xl bg-gradient-to-r from-agora-300 to-agora-500 dark:from-agora-700 dark:to-agora-900 overflow-hidden">
-            {group.cover_url && <img src={group.cover_url} alt="" className="w-full h-full object-cover" />}
-            <label className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 hover:opacity-100 transition-opacity cursor-pointer">
-              <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded-lg">Change cover</span>
-              <input type="file" accept="image/*" className="hidden" onChange={uploadGroupCover} />
-            </label>
+          <div className="rounded-xl overflow-hidden">
+            <CoverPhoto
+              src={group.cover_url}
+              position={group.cover_position || '50% 50%'}
+              height="h-36"
+              editable={true}
+              onUpload={uploadGroupCover}
+              onPositionSave={saveCoverPosition}
+              clickable={false}
+            />
           </div>
         </div>
 

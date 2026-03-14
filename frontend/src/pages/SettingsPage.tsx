@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '../store/auth'
 import { usersApi, authApi, notificationsApi } from '../api'
+import CoverPhoto from '../components/common/CoverPhoto'
 
 export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
@@ -48,6 +49,12 @@ export default function SettingsPage() {
     } catch (err: any) {
       alert(err?.response?.data?.error || 'Upload failed')
     }
+  }
+
+  const saveCoverPosition = async (pos: string) => {
+    await usersApi.updateProfile({ cover_position: pos })
+    updateUser({ cover_position: pos })
+    ok('Cover position saved')
   }
 
   const exportData = async () => {
@@ -108,12 +115,16 @@ export default function SettingsPage() {
           {/* Cover photo */}
           <div>
             <label className="label mb-1.5">Cover photo</label>
-            <div className="relative h-28 rounded-xl bg-gradient-to-r from-agora-300 to-agora-500 dark:from-agora-700 dark:to-agora-900 overflow-hidden">
-              {user?.cover_url && <img src={user.cover_url} alt="" className="w-full h-full object-cover" />}
-              <label className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 hover:opacity-100 transition-opacity cursor-pointer">
-                <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded-lg">Change cover photo</span>
-                <input type="file" accept="image/*" className="hidden" onChange={uploadCover} />
-              </label>
+            <div className="rounded-xl overflow-hidden">
+              <CoverPhoto
+                src={user?.cover_url || ''}
+                position={user?.cover_position || '50% 50%'}
+                height="h-36"
+                editable={true}
+                onUpload={uploadCover}
+                onPositionSave={saveCoverPosition}
+                clickable={false}
+              />
             </div>
           </div>
 

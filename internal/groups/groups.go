@@ -69,19 +69,20 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // ── Group CRUD ────────────────────────────────────────────────────────────────
 
 type Group struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-	CoverURL    string `json:"cover_url"`
-	AvatarURL   string `json:"avatar_url"`
-	Privacy     string `json:"privacy"`
-	CreatedBy   string `json:"created_by"`
-	MemberCount int    `json:"member_count"`
-	PostCount   int    `json:"post_count"`
-	CreatedAt   string `json:"created_at"`
-	MemberRole  string `json:"member_role,omitempty"`
-	IsMember    bool   `json:"is_member"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Slug           string `json:"slug"`
+	Description    string `json:"description"`
+	CoverURL       string `json:"cover_url"`
+	CoverPosition  string `json:"cover_position"`
+	AvatarURL      string `json:"avatar_url"`
+	Privacy        string `json:"privacy"`
+	CreatedBy      string `json:"created_by"`
+	MemberCount    int    `json:"member_count"`
+	PostCount      int    `json:"post_count"`
+	CreatedAt      string `json:"created_at"`
+	MemberRole     string `json:"member_role,omitempty"`
+	IsMember       bool   `json:"is_member"`
 }
 
 func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +98,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// ── Search query: live autocomplete across all visible groups ──────────────
 	if q != "" {
 		rows, err := s.db.Query(`
-			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 			       COALESCE(m.role,''), (m.user_id IS NOT NULL)
 			FROM community_groups g
@@ -116,7 +117,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		var groups []Group
 		for rows.Next() {
 			var g Group
-			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 				&g.MemberRole, &g.IsMember)
 			groups = append(groups, g)
@@ -129,7 +130,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// ── My Groups (owned) ──────────────────────────────────────────────────────
 	if filter == "mine" {
 		rows, err := s.db.Query(`
-			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 			       m.role, true
 			FROM community_groups g
@@ -144,7 +145,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		var groups []Group
 		for rows.Next() {
 			var g Group
-			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 				&g.MemberRole, &g.IsMember)
 			groups = append(groups, g)
@@ -157,7 +158,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// ── Joined ─────────────────────────────────────────────────────────────────
 	if filter == "joined" {
 		rows, err := s.db.Query(`
-			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+			SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 			       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 			       m.role, true
 			FROM community_groups g
@@ -171,7 +172,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		var groups []Group
 		for rows.Next() {
 			var g Group
-			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+			rows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 				&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 				&g.MemberRole, &g.IsMember)
 			groups = append(groups, g)
@@ -185,7 +186,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// Section 1: Public groups where at least one friend is a member, user not already in
 	const friendsLimit = 10
 	friendRows, err := s.db.Query(`
-		SELECT DISTINCT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+		SELECT DISTINCT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 		       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 		       '', false,
 		       COUNT(DISTINCT cgm2.user_id) AS friend_count
@@ -216,7 +217,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	var friendGroups []DiscoverGroup
 	for friendRows.Next() {
 		var g DiscoverGroup
-		friendRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+		friendRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 			&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 			&g.MemberRole, &g.IsMember, &g.FriendCount)
 		seenIDs[g.ID] = true
@@ -242,7 +243,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	limitPlaceholder := fmt.Sprintf("$%d", len(excludeArgs))
 
 	popularQuery := fmt.Sprintf(`
-		SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+		SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 		       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 		       '', false, 0
 		FROM community_groups g
@@ -264,7 +265,7 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	var popularGroups []DiscoverGroup
 	for popularRows.Next() {
 		var g DiscoverGroup
-		popularRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+		popularRows.Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 			&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 			&g.MemberRole, &g.IsMember, &g.FriendCount)
 		popularGroups = append(popularGroups, g)
@@ -283,13 +284,13 @@ func (s *Service) GetGroup(w http.ResponseWriter, r *http.Request) {
 
 	var g Group
 	err := s.db.QueryRow(`
-		SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.avatar_url,
+		SELECT g.id, g.name, g.slug, g.description, g.cover_url, g.cover_position, g.avatar_url,
 		       g.privacy, g.created_by, g.member_count, g.post_count, g.created_at,
 		       COALESCE(m.role,''), (m.user_id IS NOT NULL)
 		FROM community_groups g
 		LEFT JOIN community_group_members m ON m.group_id = g.id AND m.user_id = $1
 		WHERE g.slug = $2
-	`, userID, slug).Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.AvatarURL,
+	`, userID, slug).Scan(&g.ID, &g.Name, &g.Slug, &g.Description, &g.CoverURL, &g.CoverPosition, &g.AvatarURL,
 		&g.Privacy, &g.CreatedBy, &g.MemberCount, &g.PostCount, &g.CreatedAt,
 		&g.MemberRole, &g.IsMember)
 	if err != nil {
@@ -346,11 +347,12 @@ func (s *Service) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "forbidden"); return
 	}
 	var req struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
-		Privacy     *string `json:"privacy"`
-		CoverURL    *string `json:"cover_url"`
-		AvatarURL   *string `json:"avatar_url"`
+		Name          *string `json:"name"`
+		Description   *string `json:"description"`
+		Privacy       *string `json:"privacy"`
+		CoverURL      *string `json:"cover_url"`
+		CoverPosition *string `json:"cover_position"`
+		AvatarURL     *string `json:"avatar_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
@@ -367,6 +369,7 @@ func (s *Service) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil        { add("name", strings.TrimSpace(*req.Name)) }
 	if req.Description != nil { add("description", *req.Description) }
 	if req.CoverURL != nil    { add("cover_url", *req.CoverURL) }
+	if req.CoverPosition != nil { add("cover_position", *req.CoverPosition) }
 	if req.AvatarURL != nil   { add("avatar_url", *req.AvatarURL) }
 	if req.Privacy != nil && s.hasRole(slug, userID, "owner") {
 		p := *req.Privacy

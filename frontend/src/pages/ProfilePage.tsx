@@ -5,7 +5,7 @@ import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X } from 'lucide-react'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={10} />,
@@ -18,6 +18,7 @@ export default function ProfilePage() {
   const { user: me } = useAuthStore()
   const qc = useQueryClient()
   const [tab, setTab] = useState<'posts'|'photos'>('posts')
+  const [lightbox, setLightbox] = useState<string | null>(null)
 
   const { data: profile, isLoading } = useQuery({
     queryKey: ['profile', username],
@@ -59,17 +60,25 @@ export default function ProfilePage() {
   const posts: any[]  = postsData?.posts ?? []
 
   return (
+    <>
     <div className="space-y-4">
       {/* Cover + avatar */}
       <div className="card overflow-hidden">
         <div className="h-32 bg-gradient-to-r from-agora-300 to-agora-500 dark:from-agora-700 dark:to-agora-900">
-          {profile.cover_url && <img src={profile.cover_url} alt="" className="w-full h-full object-cover" />}
+          {profile.cover_url && (
+            <img
+              src={profile.cover_url}
+              alt=""
+              className="w-full h-full object-cover cursor-zoom-in"
+              onClick={() => setLightbox(profile.cover_url)}
+            />
+          )}
         </div>
         <div className="px-4 pb-4">
           <div className="flex items-end justify-between -mt-10 mb-3">
             <div className="w-20 h-20 rounded-full border-4 border-white dark:border-agora-800 bg-agora-200 dark:bg-agora-700 overflow-hidden">
               {profile.avatar_url
-                ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
+                ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(profile.avatar_url)} />
                 : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
               }
             </div>
@@ -137,7 +146,6 @@ export default function ProfilePage() {
           {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
         </div>
       ) : (
-        /* Photos tab */
         <div className="space-y-3">
           {isSelf && (
             <div className="flex justify-end">
@@ -149,7 +157,7 @@ export default function ProfilePage() {
           {albums.length === 0 ? (
             <div className="card p-8 text-center text-agora-400 space-y-2">
               <Images size={28} className="mx-auto opacity-40" />
-              <p>{isSelf ? 'You haven\'t created any albums yet.' : `${profile.display_name} hasn't shared any albums.`}</p>
+              <p>{isSelf ? "You haven't created any albums yet." : `${profile.display_name} hasn't shared any albums.`}</p>
               {isSelf && <Link to="/albums" className="btn-primary text-sm inline-block mt-1">Create an album</Link>}
             </div>
           ) : (
@@ -177,5 +185,14 @@ export default function ProfilePage() {
         </div>
       )}
     </div>
+    {lightbox && (
+      <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center" onClick={() => setLightbox(null)}>
+        <button onClick={() => setLightbox(null)} className="absolute top-4 right-4 bg-black/40 text-white rounded-full p-1.5 hover:bg-black/70">
+          <X size={20} />
+        </button>
+        <img src={lightbox} alt="" className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={e => e.stopPropagation()} />
+      </div>
+    )}
+  </>
   )
 }

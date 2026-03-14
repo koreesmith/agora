@@ -62,6 +62,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		Bio            string  `json:"bio"`
 		AvatarURL      string  `json:"avatar_url"`
 		CoverURL       string  `json:"cover_url"`
+		CoverPosition  string  `json:"cover_position"`
 		Location       string  `json:"location"`
 		Website        string  `json:"website"`
 		ProfilePrivate bool    `json:"profile_private"`
@@ -73,12 +74,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, bio, avatar_url, cover_url,
+		SELECT id, username, display_name, bio, avatar_url, cover_url, cover_position,
 		       location, website, profile_private, is_remote, remote_instance,
 		       created_at
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
-		&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL,
+		&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.IsRemote, &u.RemoteInstance,
 		&u.CreatedAt,
 	)
@@ -135,6 +136,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		Location       *string `json:"location"`
 		Website        *string `json:"website"`
 		ProfilePrivate *bool   `json:"profile_private"`
+		CoverPosition  *string `json:"cover_position"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -159,6 +161,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ProfilePrivate != nil {
 		sets = append(sets, fmt.Sprintf("profile_private = $%d", i)); args = append(args, *req.ProfilePrivate); i++
+	}
+	if req.CoverPosition != nil {
+		sets = append(sets, fmt.Sprintf("cover_position = $%d", i)); args = append(args, *req.CoverPosition); i++
 	}
 
 	args = append(args, userID)

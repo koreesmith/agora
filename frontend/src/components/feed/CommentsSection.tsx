@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Heart, Pencil, Reply } from 'lucide-react'
+import { Trash2, Send, Heart, Pencil, Reply, Image, X as XIcon } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 
@@ -23,7 +23,18 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [text, setText] = useState('')
+  const [imageUrl, setImageUrl] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return
+    setUploading(true)
+    try { const res = await feedApi.uploadMedia(file, 'posts'); setImageUrl(res.data.url) }
+    catch (err: any) { alert(err?.response?.data?.error || 'Upload failed') }
+    finally { setUploading(false); if (fileRef.current) fileRef.current.value = '' }
+  }
 
   const { data } = useQuery({
     queryKey: ['comments', postId],
@@ -31,9 +42,10 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
   })
 
   const create = useMutation({
-    mutationFn: () => feedApi.createComment(postId, { content: text }),
+    mutationFn: () => feedApi.createComment(postId, { content: text, image_url: imageUrl }),
     onSuccess: () => {
       setText('')
+      setImageUrl('')
       qc.invalidateQueries({ queryKey: ['comments', postId] })
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
@@ -145,22 +157,38 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
             : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{user?.username?.[0]?.toUpperCase()}</span>}
         </div>
-        <div className="flex-1 flex gap-2 relative">
-          <input
-            ref={inputRef as React.RefObject<HTMLInputElement>}
-            className="input flex-1 text-sm py-1.5"
-            placeholder="Write a comment… use @username to tag"
-            value={text}
-            onChange={e => { setText(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
-            onKeyDown={e => {
-              if (e.key === 'Escape') { dismiss(); return }
-              if (e.key === 'Enter' && !e.shiftKey && text.trim() && !showMentions) create.mutate()
-            }}
-          />
-          {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(text, setText, u)} />}
-          <button onClick={() => create.mutate()} disabled={!text.trim() || create.isPending} className="btn-primary px-3 py-1.5">
-            <Send size={14} />
-          </button>
+        <div className="flex-1 space-y-1.5">
+          {/* Image preview */}
+          {imageUrl && (
+            <div className="relative">
+              <img src={imageUrl} alt="" className="rounded-lg max-h-40 object-contain bg-agora-50 dark:bg-agora-900" />
+              <button onClick={() => setImageUrl('')} className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
+                <XIcon size={10} />
+              </button>
+            </div>
+          )}
+          <div className="flex gap-1.5 relative">
+            {/* Image upload button */}
+            <label className={`flex-shrink-0 p-1.5 rounded-lg text-agora-400 hover:text-agora-600 hover:bg-agora-100 dark:hover:bg-agora-700 cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : ''}`} title="Add image">
+              <Image size={16} />
+              <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
+            </label>
+            <input
+              ref={inputRef as React.RefObject<HTMLInputElement>}
+              className="input flex-1 text-sm py-1.5"
+              placeholder="Write a comment… use @username to tag"
+              value={text}
+              onChange={e => { setText(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
+              onKeyDown={e => {
+                if (e.key === 'Escape') { dismiss(); return }
+                if (e.key === 'Enter' && !e.shiftKey && (text.trim() || imageUrl) && !showMentions) create.mutate()
+              }}
+            />
+            {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(text, setText, u)} />}
+            <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5">
+              {uploading ? <span className="text-xs">…</span> : <Send size={14} />}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -186,7 +214,18 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const [editContent, setEditContent] = useState(c.content)
   const [showReplyBox, setShowReplyBox] = useState(false)
   const [replyText, setReplyText] = useState('')
+  const [replyImageUrl, setReplyImageUrl] = useState('')
+  const [replyUploading, setReplyUploading] = useState(false)
+  const replyFileRef = useRef<HTMLInputElement>(null)
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+
+  const handleReplyImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return
+    setReplyUploading(true)
+    try { const res = await feedApi.uploadMedia(file, 'posts'); setReplyImageUrl(res.data.url) }
+    catch (err: any) { alert(err?.response?.data?.error || 'Upload failed') }
+    finally { setReplyUploading(false); if (replyFileRef.current) replyFileRef.current.value = '' }
+  }
 
   const editMutation = useMutation({
     mutationFn: () => feedApi.editComment(postId, c.id, editContent),
@@ -196,10 +235,12 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const replyMutation = useMutation({
     mutationFn: () => feedApi.createComment(postId, {
       content: replyText,
+      image_url: replyImageUrl,
       reply_to_id: c.id,
     }),
     onSuccess: () => {
       setReplyText('')
+      setReplyImageUrl('')
       setShowReplyBox(false)
       onReplyCreated()
     },
@@ -208,6 +249,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const openReply = () => {
     const mention = `@${c.username} `
     setReplyText(mention)
+    setReplyImageUrl('')
     setShowReplyBox(true)
   }
 
@@ -308,36 +350,52 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                 ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
                 : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{user?.username?.[0]?.toUpperCase()}</span>}
             </div>
-            <div className="flex-1 flex gap-2 relative">
-              <input
-                ref={inputRef as React.RefObject<HTMLInputElement>}
-                className="input flex-1 text-sm py-1"
-                placeholder={`Reply to ${c.username}…`}
-                value={replyText}
-                autoFocus
-                onChange={e => {
-                  setReplyText(e.target.value)
-                  handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)
-                }}
-                onKeyDown={e => {
-                  if (e.key === 'Escape') { dismiss(); setShowReplyBox(false); return }
-                  if (e.key === 'Enter' && !e.shiftKey && replyText.trim() && !showMentions) replyMutation.mutate()
-                }}
-              />
-              {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(replyText, setReplyText, u)} />}
-              <button
-                onClick={() => { setShowReplyBox(false); setReplyText('') }}
-                className="btn-secondary text-xs px-2 py-1"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => replyMutation.mutate()}
-                disabled={!replyText.trim() || replyMutation.isPending}
-                className="btn-primary text-xs px-2 py-1"
-              >
-                {replyMutation.isPending ? '…' : <Send size={12} />}
-              </button>
+            <div className="flex-1 space-y-1.5">
+              {/* Reply image preview */}
+              {replyImageUrl && (
+                <div className="relative">
+                  <img src={replyImageUrl} alt="" className="rounded-lg max-h-32 object-contain bg-agora-50 dark:bg-agora-900" />
+                  <button onClick={() => setReplyImageUrl('')} className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
+                    <XIcon size={10} />
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-1.5 relative">
+                {/* Image upload */}
+                <label className={`flex-shrink-0 p-1 rounded text-agora-400 hover:text-agora-600 hover:bg-agora-100 dark:hover:bg-agora-700 cursor-pointer transition-colors ${replyUploading ? 'opacity-50 pointer-events-none' : ''}`} title="Add image">
+                  <Image size={14} />
+                  <input ref={replyFileRef} type="file" accept="image/*" className="hidden" onChange={handleReplyImageUpload} disabled={replyUploading || !!replyImageUrl} />
+                </label>
+                <input
+                  ref={inputRef as React.RefObject<HTMLInputElement>}
+                  className="input flex-1 text-sm py-1"
+                  placeholder={`Reply to ${c.username}…`}
+                  value={replyText}
+                  autoFocus
+                  onChange={e => {
+                    setReplyText(e.target.value)
+                    handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Escape') { dismiss(); setShowReplyBox(false); return }
+                    if (e.key === 'Enter' && !e.shiftKey && (replyText.trim() || replyImageUrl) && !showMentions) replyMutation.mutate()
+                  }}
+                />
+                {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(replyText, setReplyText, u)} />}
+                <button
+                  onClick={() => { setShowReplyBox(false); setReplyText(''); setReplyImageUrl('') }}
+                  className="btn-secondary text-xs px-2 py-1"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => replyMutation.mutate()}
+                  disabled={(!replyText.trim() && !replyImageUrl) || replyMutation.isPending || replyUploading}
+                  className="btn-primary text-xs px-2 py-1"
+                >
+                  {replyMutation.isPending ? '…' : <Send size={12} />}
+                </button>
+              </div>
             </div>
           </div>
         )}

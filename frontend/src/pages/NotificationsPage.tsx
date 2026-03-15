@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const typeIcon: Record<string, React.ReactNode> = {
@@ -18,6 +18,9 @@ const typeIcon: Record<string, React.ReactNode> = {
   post_mention:          <MessageCircle size={16} className="text-blue-500" />,
   comment_reply:         <MessageCircle size={16} className="text-agora-600" />,
   user_post:             <Bell size={16} className="text-agora-500" />,
+  wall_post:             <PenLine size={16} className="text-agora-500" />,
+  wall_post_pending:     <PenLine size={16} className="text-amber-500" />,
+  wall_post_approved:    <CheckCircle size={16} className="text-green-500" />,
   group_join_request:    <Users size={16} className="text-agora-500" />,
   group_join_approved:   <CheckCircle size={16} className="text-green-500" />,
   group_join_rejected:   <XCircle size={16} className="text-red-400" />,
@@ -41,6 +44,9 @@ const notifText: Record<string, string> = {
   post_mention:          'mentioned you in a post',
   comment_reply:         'replied to your comment',
   user_post:             'made a new post',
+  wall_post:             'posted on your wall',
+  wall_post_pending:     'wants to post on your wall',
+  wall_post_approved:    'approved your wall post',
   group_join_request:    'wants to join your group',
   group_join_approved:   'approved your request to join a group',
   group_join_rejected:   'declined your request to join a group',
@@ -61,6 +67,9 @@ function notifTarget(n: any): string | null {
     case 'post_mention':
     case 'comment_reply':
     case 'user_post':
+    case 'wall_post':
+    case 'wall_post_pending':
+    case 'wall_post_approved':
       return n.post_id ? `/post/${n.post_id}` : null
     case 'group_join_request':
     case 'group_join_approved':

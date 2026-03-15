@@ -218,6 +218,15 @@ func notifEmailContent(t, actorName, instanceName, baseURL string) (subject, bod
 	case "user_post":
 		return fmt.Sprintf("%s just posted on %s", actorName, instanceName),
 			fmt.Sprintf("%s just posted something new on %s.\n\nSee the post: %s", actorName, instanceName, baseURL)
+	case "wall_post":
+		return fmt.Sprintf("%s posted on your wall", actorName),
+			fmt.Sprintf("%s wrote something on your wall on %s.\n\nSee it: %s", actorName, instanceName, baseURL)
+	case "wall_post_pending":
+		return fmt.Sprintf("%s wants to post on your wall", actorName),
+			fmt.Sprintf("%s posted on your wall on %s but it needs your approval.\n\nReview it: %s/profile/%s", actorName, instanceName, baseURL, "me")
+	case "wall_post_approved":
+		return fmt.Sprintf("Your wall post was approved", actorName),
+			fmt.Sprintf("Your post on someone's wall on %s was approved.\n\nSee it: %s", instanceName, baseURL)
 	}
 	return "", ""
 }

@@ -55,6 +55,10 @@ export const feedApi = {
   editComment:   (postId: string, commentId: string, content: string) => api.patch(`/posts/${postId}/comments/${commentId}`, { content }),
   pollVote:      (id: string, option_id: string) => api.post(`/posts/${id}/poll/vote`, { option_id }),
   pollUnvote:    (id: string)              => api.delete(`/posts/${id}/poll/vote`),
+  getWall:       (username: string)        => api.get(`/users/${username}/wall`),
+  getWallQueue:  ()                        => api.get('/users/me/wall-queue'),
+  wallApprove:   (id: string)              => api.post(`/posts/${id}/wall-approve`),
+  wallReject:    (id: string)              => api.post(`/posts/${id}/wall-reject`),
   getUserPosts:  (username: string, params?: any) => api.get(`/users/${username}/posts`, { params }),
   uploadMedia:   (file: File, category = 'posts') => {
     const form = new FormData()

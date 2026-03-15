@@ -5,7 +5,7 @@ import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const visIcon: Record<string, React.ReactNode> = {
@@ -18,8 +18,11 @@ export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
   const { user: me } = useAuthStore()
   const qc = useQueryClient()
-  const [tab, setTab] = useState<'posts'|'photos'>('posts')
+  const [tab, setTab] = useState<'posts'|'photos'|'wall'>('posts')
   const [lightbox, setLightbox] = useState<string | null>(null)
+  const [showWallComposer, setShowWallComposer] = useState(false)
+  const [wallContent, setWallContent] = useState('')
+  const [wallPosting, setWallPosting] = useState(false)
 
   const { data: profile, isLoading } = useQuery({
     queryKey: ['profile', username],
@@ -36,6 +39,18 @@ export default function ProfilePage() {
     queryKey: ['user-albums', username],
     queryFn: () => albumsApi.listForUser(username!).then(r => r.data),
     enabled: !!profile && !profile.profile_private && tab === 'photos',
+  })
+
+  const { data: wallData, refetch: refetchWall } = useQuery({
+    queryKey: ['wall', username],
+    queryFn: () => feedApi.getWall(username!).then(r => r.data),
+    enabled: !!profile && tab === 'wall',
+  })
+
+  const { data: wallQueueData, refetch: refetchQueue } = useQuery({
+    queryKey: ['wall-queue'],
+    queryFn: () => feedApi.getWallQueue().then(r => r.data),
+    enabled: !!profile && tab === 'wall' && profile.friend_status === 'self',
   })
 
   const [listModalFriend, setListModalFriend] = useState<any | null>(null)
@@ -63,6 +78,28 @@ export default function ProfilePage() {
       : usersApi.enablePostNotify(profile.username),
     onSuccess: inv,
   })
+
+  const wallApprove = useMutation({
+    mutationFn: (id: string) => feedApi.wallApprove(id),
+    onSuccess: () => { refetchWall(); refetchQueue() },
+  })
+  const wallReject = useMutation({
+    mutationFn: (id: string) => feedApi.wallReject(id),
+    onSuccess: () => { refetchWall(); refetchQueue() },
+  })
+
+  const handlePostToWall = async () => {
+    if (!wallContent.trim()) return
+    setWallPosting(true)
+    try {
+      await feedApi.createPost({ content: wallContent, wall_user_id: profile.id })
+      setWallContent('')
+      setShowWallComposer(false)
+      refetchWall()
+    } finally {
+      setWallPosting(false)
+    }
+  }
 
   if (isLoading) return <div className="text-center py-12 text-agora-400">Loading…</div>
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
@@ -123,7 +160,7 @@ export default function ProfilePage() {
                 </div>
               )}
               {!isSelf && status === 'accepted' && (
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
                     <UserCheck size={16}/> Friends
                   </button>
@@ -137,6 +174,12 @@ export default function ProfilePage() {
                       ? <><BellOff size={15}/> Notifying</>
                       : <><Bell size={15}/> Notify me</>
                     }
+                  </button>
+                  <button
+                    onClick={() => { setTab('wall'); setShowWallComposer(true) }}
+                    className="btn-primary text-sm flex items-center gap-1"
+                  >
+                    <PenLine size={15}/> Write on wall
                   </button>
                 </div>
               )}
@@ -168,6 +211,10 @@ export default function ProfilePage() {
               className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'photos' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
               <Images size={14} /> Photos
             </button>
+            <button onClick={() => setTab('wall')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'wall' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
+              <PenLine size={14} /> Wall
+            </button>
           </div>
         )}
       </div>
@@ -183,6 +230,79 @@ export default function ProfilePage() {
         <div className="space-y-4">
           {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts`} />)}
           {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
+        </div>
+      ) : tab === 'wall' ? (
+        <div className="space-y-4">
+          {/* Wall composer */}
+          {!isSelf && status === 'accepted' && showWallComposer && (
+            <div className="card p-4 space-y-3">
+              <p className="text-sm font-medium text-agora-700 dark:text-agora-300">Write on {profile.display_name}'s wall</p>
+              <textarea
+                className="input w-full resize-none text-sm"
+                rows={3}
+                autoComplete="off"
+                placeholder={`Write something on ${profile.display_name}'s wall…`}
+                value={wallContent}
+                onChange={e => setWallContent(e.target.value)}
+                autoFocus
+              />
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => { setShowWallComposer(false); setWallContent('') }} className="btn-secondary text-sm">Cancel</button>
+                <button onClick={handlePostToWall} disabled={!wallContent.trim() || wallPosting} className="btn-primary text-sm">
+                  {wallPosting ? 'Posting…' : 'Post to wall'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Pending queue — wall owner only */}
+          {isSelf && (wallQueueData?.posts || []).length > 0 && (
+            <div className="card p-4 space-y-3">
+              <h3 className="font-semibold text-sm text-agora-700 dark:text-agora-300 flex items-center gap-2">
+                <Clock size={15} /> Pending approval ({wallQueueData.posts.length})
+              </h3>
+              {wallQueueData.posts.map((p: any) => (
+                <div key={p.id} className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                      {p.author_avatar_url
+                        ? <img src={p.author_avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{p.author_display_name?.[0]}</span>}
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium">{p.author_display_name || p.author_username}</span>
+                      <span className="text-xs text-agora-400 ml-1">@{p.author_username}</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-agora-700 dark:text-agora-300 whitespace-pre-wrap">{p.content}</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => wallApprove.mutate(p.id)} className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
+                      <CheckCircle size={13} /> Approve
+                    </button>
+                    <button onClick={() => wallReject.mutate(p.id)} className="btn-secondary text-xs py-1 px-3 flex items-center gap-1 text-red-500">
+                      <XCircle size={13} /> Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Approved wall posts */}
+          {(wallData?.posts || []).map((p: any) => (
+            <PostCard key={p.id} post={p} invalidateKey="wall" />
+          ))}
+          {!(wallData?.posts || []).length && (
+            <div className="card p-8 text-center text-agora-400 text-sm">
+              <PenLine size={28} className="mx-auto mb-2 opacity-40" />
+              <p>No wall posts yet.</p>
+              {status === 'accepted' && !showWallComposer && (
+                <button onClick={() => setShowWallComposer(true)} className="btn-primary text-sm mt-3">
+                  Write on {profile.display_name}'s wall
+                </button>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-3">

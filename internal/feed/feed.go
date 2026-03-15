@@ -63,6 +63,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/users/{username}/posts",             s.GetUserPosts)
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
+	r.Get("/users/{username}/wall",              s.GetWall)
+	r.Get("/users/me/wall-queue",                s.GetWallQueue)
+	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
+	r.Post("/posts/{id}/wall-reject",            s.WallReject)
 }
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
@@ -89,15 +93,18 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-			       rp.content, rp.image_url, rp.created_at
+			       rp.content, rp.image_url, rp.created_at,
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+			LEFT JOIN users wu ON wu.id = p.wall_user_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
+			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4
@@ -131,21 +138,32 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-			       rp.content, rp.image_url, rp.created_at
+			       rp.content, rp.image_url, rp.created_at,
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+			LEFT JOIN users wu ON wu.id = p.wall_user_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
+			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND (
 			    p.author_id = $1
+			    OR p.wall_user_id = $1
 			    OR EXISTS(
 			      SELECT 1 FROM friendships f
 			      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
 			          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+			      AND f.status = 'accepted'
+			    )
+			    OR EXISTS(
+			      SELECT 1 FROM friendships f
+			      WHERE p.wall_user_id IS NOT NULL
+			        AND ((f.requester_id = $1 AND f.addressee_id = p.wall_user_id)
+			          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
 			      AND f.status = 'accepted'
 			    )
 			  )
@@ -215,11 +233,13 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::uuid, NULL::text, NULL::text, 'approved'::text
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
+		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
 		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
 	`, viewerID, authorID, limit, offset)
@@ -251,6 +271,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		LinkImage       string   `json:"link_image"`
 		LinkDomain      string   `json:"link_domain"`
 		PollOptions     []string `json:"poll_options"`
+		WallUserID      string   `json:"wall_user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -282,13 +303,43 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		groupID = &req.GroupID
 	}
 
+	// Wall post handling
+	var wallUserID *string
+	wallStatus := "approved"
+	if req.WallUserID != "" && req.WallUserID != userID {
+		// Must be friends
+		var isFriend bool
+		s.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM friendships
+				WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+				AND status = 'accepted'
+			)
+		`, userID, req.WallUserID).Scan(&isFriend)
+		if !isFriend {
+			writeError(w, 403, "you can only post on friends' walls")
+			return
+		}
+		wallUserID = &req.WallUserID
+		// Check if target requires approval
+		var approvalRequired bool
+		s.db.QueryRow(`SELECT wall_approval_required FROM users WHERE id = $1`, req.WallUserID).Scan(&approvalRequired)
+		if approvalRequired {
+			wallStatus = "pending"
+		}
+		// Wall posts are always friends visibility
+		req.Visibility = "friends"
+	}
+
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning,
-		                   link_url, link_title, link_description, link_image, link_domain)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id
+		                   link_url, link_title, link_description, link_image, link_domain,
+		                   wall_user_id, wall_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning,
-		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain).Scan(&id)
+		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
+		wallUserID, wallStatus).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -300,7 +351,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyMentions(req.Content, userID, id)
-	go s.notifyPostFollowers(userID, id)
+	if wallUserID == nil {
+		go s.notifyPostFollowers(userID, id)
+	} else if wallStatus == "approved" {
+		// Notify the wall owner
+		s.notif.Create(*wallUserID, userID, "wall_post", id, "")
+	} else {
+		// Notify wall owner they have a pending post to review
+		s.notif.Create(*wallUserID, userID, "wall_post_pending", id, "")
+	}
 
 	// Add image to user's Timeline Photos album
 	if req.ImageURL != "" && s.albums != nil {
@@ -411,12 +470,14 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $2) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at
+		       rp.content, rp.image_url, rp.created_at,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
 		LEFT JOIN users rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
 	`, id, viewerID)
 	if err != nil {
@@ -441,12 +502,14 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var authorID string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID)
+	var wallUserID *string
+	s.db.QueryRow(`SELECT author_id, wall_user_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID, &wallUserID)
 	if authorID == "" {
 		writeError(w, 404, "post not found")
 		return
 	}
-	if authorID != userID && role != "admin" && role != "moderator" {
+	isWallOwner := wallUserID != nil && *wallUserID == userID
+	if authorID != userID && role != "admin" && role != "moderator" && !isWallOwner {
 		writeError(w, 403, "forbidden")
 		return
 	}
@@ -598,6 +661,126 @@ func (s *Service) PollUnvote(w http.ResponseWriter, r *http.Request) {
 		  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
 	`, userID, postID)
 	writeJSON(w, 200, map[string]string{"message": "unvoted"})
+}
+
+// ── Wall (AGORA-19) ───────────────────────────────────────────────────────────
+
+func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	viewerID := auth.UserIDFromCtx(r.Context())
+
+	var wallOwnerID string
+	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&wallOwnerID)
+	if wallOwnerID == "" {
+		writeError(w, 404, "user not found"); return
+	}
+
+	// Viewers see approved posts only; owner sees all (pending too)
+	statusFilter := `p.wall_status = 'approved'`
+	if viewerID == wallOwnerID {
+		statusFilter = `p.wall_status IN ('approved','pending')`
+	}
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
+		       cg.name, cg.slug,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		WHERE p.wall_user_id = $2
+		  AND p.deleted_at IS NULL
+		  AND `+statusFilter+`
+		ORDER BY p.created_at DESC
+		LIMIT 50
+	`, viewerID, wallOwnerID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	s.enrichReactions(posts, viewerID)
+	s.enrichPolls(posts, viewerID)
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
+		       cg.name, cg.slug,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		WHERE p.wall_user_id = $1 AND p.wall_status = 'pending' AND p.deleted_at IS NULL
+		ORDER BY p.created_at ASC
+	`, userID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+func (s *Service) WallApprove(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var wallUserID string
+	s.db.QueryRow(`SELECT wall_user_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, postID).Scan(&wallUserID)
+	if wallUserID != userID {
+		writeError(w, 403, "forbidden"); return
+	}
+	s.db.Exec(`UPDATE posts SET wall_status = 'approved' WHERE id = $1`, postID)
+
+	// Notify the author it was approved
+	var authorID string
+	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&authorID)
+	if authorID != "" && authorID != userID {
+		go s.notif.Create(authorID, userID, "wall_post_approved", postID, "")
+	}
+	writeJSON(w, 200, map[string]string{"message": "approved"})
+}
+
+func (s *Service) WallReject(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var wallUserID string
+	s.db.QueryRow(`SELECT wall_user_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, postID).Scan(&wallUserID)
+	if wallUserID != userID {
+		writeError(w, 403, "forbidden"); return
+	}
+	// Hard delete rejected posts
+	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, postID)
+	writeJSON(w, 200, map[string]string{"message": "rejected"})
 }
 
 // enrichPolls loads poll options and vote counts for a slice of posts.
@@ -1145,6 +1328,11 @@ type Post struct {
 	// Polls (AGORA-5)
 	PollOptions    []PollOption `json:"poll_options,omitempty"`
 	MyPollVote     string       `json:"my_poll_vote,omitempty"` // option_id or empty
+	// Wall (AGORA-19)
+	WallUserID       *string `json:"wall_user_id,omitempty"`
+	WallUsername     *string `json:"wall_username,omitempty"`
+	WallDisplayName  *string `json:"wall_display_name,omitempty"`
+	WallStatus       string  `json:"wall_status,omitempty"`
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
@@ -1172,6 +1360,7 @@ func scanPosts(rows interface {
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
+			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 		)
 		p.ReactionCounts = map[string]int{}
 		posts = append(posts, p)

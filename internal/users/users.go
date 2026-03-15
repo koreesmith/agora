@@ -143,13 +143,14 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	var req struct {
-		DisplayName    *string `json:"display_name"`
-		Pronouns       *string `json:"pronouns"`
-		Bio            *string `json:"bio"`
-		Location       *string `json:"location"`
-		Website        *string `json:"website"`
-		ProfilePrivate *bool   `json:"profile_private"`
-		CoverPosition  *string `json:"cover_position"`
+		DisplayName          *string `json:"display_name"`
+		Pronouns             *string `json:"pronouns"`
+		Bio                  *string `json:"bio"`
+		Location             *string `json:"location"`
+		Website              *string `json:"website"`
+		ProfilePrivate       *bool   `json:"profile_private"`
+		CoverPosition        *string `json:"cover_position"`
+		WallApprovalRequired *bool   `json:"wall_approval_required"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -180,6 +181,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CoverPosition != nil {
 		sets = append(sets, fmt.Sprintf("cover_position = $%d", i)); args = append(args, *req.CoverPosition); i++
+	}
+	if req.WallApprovalRequired != nil {
+		sets = append(sets, fmt.Sprintf("wall_approval_required = $%d", i)); args = append(args, *req.WallApprovalRequired); i++
 	}
 
 	args = append(args, userID)

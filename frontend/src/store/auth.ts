@@ -14,6 +14,7 @@ export interface User {
   website: string
   role: 'user' | 'moderator' | 'admin'
   profile_private: boolean
+  wall_approval_required: boolean
 }
 
 interface AuthState {

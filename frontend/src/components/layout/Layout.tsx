@@ -30,6 +30,7 @@ export default function Layout() {
     staleTime: 5 * 60_000,
   })
   const instanceName: string = instanceData?.instance_name || 'Agora'
+  const logoUrl: string = instanceData?.logo_url || ''
 
   const nav = [
     { to: '/',                          icon: Home,    label: 'Feed' },
@@ -54,8 +55,11 @@ export default function Layout() {
       {/* Logo / instance name */}
       <Link to="/" onClick={() => setMobileOpen(false)}
         className="flex items-center gap-3 px-4 py-5 mb-2">
-        <div className="w-9 h-9 rounded-xl bg-agora-700 flex items-center justify-center flex-shrink-0">
-          <span className="text-white font-bold text-base">{instanceName[0]?.toUpperCase()}</span>
+        <div className="w-9 h-9 rounded-xl bg-agora-700 flex items-center justify-center flex-shrink-0 overflow-hidden">
+          {logoUrl
+            ? <img src={logoUrl} alt={instanceName} className="w-full h-full object-cover" />
+            : <span className="text-white font-bold text-base">{instanceName[0]?.toUpperCase()}</span>
+          }
         </div>
         <span className="font-bold text-lg text-agora-800 dark:text-agora-100 truncate">{instanceName}</span>
       </Link>

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { adminApi, moderationApi } from '../api'
+import { adminApi, moderationApi, instanceApi } from '../api'
 import { Users, Settings, Flag, Link2, Ticket, BookOpen, List } from 'lucide-react'
 
 export default function AdminPage() {
@@ -21,7 +21,7 @@ export default function AdminPage() {
   // Populate settings form when data loads (RQ v5: no onSuccess in useQuery)
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
 
-  const saveSettings = useMutation({ mutationFn: ()=>adminApi.updateSettings(settingsForm), onSuccess:()=>ok('Saved') })
+  const saveSettings = useMutation({ mutationFn: ()=>adminApi.updateSettings(settingsForm), onSuccess:()=>{ ok('Saved'); qc.invalidateQueries({queryKey:['instance-info']}) } })
   const setRole      = useMutation({ mutationFn: ({id,role}:{id:string,role:string})=>adminApi.setRole(id,role), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
   const delUser      = useMutation({ mutationFn: (id:string)=>adminApi.deleteUser(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
   const reviewRep    = useMutation({ mutationFn: ({id,action}:{id:string,action:string})=>moderationApi.reviewReport(id,{action}), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-reports']}) })
@@ -75,6 +75,39 @@ export default function AdminPage() {
             <div key={k}><label className="label">{label}</label>
               <input className="input" autoComplete="off" value={settingsForm[k]||''} onChange={sf(k)} /></div>
           ))}
+
+          {/* Logo upload */}
+          <div>
+            <label className="label">Instance logo</label>
+            <div className="flex items-center gap-4 mt-1">
+              <div className="w-14 h-14 rounded-xl bg-agora-100 dark:bg-agora-700 overflow-hidden flex items-center justify-center flex-shrink-0 border border-agora-200 dark:border-agora-600">
+                {settingsForm.logo_url
+                  ? <img src={settingsForm.logo_url} alt="Logo" className="w-full h-full object-cover" />
+                  : <span className="text-2xl font-bold text-agora-400">{(settingsForm.instance_name||'A')[0].toUpperCase()}</span>
+                }
+              </div>
+              <div className="space-y-1.5">
+                <label className="btn-secondary text-sm cursor-pointer">
+                  Upload logo
+                  <input type="file" accept="image/*" className="hidden" onChange={async e => {
+                    const file = e.target.files?.[0]; if (!file) return
+                    try {
+                      const res = await instanceApi.uploadLogo(file)
+                      setSettingsForm(f => ({ ...f, logo_url: res.data.url }))
+                    } catch { ok('Upload failed') }
+                    e.target.value = ''
+                  }} />
+                </label>
+                {settingsForm.logo_url && (
+                  <button className="text-xs text-red-500 hover:underline block"
+                    onClick={() => setSettingsForm(f => ({ ...f, logo_url: '' }))}>
+                    Remove logo
+                  </button>
+                )}
+                <p className="text-xs text-agora-400">Shown in the sidebar. Square images work best.</p>
+              </div>
+            </div>
+          </div>
           <div><label className="label">Registration mode</label>
             <select className="input" value={settingsForm.registration_mode||'open'} onChange={sf('registration_mode')}>
               <option value="open">Open</option>

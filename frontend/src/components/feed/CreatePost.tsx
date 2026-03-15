@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink } from 'lucide-react'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus } from 'lucide-react'
 import { feedApi, friendsApi, previewApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
@@ -28,6 +28,8 @@ export default function CreatePost() {
   const [uploading, setUploading] = useState(false)
   const [twEnabled, setTwEnabled] = useState(false)
   const [twLabel, setTwLabel] = useState('')
+  const [pollEnabled, setPollEnabled] = useState(false)
+  const [pollOptions, setPollOptions] = useState(['', ''])
   const [preview, setPreview] = useState<Preview | null>(null)
   const [previewDismissed, setPreviewDismissed] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -104,10 +106,12 @@ export default function CreatePost() {
       link_description: preview ? preview.description : '',
       link_image: preview ? preview.image : '',
       link_domain: preview ? preview.domain : '',
+      poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
     }),
     onSuccess: () => {
       setContent(''); setImageUrl(''); setGroupId('')
       setTwEnabled(false); setTwLabel('')
+      setPollEnabled(false); setPollOptions(['', ''])
       setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
@@ -130,7 +134,9 @@ export default function CreatePost() {
     { value: 'group',   icon: Lock,   label: 'Friend List' },
   ]
 
-  const canPost = (content.trim() || imageUrl) && !create.isPending && !uploading && (!twEnabled || twLabel.trim())
+  const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
+  const canPost = (content.trim() || imageUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
+    && !create.isPending && !uploading && (!twEnabled || twLabel.trim()) && validPoll
 
   return (
     <div className="card p-4 space-y-3">
@@ -226,6 +232,41 @@ export default function CreatePost() {
         </div>
       )}
 
+      {/* Poll editor */}
+      {pollEnabled && (
+        <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-2">
+          <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Poll options</p>
+          {pollOptions.map((opt, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                className="input flex-1 text-sm"
+                autoComplete="off"
+                placeholder={i < 2 ? `Option ${i + 1} (required)` : `Option ${i + 1} (optional)`}
+                value={opt}
+                maxLength={100}
+                onChange={e => setPollOptions(opts => opts.map((o, j) => j === i ? e.target.value : o))}
+              />
+              {pollOptions.length > 2 && (
+                <button
+                  onClick={() => setPollOptions(opts => opts.filter((_, j) => j !== i))}
+                  className="text-agora-400 hover:text-red-500 transition-colors flex-shrink-0"
+                >
+                  <Minus size={14} />
+                </button>
+              )}
+            </div>
+          ))}
+          {pollOptions.length < 6 && (
+            <button
+              onClick={() => setPollOptions(opts => [...opts, ''])}
+              className="flex items-center gap-1.5 text-xs text-agora-500 hover:text-agora-700 transition-colors"
+            >
+              <Plus size={12} /> Add option
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
         {/* Image upload */}
         <label className="btn-ghost p-2 cursor-pointer" title="Add image">
@@ -244,6 +285,19 @@ export default function CreatePost() {
           }`}
         >
           <AlertTriangle size={13} /> TW
+        </button>
+
+        {/* Poll toggle */}
+        <button
+          onClick={() => { setPollEnabled(v => !v); if (pollEnabled) setPollOptions(['', '']) }}
+          title="Add poll"
+          className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+            pollEnabled
+              ? 'bg-agora-100 dark:bg-agora-700 border-agora-400 text-agora-700 dark:text-agora-200'
+              : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400 hover:text-agora-600'
+          }`}
+        >
+          <BarChart2 size={13} /> Poll
         </button>
 
         {/* Visibility */}

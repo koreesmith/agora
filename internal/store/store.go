@@ -394,6 +394,13 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_post_notif_followed ON post_notifications(followed_id)`,
 
+	// ── Wall posts (AGORA-19) ──────────────────────────────────────────────
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS wall_user_id UUID REFERENCES users(id) ON DELETE CASCADE`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS wall_status  VARCHAR(20) NOT NULL DEFAULT 'approved'
+		CHECK (wall_status IN ('approved','pending','rejected'))`,
+	`CREATE INDEX IF NOT EXISTS idx_posts_wall ON posts(wall_user_id, wall_status, created_at DESC)`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS wall_approval_required BOOLEAN NOT NULL DEFAULT FALSE`,
+
 	// ── Polls (AGORA-5) ────────────────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS poll_options (
 		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),

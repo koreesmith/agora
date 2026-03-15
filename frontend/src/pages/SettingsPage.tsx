@@ -35,6 +35,12 @@ export default function SettingsPage() {
     onError: fail,
   })
 
+  const toggleWallApproval = useMutation({
+    mutationFn: () => usersApi.updateProfile({ wall_approval_required: !user?.wall_approval_required }),
+    onSuccess: () => { updateUser({ wall_approval_required: !user?.wall_approval_required }); ok('Wall setting updated') },
+    onError: fail,
+  })
+
   const uploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return
     const res = await usersApi.uploadAvatar(f)
@@ -164,14 +170,24 @@ export default function SettingsPage() {
       {tab === 'privacy' && (
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Privacy settings</h3>
-          <div className="flex items-center justify-between py-2">
+          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Private profile</p>
               <p className="text-xs text-agora-400">Only friends can see your posts and full profile</p>
             </div>
             <button onClick={() => togglePrivacy.mutate()}
-              className={`relative inline-flex h-6 w-11 rounded-full transition-colors ${user?.profile_private ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.profile_private ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.profile_private ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Approve wall posts</p>
+              <p className="text-xs text-agora-400">Review posts from friends before they appear on your wall</p>
+            </div>
+            <button onClick={() => toggleWallApproval.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.wall_approval_required ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.wall_approval_required ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
         </div>

@@ -197,15 +197,16 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	var authorID string
 	var profilePrivate bool
-	s.db.QueryRow(`SELECT id, profile_private FROM users WHERE username = $1`, username).Scan(&authorID, &profilePrivate)
+	s.db.QueryRow(`SELECT id, profile_private FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&authorID, &profilePrivate)
 	if authorID == "" {
 		writeError(w, 404, "user not found")
 		return
 	}
 
-	// Check access
+	// Determine relationship
+	isSelf   := viewerID == authorID
 	isFriend := false
-	if viewerID != authorID {
+	if !isSelf && viewerID != "" {
 		s.db.QueryRow(`
 			SELECT EXISTS(
 				SELECT 1 FROM friendships
@@ -215,11 +216,38 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		`, viewerID, authorID).Scan(&isFriend)
 	}
 
-	visFilter := `p.visibility = 'public'`
-	if viewerID == authorID {
+	// Private profile gate — enforce at backend level
+	if profilePrivate && !isSelf && !isFriend {
+		writeJSON(w, 200, map[string]any{"posts": []any{}})
+		return
+	}
+
+	// Build visibility filter
+	var visFilter string
+	switch {
+	case isSelf:
+		// Own profile: see everything including private posts
 		visFilter = `true`
-	} else if isFriend {
-		visFilter = `p.visibility IN ('public', 'friends')`
+	case isFriend:
+		// Friends: public + friends + friend-list posts where viewer is in the list
+		visFilter = `(
+			p.visibility = 'public'
+			OR p.visibility = 'friends'
+			OR (
+				p.visibility = 'group'
+				AND p.group_id IS NOT NULL
+				AND EXISTS (
+					SELECT 1 FROM friend_group_members fgm
+					JOIN friend_groups fg ON fg.id = fgm.group_id
+					WHERE fgm.group_id = p.group_id
+					  AND fgm.friend_id = $1
+					  AND fg.user_id = $2
+				)
+			)
+		)`
+	default:
+		// Not friends, public profile: public only
+		visFilter = `p.visibility = 'public'`
 	}
 
 	rows, err := s.db.Query(`

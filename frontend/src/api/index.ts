@@ -233,6 +233,7 @@ export const instanceApi = {
 export const dmApi = {
   listConversations:  ()                                     => api.get('/conversations'),
   startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),
+  friendSearch:       (q: string)                           => api.get('/conversations/friend-search', { params: { q } }),
   getConversation:    (id: string)                          => api.get(`/conversations/${id}`),
   getMessages:        (id: string, before?: string)         => api.get(`/conversations/${id}/messages`, { params: before ? { before } : {} }),
   sendMessage:        (id: string, content: string, image_url?: string) => api.post(`/conversations/${id}/messages`, { content, image_url }),

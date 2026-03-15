@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ func New(db *store.DB) *Service {
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/conversations",                 s.ListConversations)
 	r.Post("/conversations",                s.StartConversation)
+	r.Get("/conversations/friend-search",   s.FriendSearch)
 	r.Get("/conversations/{id}",            s.GetConversation)
 	r.Get("/conversations/{id}/messages",   s.GetMessages)
 	r.Post("/conversations/{id}/messages",  s.SendMessage)
@@ -213,6 +215,42 @@ func (s *Service) enrichMessageReactions(msgs []Message) {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+func (s *Service) FriendSearch(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	q := "%" + strings.ToLower(r.URL.Query().Get("q")) + "%"
+
+	rows, err := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url
+		FROM users u
+		JOIN friendships f ON (
+			(f.requester_id = $1 AND f.addressee_id = u.id) OR
+			(f.addressee_id = $1 AND f.requester_id = u.id)
+		)
+		WHERE f.status = 'accepted'
+		  AND u.deletion_scheduled_at IS NULL
+		  AND (LOWER(u.username) LIKE $2 OR LOWER(u.display_name) LIKE $2)
+		ORDER BY u.display_name, u.username
+		LIMIT 10
+	`, userID, q)
+	if err != nil { writeError(w, 500, "db error"); return }
+	defer rows.Close()
+
+	type Friend struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+	}
+	var friends []Friend
+	for rows.Next() {
+		var f Friend
+		rows.Scan(&f.ID, &f.Username, &f.DisplayName, &f.AvatarURL)
+		friends = append(friends, f)
+	}
+	if friends == nil { friends = []Friend{} }
+	writeJSON(w, 200, map[string]any{"friends": friends})
+}
+
 func (s *Service) ListConversations(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 
@@ -249,7 +287,7 @@ func (s *Service) StartConversation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var recipientID, dmPrivacy string
-	s.db.QueryRow(`SELECT id, COALESCE(dm_privacy, 'everyone') FROM users WHERE username=$1 AND deletion_scheduled_at IS NULL`,
+	s.db.QueryRow(`SELECT id, COALESCE(dm_privacy, 'everyone') FROM users WHERE LOWER(username)=LOWER($1) AND deletion_scheduled_at IS NULL`,
 		req.RecipientUsername).Scan(&recipientID, &dmPrivacy)
 	if recipientID == ""     { writeError(w, 404, "user not found"); return }
 	if recipientID == userID { writeError(w, 400, "cannot message yourself"); return }

@@ -182,7 +182,7 @@ function ConvList({ activeId, onSelect }: { activeId?: string; onSelect: (id: st
   const accepted  = filtered.filter(c => c.is_accepted)
 
   return (
-    <div className="flex flex-col h-full border-r border-agora-100 dark:border-agora-700">
+    <div className="flex flex-col h-full">
       {/* Header */}
       <div className="p-4 border-b border-agora-100 dark:border-agora-700 flex items-center justify-between">
         <h2 className="font-semibold text-agora-900 dark:text-agora-100">Messages</h2>
@@ -584,13 +584,14 @@ export default function MessagesPage() {
     nav(`/messages/${id}`, { replace: true })
   }
 
-  // Break out of the max-w-2xl px-4 py-6 container in Layout
+  // Break out of the max-w container padding
   return (
     <div className="-mx-4 -my-6 overflow-hidden bg-white dark:bg-agora-900 border border-agora-200 dark:border-agora-700 rounded-xl"
-      style={{ height: 'calc(100vh - 48px)' }}>
+      style={{ height: 'calc(100vh - 96px)' }}>
       <div className="flex h-full">
-        {/* Left: conversation list */}
-        <div className={`${activeId && isMobile ? 'hidden' : 'flex'} flex-col w-72 lg:w-80 flex-shrink-0`}>
+        {/* Left: conversation list — fixed width, never collapses on desktop */}
+        <div className={`${activeId && isMobile ? 'hidden' : 'flex'} flex-col flex-shrink-0 border-r border-agora-100 dark:border-agora-700`}
+          style={{ width: 280 }}>
           <ConvList activeId={activeId} onSelect={handleSelect} />
         </div>
 
@@ -600,7 +601,7 @@ export default function MessagesPage() {
             <ThreadView convId={activeId} onBack={isMobile ? () => { setActiveId(undefined); nav('/messages') } : undefined} />
           </div>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-agora-400 flex-col gap-2 border-l border-agora-100 dark:border-agora-700">
+          <div className="flex-1 flex items-center justify-center text-agora-400 flex-col gap-2">
             <MessageCircle size={40} className="opacity-30" />
             <p className="text-sm">Select a conversation to start messaging</p>
           </div>

@@ -141,7 +141,7 @@ export default function Layout() {
           <div className="w-6" />
         </header>
 
-        <main className="max-w-2xl mx-auto px-4 py-6">
+        <main className={`mx-auto px-4 py-6 ${location.pathname.startsWith('/messages') ? 'max-w-5xl' : 'max-w-2xl'}`}>
           <Outlet />
         </main>
       </div>

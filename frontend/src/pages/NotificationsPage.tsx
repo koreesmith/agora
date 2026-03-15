@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
 import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle } from 'lucide-react'
+import FriendListModal from '../components/common/FriendListModal'
 
 const typeIcon: Record<string, React.ReactNode> = {
   friend_request:        <UserPlus size={16} className="text-blue-500" />,
@@ -70,8 +71,8 @@ function notifTarget(n: any): string | null {
 
 export default function NotificationsPage() {
   const qc = useQueryClient()
-  // localState: track accepted/declined per notif ID so it persists through refetches
   const [localState, setLocalState] = useState<Record<string, 'accepted' | 'declined'>>({})
+  const [listModalFriend, setListModalFriend] = useState<any | null>(null)
 
   const { data, isLoading } = useQuery({
     queryKey: ['notifications'],
@@ -85,7 +86,14 @@ export default function NotificationsPage() {
 
   const markAll  = useMutation({ mutationFn: () => notificationsApi.markAllRead(), onSuccess: invalidate })
   const markRead = useMutation({ mutationFn: (id: string) => notificationsApi.markRead(id), onSuccess: invalidate })
-  const accept   = useMutation({ mutationFn: (id: string) => friendsApi.acceptRequest(id), onSuccess: () => { qc.invalidateQueries({ queryKey: ['friends'] }); invalidate() } })
+  const accept   = useMutation({
+    mutationFn: ({ actorId }: { actorId: string; actor: any }) => friendsApi.acceptRequest(actorId),
+    onSuccess: (_, { actor }) => {
+      qc.invalidateQueries({ queryKey: ['friends'] })
+      invalidate()
+      if (actor) setListModalFriend(actor)
+    },
+  })
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: invalidate })
 
   const notifs   = data?.notifications || []
@@ -99,6 +107,13 @@ export default function NotificationsPage() {
           <button onClick={() => markAll.mutate()} className="btn-ghost text-sm">Mark all read</button>
         )}
       </div>
+
+      {listModalFriend && (
+        <FriendListModal
+          friend={listModalFriend}
+          onClose={() => setListModalFriend(null)}
+        />
+      )}
 
       {isLoading && <div className="text-center py-8 text-agora-400">Loading…</div>}
       {notifs.length === 0 && !isLoading && (
@@ -147,7 +162,11 @@ export default function NotificationsPage() {
                   ) : (
                     <>
                       <button
-                        onClick={() => { setLocalState(s => ({ ...s, [n.id]: 'accepted' })); accept.mutate(n.actor_id); markRead.mutate(n.id) }}
+                        onClick={() => {
+                          setLocalState(s => ({ ...s, [n.id]: 'accepted' }))
+                          accept.mutate({ actorId: n.actor_id, actor: { id: n.actor_id, username: n.actor_username, display_name: n.actor_display_name, avatar_url: n.actor_avatar_url } })
+                          markRead.mutate(n.id)
+                        }}
                         className="btn-primary text-xs py-1 px-3 flex items-center gap-1"
                       >
                         <UserCheck size={13} /> Accept

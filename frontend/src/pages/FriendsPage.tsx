@@ -4,11 +4,13 @@ import { Link } from 'react-router-dom'
 import { friendsApi } from '../api'
 import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List } from 'lucide-react'
+import FriendListModal from '../components/common/FriendListModal'
 
 export default function FriendsPage() {
   const [tab, setTab] = useState<'friends'|'requests'|'lists'>('friends')
   const [newListName, setNewListName] = useState('')
   const [expandedList, setExpandedList] = useState<string | null>(null)
+  const [listModalFriend, setListModalFriend] = useState<any | null>(null)
   const qc = useQueryClient()
   const inv = (k: string) => qc.invalidateQueries({ queryKey: [k] })
 
@@ -16,7 +18,13 @@ export default function FriendsPage() {
   const { data: reqData }     = useQuery({ queryKey: ['requests'],      queryFn: () => friendsApi.listRequests().then(r => r.data) })
   const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listGroups().then(r => r.data) })
 
-  const accept   = useMutation({ mutationFn: (id: string) => friendsApi.acceptRequest(id),  onSuccess: () => { inv('friends'); inv('requests') } })
+  const accept   = useMutation({
+    mutationFn: (friend: any) => friendsApi.acceptRequest(friend.id),
+    onSuccess: (_, friend) => {
+      inv('friends'); inv('requests')
+      setListModalFriend(friend)
+    },
+  })
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: () => inv('requests') })
   const unfriend = useMutation({ mutationFn: (id: string) => friendsApi.unfriend(id),       onSuccess: () => inv('friends') })
   const createList = useMutation({
@@ -59,6 +67,13 @@ export default function FriendsPage() {
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Friends</h1>
+
+      {listModalFriend && (
+        <FriendListModal
+          friend={listModalFriend}
+          onClose={() => setListModalFriend(null)}
+        />
+      )}
 
       <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
         {tabs.map(t => (
@@ -103,7 +118,7 @@ export default function FriendsPage() {
                   <p className="text-xs text-agora-400">{handle(f.username, f.is_remote, f.remote_instance)}</p>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => accept.mutate(f.id)} className="btn-primary text-xs py-1 px-2"><UserCheck size={13} /> Accept</button>
+                  <button onClick={() => accept.mutate(f)} className="btn-primary text-xs py-1 px-2"><UserCheck size={13} /> Accept</button>
                   <button onClick={() => decline.mutate(f.id)} className="btn-secondary text-xs py-1 px-2"><UserX size={13} /> Decline</button>
                 </div>
               </div>

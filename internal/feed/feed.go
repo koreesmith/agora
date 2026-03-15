@@ -631,6 +631,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		if myReaction != nil {
 			c.MyReaction = *myReaction
 		}
+		c.ReactionCount = 0 // bulk enrichment below sets this; zero here to avoid double-count
 		c.ReactionCounts = map[string]int{}
 		c.Replies = []Comment{}
 		return c

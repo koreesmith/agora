@@ -252,7 +252,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
     setShowReactionPicker(false)
     if (myReaction === type) {
       setOptimisticReaction(null)
-      react.mutate(null)  // toggle off
+      react.mutate(null)
     } else {
       setOptimisticReaction(type)
       react.mutate(type)

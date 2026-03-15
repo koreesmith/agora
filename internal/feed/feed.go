@@ -496,6 +496,8 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2, $3)
 		ON CONFLICT (user_id, post_id) DO UPDATE SET reaction_type = $3, created_at = NOW()
 	`, userID, postID, req.Type)
+	// Clear any legacy like row so counts don't double-count
+	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 
 	// Notification: find post author, fire if not self
 	var authorID string
@@ -516,6 +518,7 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
 }
 
@@ -1023,6 +1026,7 @@ func scanPosts(rows interface {
 }
 
 // enrichReactions loads reaction counts and the current user's reaction for a slice of posts.
+// Legacy likes (from the likes table) are treated as 'like' reactions for backwards compatibility.
 func (s *Service) enrichReactions(posts []Post, userID string) {
 	if len(posts) == 0 {
 		return
@@ -1047,10 +1051,21 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 	}
 	inClause := strings.Join(placeholders, ",")
 
-	// Aggregate reaction counts per post
+	// Aggregate reaction counts — reactions table UNION legacy likes table (as 'like')
 	rows, err := s.db.Query(
-		fmt.Sprintf(`SELECT post_id, reaction_type, COUNT(*) FROM reactions WHERE post_id IN (%s) GROUP BY post_id, reaction_type`, inClause),
-		args...,
+		fmt.Sprintf(`
+			SELECT post_id, reaction_type, COUNT(*)
+			FROM reactions
+			WHERE post_id IN (%s)
+			GROUP BY post_id, reaction_type
+			UNION ALL
+			SELECT post_id, 'like', COUNT(*)
+			FROM likes
+			WHERE post_id IN (%s)
+			  AND post_id NOT IN (SELECT post_id FROM reactions WHERE post_id IN (%s))
+			GROUP BY post_id
+		`, inClause, inClause, inClause),
+		append(args, append(args, args...)...)...,
 	)
 	if err == nil {
 		defer rows.Close()
@@ -1065,7 +1080,7 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 		}
 	}
 
-	// Current user's reaction
+	// Current user's reaction — check reactions first, fall back to likes
 	if userID != "" {
 		urows, err := s.db.Query(
 			fmt.Sprintf(`SELECT post_id, reaction_type FROM reactions WHERE user_id = $1 AND post_id IN (%s)`, inClause),
@@ -1078,6 +1093,38 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 				urows.Scan(&postID, &rtype)
 				if idx, ok := idxMap[postID]; ok {
 					posts[idx].MyReaction = rtype
+				}
+			}
+		}
+
+		// For posts where user has no reactions entry, check legacy likes
+		needsLikeCheck := []string{}
+		needsLikeIdx := map[string]int{}
+		for _, id := range ids {
+			if idx, ok := idxMap[id]; ok && posts[idx].MyReaction == "" {
+				needsLikeCheck = append(needsLikeCheck, id)
+				needsLikeIdx[id] = idx
+			}
+		}
+		if len(needsLikeCheck) > 0 {
+			lplaceholders := make([]string, len(needsLikeCheck))
+			largs := make([]any, len(needsLikeCheck))
+			for i, id := range needsLikeCheck {
+				lplaceholders[i] = fmt.Sprintf("$%d", i+2)
+				largs[i] = id
+			}
+			lrows, err := s.db.Query(
+				fmt.Sprintf(`SELECT post_id FROM likes WHERE user_id = $1 AND post_id IN (%s)`, strings.Join(lplaceholders, ",")),
+				append([]any{userID}, largs...)...,
+			)
+			if err == nil {
+				defer lrows.Close()
+				for lrows.Next() {
+					var postID string
+					lrows.Scan(&postID)
+					if idx, ok := needsLikeIdx[postID]; ok {
+						posts[idx].MyReaction = "like"
+					}
 				}
 			}
 		}

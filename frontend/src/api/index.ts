@@ -210,7 +210,14 @@ export const albumsApi = {
 
 // ── Instance ──────────────────────────────────────────────────────────────────
 export const instanceApi = {
-  getInfo:  () => api.get('/instance'),
-  getRules: () => api.get('/instance/rules'),
+  getInfo:    () => api.get('/instance'),
+  getRules:   () => api.get('/instance/rules'),
+  uploadLogo: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post('/media/upload?category=instance', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }
 

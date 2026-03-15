@@ -5,7 +5,7 @@ import {
   Menu, X, Sun, Moon, User
 } from 'lucide-react'
 import { useAuthStore } from '../../store/auth'
-import { notificationsApi } from '../../api'
+import { notificationsApi, instanceApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
 
 export default function Layout() {
@@ -20,6 +20,14 @@ export default function Layout() {
     queryFn: () => notificationsApi.unreadCount().then(r => r.data),
     refetchInterval: 30_000,
   })
+
+  const { data: instanceData } = useQuery({
+    queryKey: ['instance-info'],
+    queryFn: () => instanceApi.getInfo().then(r => r.data),
+    staleTime: 5 * 60_000,
+  })
+  const instanceName: string = instanceData?.instance_name || 'Agora'
+  const logoUrl: string = instanceData?.logo_url || ''
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -48,10 +56,13 @@ export default function Layout() {
       {/* Logo */}
       <div className="px-4 py-3 mb-2">
         <Link to="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-agora-700 flex items-center justify-center">
-            <span className="text-white font-bold text-sm">A</span>
+          <div className="w-8 h-8 rounded-lg bg-agora-700 flex items-center justify-center overflow-hidden">
+            {logoUrl
+              ? <img src={logoUrl} alt={instanceName} className="w-full h-full object-cover" />
+              : <span className="text-white font-bold text-sm">{instanceName[0]?.toUpperCase()}</span>
+            }
           </div>
-          <span className="font-bold text-lg text-agora-800 dark:text-agora-100">Agora</span>
+          <span className="font-bold text-lg text-agora-800 dark:text-agora-100">{instanceName}</span>
         </Link>
       </div>
 

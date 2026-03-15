@@ -32,13 +32,13 @@ export default function ChangePasswordPage() {
           )}
           <div>
             <label className="label">Current password</label>
-            <input type="password" className="input" required
+            <input type="password" className="input" required autoComplete="current-password"
               value={form.current_password}
               onChange={e => setForm(f => ({ ...f, current_password: e.target.value }))} />
           </div>
           <div>
             <label className="label">New password</label>
-            <input type="password" className="input" required minLength={8}
+            <input type="password" className="input" required minLength={8} autoComplete="new-password"
               value={form.new_password}
               onChange={e => setForm(f => ({ ...f, new_password: e.target.value }))} />
           </div>

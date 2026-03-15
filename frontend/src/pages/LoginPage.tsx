@@ -60,7 +60,7 @@ export default function LoginPage() {
           ) : (
             <form onSubmit={submitForgot} className="card p-6 space-y-4">
               <div><label className="label">Email address</label>
-                <input type="email" className="input" required value={forgotEmail}
+                <input type="email" className="input" required autoComplete="email" value={forgotEmail}
                   onChange={e => setForgotEmail(e.target.value)} /></div>
               <button type="submit" disabled={loading} className="btn-primary w-full">
                 {loading ? 'Sending…' : 'Send reset link'}
@@ -74,7 +74,7 @@ export default function LoginPage() {
           <form onSubmit={submit} className="card p-6 space-y-4">
             {error && <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2 text-sm text-red-700 dark:text-red-400">{error}</div>}
             <div><label className="label">Username or email</label>
-              <input className="input" required autoComplete="username" value={form.username_or_email}
+              <input className="input" required autoComplete="username email" value={form.username_or_email}
                 onChange={e => setForm(f => ({ ...f, username_or_email: e.target.value }))} /></div>
             <div><label className="label">Password</label>
               <input type="password" className="input" required autoComplete="current-password" value={form.password}

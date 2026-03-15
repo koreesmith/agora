@@ -139,15 +139,15 @@ export default function SettingsPage() {
               <input type="file" accept="image/*" className="hidden" onChange={uploadAvatar} />
             </label>
           </div>
-          <div><label className="label">Display name</label><input className="input" value={profile.display_name} onChange={e=>setProfile(p=>({...p,display_name:e.target.value}))} /></div>
+          <div><label className="label">Display name</label><input className="input" autoComplete="name" value={profile.display_name} onChange={e=>setProfile(p=>({...p,display_name:e.target.value}))} /></div>
           <div>
             <label className="label">Pronouns</label>
-            <input className="input" placeholder="e.g. she/her, he/him, they/them" value={profile.pronouns} onChange={e=>setProfile(p=>({...p,pronouns:e.target.value}))} maxLength={50} />
+            <input className="input" autoComplete="off" placeholder="e.g. she/her, he/him, they/them" value={profile.pronouns} onChange={e=>setProfile(p=>({...p,pronouns:e.target.value}))} maxLength={50} />
             <p className="text-xs text-agora-400 mt-1">Displayed beside your name on your profile and posts.</p>
           </div>
-          <div><label className="label">Bio</label><textarea className="input resize-none" rows={3} value={profile.bio} onChange={e=>setProfile(p=>({...p,bio:e.target.value}))} /></div>
-          <div><label className="label">Location</label><input className="input" value={profile.location} onChange={e=>setProfile(p=>({...p,location:e.target.value}))} /></div>
-          <div><label className="label">Website</label><input className="input" type="url" value={profile.website} onChange={e=>setProfile(p=>({...p,website:e.target.value}))} /></div>
+          <div><label className="label">Bio</label><textarea className="input resize-none" autoComplete="off" rows={3} value={profile.bio} onChange={e=>setProfile(p=>({...p,bio:e.target.value}))} /></div>
+          <div><label className="label">Location</label><input className="input" autoComplete="off" value={profile.location} onChange={e=>setProfile(p=>({...p,location:e.target.value}))} /></div>
+          <div><label className="label">Website</label><input className="input" type="url" autoComplete="url" value={profile.website} onChange={e=>setProfile(p=>({...p,website:e.target.value}))} /></div>
           <button onClick={() => saveProfile.mutate()} disabled={saveProfile.isPending} className="btn-primary">{saveProfile.isPending?'Saving…':'Save profile'}</button>
         </div>
       )}
@@ -155,8 +155,8 @@ export default function SettingsPage() {
       {tab === 'account' && (
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Change password</h3>
-          <div><label className="label">Current password</label><input type="password" className="input" value={passwords.current_password} onChange={e=>setPasswords(p=>({...p,current_password:e.target.value}))} /></div>
-          <div><label className="label">New password</label><input type="password" className="input" value={passwords.new_password} onChange={e=>setPasswords(p=>({...p,new_password:e.target.value}))} /></div>
+          <div><label className="label">Current password</label><input type="password" className="input" autoComplete="current-password" value={passwords.current_password} onChange={e=>setPasswords(p=>({...p,current_password:e.target.value}))} /></div>
+          <div><label className="label">New password</label><input type="password" className="input" autoComplete="new-password" value={passwords.new_password} onChange={e=>setPasswords(p=>({...p,new_password:e.target.value}))} /></div>
           <button onClick={() => savePassword.mutate()} disabled={savePassword.isPending} className="btn-primary">{savePassword.isPending?'Saving…':'Change password'}</button>
         </div>
       )}

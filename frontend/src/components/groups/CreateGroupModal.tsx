@@ -33,11 +33,11 @@ export default function CreateGroupModal({ onClose, onCreated }: { onClose: () =
         <div className="space-y-3">
           <div>
             <label className="label">Group name <span className="text-red-500">*</span></label>
-            <input className="input" placeholder="e.g. Photography Enthusiasts" value={name} onChange={e => setName(e.target.value)} />
+            <input className="input" autoComplete="off" placeholder="e.g. Photography Enthusiasts" value={name} onChange={e => setName(e.target.value)} />
           </div>
           <div>
             <label className="label">Description</label>
-            <textarea className="input resize-none" rows={3} placeholder="What is this group about?" value={description} onChange={e => setDescription(e.target.value)} />
+            <textarea className="input resize-none" autoComplete="off" rows={3} placeholder="What is this group about?" value={description} onChange={e => setDescription(e.target.value)} />
           </div>
           <div>
             <label className="label">Privacy</label>

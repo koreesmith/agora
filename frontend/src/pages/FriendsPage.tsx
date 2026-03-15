@@ -132,7 +132,7 @@ export default function FriendsPage() {
         <div className="space-y-3">
           {/* Create new list */}
           <div className="flex gap-2">
-            <input className="input flex-1" placeholder="New list name (e.g. Close Friends, Work…)"
+            <input className="input flex-1" autoComplete="off" placeholder="New list name (e.g. Close Friends, Work…)"
               value={newListName} onChange={e => setNewListName(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && newListName.trim() && createList.mutate(newListName.trim())} />
             <button onClick={() => newListName.trim() && createList.mutate(newListName.trim())}

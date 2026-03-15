@@ -148,6 +148,7 @@ export default function CreatePost() {
             onKeyDown={e => { if (e.key === 'Escape') dismiss() }}
             placeholder="What's on your mind? Use @username to tag someone."
             rows={3}
+            autoComplete="off"
             className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
           />
           {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}
@@ -216,6 +217,7 @@ export default function CreatePost() {
           <input
             className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
             placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
+            autoComplete="off"
             value={twLabel}
             onChange={e => setTwLabel(e.target.value)}
             autoFocus

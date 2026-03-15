@@ -41,15 +41,15 @@ export default function RegisterPage() {
         </div>
         <form onSubmit={submit} className="card p-6 space-y-4">
           {error && <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700 dark:text-red-400">{error}</div>}
-          <div><label className="label">Display name</label><input className="input" value={form.display_name} onChange={set('display_name')} /></div>
+          <div><label className="label">Display name</label><input className="input" autoComplete="name" value={form.display_name} onChange={set('display_name')} /></div>
           <div>
             <label className="label">Username *</label>
-            <input className="input" required minLength={3} maxLength={50} value={form.username} onChange={set('username')} />
+            <input className="input" required minLength={3} maxLength={50} autoComplete="username" value={form.username} onChange={set('username')} />
             <p className="text-xs text-agora-400 mt-1">Letters, numbers, underscores, hyphens only</p>
           </div>
-          <div><label className="label">Email *</label><input type="email" className="input" required value={form.email} onChange={set('email')} /></div>
-          <div><label className="label">Password *</label><input type="password" className="input" required minLength={8} value={form.password} onChange={set('password')} /></div>
-          <div><label className="label">Invite code</label><input className="input" value={form.invite_code} onChange={set('invite_code')} placeholder="Required if registration is invite-only" /></div>
+          <div><label className="label">Email *</label><input type="email" className="input" required autoComplete="email" value={form.email} onChange={set('email')} /></div>
+          <div><label className="label">Password *</label><input type="password" className="input" required minLength={8} autoComplete="new-password" value={form.password} onChange={set('password')} /></div>
+          <div><label className="label">Invite code</label><input className="input" autoComplete="off" value={form.invite_code} onChange={set('invite_code')} placeholder="Required if registration is invite-only" /></div>
           <button type="submit" disabled={loading} className="btn-primary w-full">{loading ? 'Creating account…' : 'Create account'}</button>
         </form>
         <p className="text-center text-sm text-agora-500 mt-4">Already have an account? <Link to="/login" className="text-agora-600 hover:underline font-medium">Sign in</Link></p>

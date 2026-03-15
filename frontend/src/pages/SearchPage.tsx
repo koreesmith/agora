@@ -64,6 +64,7 @@ export default function SearchPage() {
         <input
           className="input pl-9"
           placeholder="Search people and posts…"
+          autoComplete="off"
           value={input}
           onChange={e => setInput(e.target.value)}
           autoFocus

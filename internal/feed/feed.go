@@ -300,6 +300,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyMentions(req.Content, userID, id)
+	go s.notifyPostFollowers(userID, id)
 
 	// Add image to user's Timeline Photos album
 	if req.ImageURL != "" && s.albums != nil {
@@ -1513,5 +1514,21 @@ func (s *Service) notifyMentions(content, authorID, postID string) {
 		if userID == "" || userID == authorID { continue }
 
 		s.notif.Create(userID, authorID, "post_mention", postID, "")
+	}
+}
+
+// notifyPostFollowers fires a notification to everyone who has enabled
+// post notifications for this author.
+func (s *Service) notifyPostFollowers(authorID, postID string) {
+	rows, err := s.db.Query(`
+		SELECT follower_id FROM post_notifications
+		WHERE followed_id = $1
+	`, authorID)
+	if err != nil { return }
+	defer rows.Close()
+	for rows.Next() {
+		var followerID string
+		rows.Scan(&followerID)
+		s.notif.Create(followerID, authorID, "user_post", postID, "")
 	}
 }

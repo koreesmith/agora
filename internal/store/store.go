@@ -384,6 +384,16 @@ var schema = []string{
 	// Pronouns support
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pronouns VARCHAR(50) NOT NULL DEFAULT ''`,
 
+	// ── Post notifications (AGORA-33) ─────────────────────────────────────
+	// follower_id wants to be notified when followed_id posts
+	`CREATE TABLE IF NOT EXISTS post_notifications (
+		follower_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		followed_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (follower_id, followed_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_notif_followed ON post_notifications(followed_id)`,
+
 	// ── Polls (AGORA-5) ────────────────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS poll_options (
 		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),

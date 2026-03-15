@@ -83,6 +83,8 @@ export const usersApi = {
   deleteImmediately:()                 => api.post('/users/me/delete-immediately'),
   discover:         ()                 => api.get('/users/discover'),
   mentionSearch:    (q: string)        => api.get('/users/mention-search', { params: { q } }),
+  enablePostNotify: (username: string) => api.post(`/users/${username}/notify`),
+  disablePostNotify:(username: string) => api.delete(`/users/${username}/notify`),
 }
 
 // ── Friends ───────────────────────────────────────────────────────────────────

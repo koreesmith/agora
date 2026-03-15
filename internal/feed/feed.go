@@ -76,7 +76,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	if listID != "" {
 		// List feed: posts from members of a specific friend list owned by this user
 		rows, err = s.db.Query(`
-			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
@@ -86,7 +86,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-			       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
@@ -118,7 +118,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		`, userID, limit, offset, listID)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance,
@@ -128,7 +128,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-			       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
@@ -202,7 +202,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
@@ -212,7 +212,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
@@ -376,7 +376,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 
 	// Access granted — run the full query
 	rows, err := s.db.Query(`
-		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance,
@@ -386,7 +386,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $2) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
-		       rp_u.username, rp_u.display_name, rp_u.avatar_url,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
@@ -606,6 +606,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		AuthorID    string    `json:"author_id"`
 		Username    string    `json:"username"`
 		DisplayName string    `json:"display_name"`
+		Pronouns    string    `json:"pronouns"`
 		AvatarURL   string    `json:"avatar_url"`
 		Content     string    `json:"content"`
 		ImageURL    string    `json:"image_url"`
@@ -620,14 +621,14 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		Scan(...any) error
 	}) Comment {
 		var c Comment
-		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.AvatarURL,
+		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.Pronouns, &c.AvatarURL,
 			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.LikeCount, &c.Liked)
 		c.Replies = []Comment{}
 		return c
 	}
 
 	const commentSQL = `
-		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.created_at, p.edited_at,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked
@@ -891,6 +892,7 @@ type Post struct {
 	AuthorID       string  `json:"author_id"`
 	AuthorUsername string  `json:"author_username"`
 	AuthorName     string  `json:"author_display_name"`
+	AuthorPronouns string  `json:"author_pronouns"`
 	AuthorAvatar   string  `json:"author_avatar_url"`
 	Content        string  `json:"content"`
 	ImageURL       string  `json:"image_url"`
@@ -923,6 +925,7 @@ type Post struct {
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
+	RepostAuthorPronouns *string `json:"repost_author_pronouns,omitempty"`
 	RepostAuthorAvatar   *string `json:"repost_author_avatar_url,omitempty"`
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
@@ -937,14 +940,14 @@ func scanPosts(rows interface {
 	for rows.Next() {
 		var p Post
 		rows.Scan(
-			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorAvatar,
+			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
 			&p.LinkURL, &p.LinkTitle, &p.LinkDescription, &p.LinkImage, &p.LinkDomain,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
 			&p.Liked, &p.Reposted,
-			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorAvatar,
+			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
 		)
 		p.ReactionCounts = map[string]int{}

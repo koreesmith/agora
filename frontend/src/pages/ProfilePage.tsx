@@ -108,7 +108,12 @@ export default function ProfilePage() {
               )}
             </div>
           </div>
-          <h1 className="text-xl font-bold">{profile.display_name}</h1>
+          <h1 className="text-xl font-bold">
+            {profile.display_name}
+            {profile.pronouns && (
+              <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
+            )}
+          </h1>
           <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300">{profile.bio}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">

@@ -9,7 +9,7 @@ export default function SettingsPage() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'data'>('profile')
 
-  const [profile, setProfile] = useState({ display_name: user?.display_name||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
+  const [profile, setProfile] = useState({ display_name: user?.display_name||'', pronouns: user?.pronouns||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
   const [passwords, setPasswords] = useState({ current_password:'', new_password:'' })
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
@@ -140,6 +140,11 @@ export default function SettingsPage() {
             </label>
           </div>
           <div><label className="label">Display name</label><input className="input" value={profile.display_name} onChange={e=>setProfile(p=>({...p,display_name:e.target.value}))} /></div>
+          <div>
+            <label className="label">Pronouns</label>
+            <input className="input" placeholder="e.g. she/her, he/him, they/them" value={profile.pronouns} onChange={e=>setProfile(p=>({...p,pronouns:e.target.value}))} maxLength={50} />
+            <p className="text-xs text-agora-400 mt-1">Displayed beside your name on your profile and posts.</p>
+          </div>
           <div><label className="label">Bio</label><textarea className="input resize-none" rows={3} value={profile.bio} onChange={e=>setProfile(p=>({...p,bio:e.target.value}))} /></div>
           <div><label className="label">Location</label><input className="input" value={profile.location} onChange={e=>setProfile(p=>({...p,location:e.target.value}))} /></div>
           <div><label className="label">Website</label><input className="input" type="url" value={profile.website} onChange={e=>setProfile(p=>({...p,website:e.target.value}))} /></div>

@@ -324,28 +324,30 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		Username       string
 		Email          string
 		DisplayName    string
+		Pronouns       string
 		Bio            string
 		AvatarURL      string
 		CoverURL       string
+		CoverPosition  string
 		Location       string
 		Website        string
 		Role           string
 		ProfilePrivate bool
 	}
 	err = s.db.QueryRow(`
-		SELECT id, username, email, display_name, bio, avatar_url, cover_url,
-		       location, website, role, profile_private
+		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
+		       cover_position, location, website, role, profile_private
 		FROM users WHERE id = $1
-	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Bio,
-		&u.AvatarURL, &u.CoverURL, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate)
+	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
+		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
 
 	writeJSON(w, 200, map[string]any{
 		"id": u.ID, "username": u.Username, "email": u.Email,
-		"display_name": u.DisplayName, "bio": u.Bio,
-		"avatar_url": u.AvatarURL, "cover_url": u.CoverURL,
+		"display_name": u.DisplayName, "pronouns": u.Pronouns, "bio": u.Bio,
+		"avatar_url": u.AvatarURL, "cover_url": u.CoverURL, "cover_position": u.CoverPosition,
 		"location": u.Location, "website": u.Website,
 		"role": u.Role, "profile_private": u.ProfilePrivate,
 	})

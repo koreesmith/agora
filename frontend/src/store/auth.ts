@@ -5,6 +5,7 @@ export interface User {
   username: string
   email: string
   display_name: string
+  pronouns: string
   bio: string
   avatar_url: string
   cover_url: string

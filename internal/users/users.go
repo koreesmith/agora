@@ -59,6 +59,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		ID             string  `json:"id"`
 		Username       string  `json:"username"`
 		DisplayName    string  `json:"display_name"`
+		Pronouns       string  `json:"pronouns"`
 		Bio            string  `json:"bio"`
 		AvatarURL      string  `json:"avatar_url"`
 		CoverURL       string  `json:"cover_url"`
@@ -74,12 +75,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, bio, avatar_url, cover_url, cover_position,
+		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
 		       location, website, profile_private, is_remote, remote_instance,
 		       created_at
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
-		&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
+		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.IsRemote, &u.RemoteInstance,
 		&u.CreatedAt,
 	)
@@ -132,6 +133,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	var req struct {
 		DisplayName    *string `json:"display_name"`
+		Pronouns       *string `json:"pronouns"`
 		Bio            *string `json:"bio"`
 		Location       *string `json:"location"`
 		Website        *string `json:"website"`
@@ -149,6 +151,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	if req.DisplayName != nil {
 		sets = append(sets, fmt.Sprintf("display_name = $%d", i)); args = append(args, *req.DisplayName); i++
+	}
+	if req.Pronouns != nil {
+		sets = append(sets, fmt.Sprintf("pronouns = $%d", i)); args = append(args, *req.Pronouns); i++
 	}
 	if req.Bio != nil {
 		sets = append(sets, fmt.Sprintf("bio = $%d", i)); args = append(args, *req.Bio); i++

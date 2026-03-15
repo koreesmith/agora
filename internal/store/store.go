@@ -380,4 +380,7 @@ var schema = []string{
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_album_photos_album ON album_photos(album_id, position ASC, created_at ASC)`,
+
+	// Pronouns support
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pronouns VARCHAR(50) NOT NULL DEFAULT ''`,
 }

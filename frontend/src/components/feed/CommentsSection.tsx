@@ -285,6 +285,9 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           <Link to={`/profile/${c.username}`} className="text-xs font-semibold text-agora-800 dark:text-agora-200 hover:underline">
             {c.display_name || c.username}
           </Link>
+          {c.pronouns && (
+            <span className="text-agora-400 dark:text-agora-500 text-xs ml-1">({c.pronouns})</span>
+          )}
           {editing ? (
             <div className="mt-1 space-y-1.5">
               <textarea

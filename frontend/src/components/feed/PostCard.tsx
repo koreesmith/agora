@@ -30,6 +30,7 @@ interface Post {
   author_id: string
   author_username: string
   author_display_name: string
+  author_pronouns: string
   author_avatar_url: string
   is_remote?: boolean
   remote_instance?: string
@@ -49,6 +50,7 @@ interface Post {
   repost_of_id?: string
   repost_author_username?: string
   repost_author_display_name?: string
+  repost_author_pronouns?: string
   repost_content?: string
   repost_image_url?: string
   like_count: number
@@ -316,6 +318,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
                 {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
               </Link>
+              {(() => {
+                const pronouns = post.repost_of_id ? post.repost_author_pronouns : post.author_pronouns
+                return pronouns ? (
+                  <span className="text-agora-400 dark:text-agora-500 text-xs">({pronouns})</span>
+                ) : null
+              })()}
               <span className="text-agora-400 text-xs">
                 {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
                   !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}

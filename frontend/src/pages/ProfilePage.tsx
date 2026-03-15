@@ -5,7 +5,7 @@ import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const visIcon: Record<string, React.ReactNode> = {
@@ -57,6 +57,12 @@ export default function ProfilePage() {
   })
   const decline = useMutation({ mutationFn: () => friendsApi.declineRequest(profile.id), onSuccess: inv })
   const unfriend= useMutation({ mutationFn: () => friendsApi.unfriend(profile.id), onSuccess: inv })
+  const toggleNotify = useMutation({
+    mutationFn: () => profile.post_notifications_enabled
+      ? usersApi.disablePostNotify(profile.username)
+      : usersApi.enablePostNotify(profile.username),
+    onSuccess: inv,
+  })
 
   if (isLoading) return <div className="text-center py-12 text-agora-400">Loading…</div>
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
@@ -117,9 +123,22 @@ export default function ProfilePage() {
                 </div>
               )}
               {!isSelf && status === 'accepted' && (
-                <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
-                  <UserCheck size={16}/> Friends
-                </button>
+                <div className="flex gap-2">
+                  <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
+                    <UserCheck size={16}/> Friends
+                  </button>
+                  <button
+                    onClick={() => toggleNotify.mutate()}
+                    disabled={toggleNotify.isPending}
+                    title={profile.post_notifications_enabled ? 'Turn off post notifications' : 'Notify me when they post'}
+                    className={`btn-secondary text-sm flex items-center gap-1 ${profile.post_notifications_enabled ? 'text-agora-700 dark:text-agora-200 border-agora-400' : 'text-agora-400'}`}
+                  >
+                    {profile.post_notifications_enabled
+                      ? <><BellOff size={15}/> Notifying</>
+                      : <><Bell size={15}/> Notify me</>
+                    }
+                  </button>
+                </div>
               )}
             </div>
           </div>

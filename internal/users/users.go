@@ -47,6 +47,8 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
 	r.Get("/users/discover",              s.Discover)
 	r.Get("/users/mention-search",        s.MentionSearch)
+	r.Post("/users/{username}/notify",    s.EnablePostNotify)
+	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -72,6 +74,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		CreatedAt      string  `json:"created_at"`
 		FriendStatus   string  `json:"friend_status"`
 		FriendCount    int     `json:"friend_count"`
+		PostNotify     bool    `json:"post_notifications_enabled"`
 	}
 
 	err := s.db.QueryRow(`
@@ -112,6 +115,14 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		SELECT COUNT(*) FROM friendships
 		WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
 	`, u.ID).Scan(&u.FriendCount)
+
+	// Post notification status
+	if viewerID != "" && viewerID != u.ID {
+		var exists bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_notifications WHERE follower_id = $1 AND followed_id = $2)`,
+			viewerID, u.ID).Scan(&exists)
+		u.PostNotify = exists
+	}
 
 	// Enforce privacy
 	if u.ProfilePrivate && viewerID != u.ID && u.FriendStatus != "accepted" {
@@ -537,4 +548,37 @@ func (s *Service) MentionSearch(w http.ResponseWriter, r *http.Request) {
 		users = []MentionUser{}
 	}
 	writeJSON(w, 200, map[string]any{"users": users})
+}
+
+// ── Post Notifications (AGORA-33) ─────────────────────────────────────────────
+
+func (s *Service) EnablePostNotify(w http.ResponseWriter, r *http.Request) {
+	followerID := auth.UserIDFromCtx(r.Context())
+	username   := chi.URLParam(r, "username")
+
+	var followedID string
+	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&followedID)
+	if followedID == "" {
+		writeError(w, 404, "user not found"); return
+	}
+	if followerID == followedID {
+		writeError(w, 400, "cannot notify on your own posts"); return
+	}
+
+	s.db.Exec(`INSERT INTO post_notifications (follower_id, followed_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, followerID, followedID)
+	writeJSON(w, 200, map[string]string{"message": "notifications enabled"})
+}
+
+func (s *Service) DisablePostNotify(w http.ResponseWriter, r *http.Request) {
+	followerID := auth.UserIDFromCtx(r.Context())
+	username   := chi.URLParam(r, "username")
+
+	var followedID string
+	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&followedID)
+	if followedID == "" {
+		writeError(w, 404, "user not found"); return
+	}
+
+	s.db.Exec(`DELETE FROM post_notifications WHERE follower_id = $1 AND followed_id = $2`, followerID, followedID)
+	writeJSON(w, 200, map[string]string{"message": "notifications disabled"})
 }

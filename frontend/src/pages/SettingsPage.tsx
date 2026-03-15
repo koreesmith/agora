@@ -209,6 +209,21 @@ export default function SettingsPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.wall_approval_required ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Who can message you</p>
+              <p className="text-xs text-agora-400">Control who can send you direct messages</p>
+            </div>
+            <select
+              className="input text-sm py-1 pl-2 pr-7"
+              value={(user as any)?.dm_privacy || 'everyone'}
+              onChange={e => usersApi.updateProfile({ dm_privacy: e.target.value }).then(() => updateUser({ dm_privacy: e.target.value } as any))}
+            >
+              <option value="everyone">Everyone</option>
+              <option value="friends">Friends only</option>
+              <option value="nobody">Nobody</option>
+            </select>
+          </div>
         </div>
       )}
 

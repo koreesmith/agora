@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle } from 'lucide-react'
 import { useAuthStore } from '../../store/auth'
-import { notificationsApi, instanceApi } from '../../api'
+import { notificationsApi, instanceApi, dmApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
+import ChatWindows from '../common/ChatWindows'
 
 export default function Layout() {
   const { user, logout } = useAuthStore()
@@ -24,6 +25,13 @@ export default function Layout() {
   })
   const unread: number = unreadData?.count ?? 0
 
+  const { data: convsData } = useQuery({
+    queryKey: ['conversations'],
+    queryFn: () => dmApi.listConversations().then(r => r.data),
+    refetchInterval: 30_000,
+  })
+  const unreadDMs: number = (convsData?.conversations || []).reduce((sum: number, c: any) => sum + (c.unread_count || 0), 0)
+
   const { data: instanceData } = useQuery({
     queryKey: ['instance-info'],
     queryFn: () => instanceApi.getInfo().then(r => r.data),
@@ -33,15 +41,16 @@ export default function Layout() {
   const logoUrl: string = instanceData?.logo_url || ''
 
   const nav = [
-    { to: '/',                          icon: Home,    label: 'Feed' },
-    { to: '/notifications',             icon: Bell,    label: 'Notifications', badge: unread },
-    { to: '/friends',                   icon: Users,       label: 'Friends' },
-    { to: '/groups',                    icon: Users2,      label: 'Groups' },
-    { to: '/albums',                    icon: Images,      label: 'Albums' },
-    { to: '/discover',                  icon: Compass,     label: 'Find Friends' },
-    { to: '/search',                    icon: Search,  label: 'Search' },
-    { to: `/profile/${user?.username}`, icon: User,    label: 'Profile' },
-    { to: '/settings',                  icon: Settings,label: 'Settings' },
+    { to: '/',                          icon: Home,           label: 'Feed' },
+    { to: '/notifications',             icon: Bell,           label: 'Notifications', badge: unread },
+    { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
+    { to: '/friends',                   icon: Users,          label: 'Friends' },
+    { to: '/groups',                    icon: Users2,         label: 'Groups' },
+    { to: '/albums',                    icon: Images,         label: 'Albums' },
+    { to: '/discover',                  icon: Compass,        label: 'Find Friends' },
+    { to: '/search',                    icon: Search,         label: 'Search' },
+    { to: `/profile/${user?.username}`, icon: User,           label: 'Profile' },
+    { to: '/settings',                  icon: Settings,       label: 'Settings' },
     ...(user?.role === 'admin' || user?.role === 'moderator'
       ? [{ to: '/admin', icon: Shield, label: 'Admin' }]
       : []),
@@ -136,6 +145,7 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
+      <ChatWindows />
     </div>
   )
 }

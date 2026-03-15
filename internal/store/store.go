@@ -418,4 +418,39 @@ var schema = []string{
 		PRIMARY KEY (user_id, option_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_poll_votes_option ON poll_votes(option_id)`,
+
+	// ── Direct Messages (AGORA-34) ─────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS conversations (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS conversation_participants (
+		conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+		user_id         UUID NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+		last_read_at    TIMESTAMPTZ,
+		read_receipts   BOOLEAN NOT NULL DEFAULT TRUE,
+		is_accepted     BOOLEAN NOT NULL DEFAULT TRUE,
+		PRIMARY KEY (conversation_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_conv_participants_user ON conversation_participants(user_id)`,
+	`CREATE TABLE IF NOT EXISTS messages (
+		id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		conversation_id UUID        NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+		author_id       UUID        NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+		content         TEXT        NOT NULL DEFAULT '',
+		image_url       TEXT        NOT NULL DEFAULT '',
+		edited_at       TIMESTAMPTZ,
+		deleted_at      TIMESTAMPTZ,
+		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS message_reactions (
+		message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+		user_id    UUID NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+		reaction   VARCHAR(50) NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (message_id, user_id)
+	)`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS dm_privacy VARCHAR(20) NOT NULL DEFAULT 'everyone'`,
 }

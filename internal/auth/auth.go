@@ -34,11 +34,16 @@ func NewService(db *store.DB, cfg *config.Config, notifSvc *notifications.Servic
 
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "missing token"); return
+		// Support ?token= for WebSocket connections (can't set headers)
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			header := r.Header.Get("Authorization")
+			if !strings.HasPrefix(header, "Bearer ") {
+				writeError(w, http.StatusUnauthorized, "missing token"); return
+			}
+			tokenStr = strings.TrimPrefix(header, "Bearer ")
 		}
-		claims, err := s.parseToken(strings.TrimPrefix(header, "Bearer "))
+		claims, err := s.parseToken(tokenStr)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid token"); return
 		}

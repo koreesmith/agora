@@ -229,3 +229,19 @@ export const instanceApi = {
   },
 }
 
+// ── Direct Messages ───────────────────────────────────────────────────────────
+export const dmApi = {
+  listConversations:  ()                                     => api.get('/conversations'),
+  startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),
+  getConversation:    (id: string)                          => api.get(`/conversations/${id}`),
+  getMessages:        (id: string, before?: string)         => api.get(`/conversations/${id}/messages`, { params: before ? { before } : {} }),
+  sendMessage:        (id: string, content: string, image_url?: string) => api.post(`/conversations/${id}/messages`, { content, image_url }),
+  editMessage:        (id: string, content: string)         => api.patch(`/messages/${id}`, { content }),
+  deleteMessage:      (id: string)                          => api.delete(`/messages/${id}`),
+  reactMessage:       (id: string, reaction: string)        => api.post(`/messages/${id}/react`, { reaction }),
+  unreactMessage:     (id: string)                          => api.delete(`/messages/${id}/react`),
+  markRead:           (id: string)                          => api.post(`/conversations/${id}/read`),
+  acceptRequest:      (id: string)                          => api.post(`/conversations/${id}/accept`),
+  leaveConversation:  (id: string)                          => api.delete(`/conversations/${id}`),
+}
+

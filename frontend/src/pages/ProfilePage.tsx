@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usersApi, feedApi, friendsApi, albumsApi } from '../api'
+import { usersApi, feedApi, friendsApi, albumsApi, dmApi } from '../api'
 import { useAuthStore } from '../store/auth'
+import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const visIcon: Record<string, React.ReactNode> = {
@@ -17,6 +18,7 @@ const visIcon: Record<string, React.ReactNode> = {
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
   const { user: me } = useAuthStore()
+  const { openChat } = useChatStore()
   const qc = useQueryClient()
   const [tab, setTab] = useState<'posts'|'photos'|'wall'>('posts')
   const [lightbox, setLightbox] = useState<string | null>(null)
@@ -86,6 +88,11 @@ export default function ProfilePage() {
   const wallReject = useMutation({
     mutationFn: (id: string) => feedApi.wallReject(id),
     onSuccess: () => { refetchWall(); refetchQueue() },
+  })
+
+  const startDM = useMutation({
+    mutationFn: () => dmApi.startConversation(profile.username),
+    onSuccess: (res) => openChat(res.data.id),
   })
 
   const handlePostToWall = async () => {
@@ -163,6 +170,13 @@ export default function ProfilePage() {
                 <div className="flex gap-2 flex-wrap">
                   <button onClick={() => { if(confirm('Unfriend?')) unfriend.mutate() }} className="btn-secondary text-sm flex items-center gap-1">
                     <UserCheck size={16}/> Friends
+                  </button>
+                  <button
+                    onClick={() => startDM.mutate()}
+                    disabled={startDM.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1"
+                  >
+                    <MessageCircle size={15}/> Message
                   </button>
                   <button
                     onClick={() => toggleNotify.mutate()}

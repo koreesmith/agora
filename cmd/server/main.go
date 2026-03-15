@@ -17,6 +17,7 @@ import (
 	"github.com/agora-social/agora/internal/albums"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/dm"
 	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/friends"
@@ -59,6 +60,7 @@ func main() {
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc)
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
+	dmSvc     := dm.New(db)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
@@ -71,7 +73,17 @@ func main() {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(func(next http.Handler) http.Handler {
+		timeout := middleware.Timeout(60 * time.Second)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip timeout for WebSocket connections
+			if r.Header.Get("Upgrade") == "websocket" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timeout(next).ServeHTTP(w, r)
+		})
+	})
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.AllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -103,6 +115,7 @@ func main() {
 			moderation.RegisterRoutes(r, modSvc)
 			media.RegisterRoutes(r, mediaSvc)
 			albums.RegisterRoutes(r, albumsSvc)
+			dm.RegisterRoutes(r, dmSvc)
 		})
 
 		// Admin only

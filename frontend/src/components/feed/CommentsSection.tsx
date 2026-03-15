@@ -7,6 +7,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { Trash2, Send, Pencil, Reply, Image, X as XIcon } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
+import { isGifUrl } from '../../utils/gif'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -268,20 +269,30 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
               <Image size={16} />
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
             </label>
-            <input
-              ref={inputRef as React.RefObject<HTMLInputElement>}
-              className="input flex-1 text-sm py-1.5"
+            <textarea
+              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+              className="input flex-1 text-sm py-1.5 resize-none min-h-[36px] max-h-40 overflow-y-auto"
               placeholder="Write a comment… use @username to tag"
               autoComplete="off"
+              rows={1}
               value={text}
-              onChange={e => { setText(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
+              onChange={e => {
+                setText(e.target.value)
+                handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)
+                // Auto-expand
+                e.target.style.height = 'auto'
+                e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'
+              }}
               onKeyDown={e => {
                 if (e.key === 'Escape') { dismiss(); return }
-                if (e.key === 'Enter' && !e.shiftKey && (text.trim() || imageUrl) && !showMentions) create.mutate()
+                if (e.key === 'Enter' && !e.shiftKey && (text.trim() || imageUrl) && !showMentions) {
+                  e.preventDefault()
+                  create.mutate()
+                }
               }}
             />
             {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(text, setText, u)} />}
-            <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5">
+            <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5 self-end">
               {uploading ? <span className="text-xs">…</span> : <Send size={14} />}
             </button>
           </div>
@@ -406,6 +417,11 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             <>
               <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
               {c.image_url && (
+                isGifUrl(c.image_url) ? (
+                  <div className="mt-1 rounded-lg overflow-hidden">
+                    <img src={c.image_url} alt="" className="max-h-64 rounded-lg object-contain" />
+                  </div>
+                ) : (
                 <>
                   <img
                     src={c.image_url}
@@ -433,6 +449,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                     </div>
                   )}
                 </>
+                )
               )}
             </>
           )}

@@ -525,19 +525,28 @@ func (s *Service) RemoveMember(w http.ResponseWriter, r *http.Request) {
 
 // ── Group Feed & Posts ────────────────────────────────────────────────────────
 
+type GroupPollOption struct {
+	ID       string `json:"id"`
+	Text     string `json:"text"`
+	Votes    int    `json:"votes"`
+	Position int    `json:"position"`
+}
+
 type GroupPost struct {
-	ID           string `json:"id"`
-	AuthorID     string `json:"author_id"`
-	Username     string `json:"username"`
-	DisplayName  string `json:"display_name"`
-	AvatarURL    string `json:"avatar_url"`
-	AuthorRole   string `json:"author_role"`
-	Content      string `json:"content"`
-	ImageURL     string `json:"image_url"`
-	LikeCount    int    `json:"like_count"`
-	CommentCount int    `json:"comment_count"`
-	Liked        bool   `json:"liked"`
-	CreatedAt    string `json:"created_at"`
+	ID           string            `json:"id"`
+	AuthorID     string            `json:"author_id"`
+	Username     string            `json:"username"`
+	DisplayName  string            `json:"display_name"`
+	AvatarURL    string            `json:"avatar_url"`
+	AuthorRole   string            `json:"author_role"`
+	Content      string            `json:"content"`
+	ImageURL     string            `json:"image_url"`
+	LikeCount    int               `json:"like_count"`
+	CommentCount int               `json:"comment_count"`
+	Liked        bool              `json:"liked"`
+	CreatedAt    string            `json:"created_at"`
+	PollOptions  []GroupPollOption `json:"poll_options,omitempty"`
+	MyPollVote   string            `json:"my_poll_vote,omitempty"`
 }
 
 func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
@@ -589,6 +598,64 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		posts = append(posts, p)
 	}
 	if posts == nil { posts = []GroupPost{} }
+
+	// Enrich with poll data
+	if len(posts) > 0 {
+		ids := make([]string, len(posts))
+		idxMap := map[string]int{}
+		for i, p := range posts {
+			ids[i] = p.ID
+			idxMap[p.ID] = i
+		}
+		placeholders := make([]string, len(ids))
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		optRows, err := s.db.Query(
+			fmt.Sprintf(`SELECT po.id, po.post_id, po.text, po.position, (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) AS votes FROM poll_options po WHERE po.post_id IN (%s) ORDER BY po.post_id, po.position`, inClause),
+			args...,
+		)
+		if err == nil {
+			defer optRows.Close()
+			for optRows.Next() {
+				var opt GroupPollOption
+				var postID string
+				optRows.Scan(&opt.ID, &postID, &opt.Text, &opt.Position, &opt.Votes)
+				if idx, ok := idxMap[postID]; ok {
+					posts[idx].PollOptions = append(posts[idx].PollOptions, opt)
+				}
+			}
+		}
+
+		if userID != "" {
+			uph := make([]string, len(ids))
+			uargs := make([]any, len(ids)+1)
+			uargs[0] = userID
+			for i, id := range ids {
+				uph[i] = fmt.Sprintf("$%d", i+2)
+				uargs[i+1] = id
+			}
+			vRows, err := s.db.Query(
+				fmt.Sprintf(`SELECT po.post_id, pv.option_id FROM poll_votes pv JOIN poll_options po ON po.id = pv.option_id WHERE pv.user_id = $1 AND po.post_id IN (%s)`, strings.Join(uph, ",")),
+				uargs...,
+			)
+			if err == nil {
+				defer vRows.Close()
+				for vRows.Next() {
+					var postID, optionID string
+					vRows.Scan(&postID, &optionID)
+					if idx, ok := idxMap[postID]; ok {
+						posts[idx].MyPollVote = optionID
+					}
+				}
+			}
+		}
+	}
+
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -606,10 +673,26 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Content  string `json:"content"`
-		ImageURL string `json:"image_url"`
+		Content     string   `json:"content"`
+		ImageURL    string   `json:"image_url"`
+		PollOptions []string `json:"poll_options"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Content == "" && req.ImageURL == "") {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json"); return
+	}
+
+	// Validate poll options if provided
+	var pollOpts []string
+	for _, o := range req.PollOptions {
+		if t := strings.TrimSpace(o); t != "" {
+			pollOpts = append(pollOpts, t)
+		}
+	}
+	if len(pollOpts) == 1 || len(pollOpts) > 6 {
+		writeError(w, 400, "polls require 2–6 options"); return
+	}
+
+	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
 		writeError(w, 400, "content required"); return
 	}
 
@@ -621,6 +704,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, "could not create post"); return
 	}
+
+	// Insert poll options if provided
+	for i, opt := range pollOpts {
+		s.db.Exec(`INSERT INTO poll_options (post_id, text, position) VALUES ($1, $2, $3)`, postID, opt, i)
+	}
+
 	s.db.Exec(`UPDATE community_groups SET post_count = post_count + 1 WHERE id = $1`, groupID)
 	writeJSON(w, 201, map[string]string{"id": postID})
 }

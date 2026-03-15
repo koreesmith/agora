@@ -8,6 +8,7 @@ import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
+import { isGifUrl } from '../../utils/gif'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -568,7 +569,17 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Image */}
               {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
                 const url = post.repost_of_id ? post.repost_image_url : post.image_url
-                return (
+                const isGif = isGifUrl(url!)
+                return isGif ? (
+                  // GIFs: display inline, no lightbox (animation would pause in lightbox)
+                  <div className="mt-2 rounded-lg overflow-hidden">
+                    <img
+                      src={url}
+                      alt=""
+                      className="w-full max-h-[32rem] object-contain rounded-lg"
+                    />
+                  </div>
+                ) : (
                   <>
                     <button
                       onClick={() => setLightboxUrl(url!)}

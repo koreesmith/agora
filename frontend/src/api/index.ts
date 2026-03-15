@@ -126,7 +126,7 @@ export const groupsApi = {
   addMember:      (slug: string, username: string)           => api.post(`/groups/${slug}/members/add`, { username }),
   memberSearch:   (slug: string, q: string)                  => api.get(`/groups/${slug}/member-search`, { params: { q } }),
   getFeed:        (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
-  createPost:     (slug: string, data: { content: string, image_url?: string }) => api.post(`/groups/${slug}/posts`, data),
+  createPost:     (slug: string, data: { content: string, image_url?: string, poll_options?: string[] }) => api.post(`/groups/${slug}/posts`, data),
   // Invite links
   listInvites:    (slug: string)                             => api.get(`/groups/${slug}/invites`),
   createInvite:   (slug: string, maxUses = 0)                => api.post(`/groups/${slug}/invites`, { max_uses: maxUses }),

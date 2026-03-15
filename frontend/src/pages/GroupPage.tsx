@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { handle } from '../utils/handle'
+import { isGifUrl } from '../utils/gif'
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
 import { groupsApi, feedApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 import CommentsSection from '../components/feed/CommentsSection'
-import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList } from 'lucide-react'
+import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList, BarChart2, Plus, Minus } from 'lucide-react'
 import CoverPhoto from '../components/common/CoverPhoto'
 
 export default function GroupPage() {
@@ -160,6 +161,8 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
   const [imageUrl, setImageUrl] = useState('')
   const [uploading, setUploading] = useState(false)
   const [openComments, setOpenComments] = useState<string|null>(null)
+  const [pollEnabled, setPollEnabled] = useState(false)
+  const [pollOptions, setPollOptions] = useState(['', ''])
 
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
     queryKey: ['group-feed', slug],
@@ -170,8 +173,16 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
   const posts = data?.pages.flatMap(p => p.posts) ?? []
 
   const createPost = useMutation({
-    mutationFn: () => groupsApi.createPost(slug, { content, image_url: imageUrl }),
-    onSuccess: () => { setContent(''); setImageUrl(''); qc.invalidateQueries({ queryKey: ['group-feed', slug] }) },
+    mutationFn: () => groupsApi.createPost(slug, {
+      content,
+      image_url: imageUrl,
+      poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
+    }),
+    onSuccess: () => {
+      setContent(''); setImageUrl('')
+      setPollEnabled(false); setPollOptions(['', ''])
+      qc.invalidateQueries({ queryKey: ['group-feed', slug] })
+    },
   })
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -224,12 +235,61 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
               <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center"><X size={12} /></button>
             </div>
           )}
+
+          {/* Poll editor */}
+          {pollEnabled && (
+            <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-2">
+              <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Poll options</p>
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    className="input flex-1 text-sm"
+                    autoComplete="off"
+                    placeholder={i < 2 ? `Option ${i + 1} (required)` : `Option ${i + 1} (optional)`}
+                    value={opt}
+                    maxLength={100}
+                    onChange={e => setPollOptions(opts => opts.map((o, j) => j === i ? e.target.value : o))}
+                  />
+                  {pollOptions.length > 2 && (
+                    <button onClick={() => setPollOptions(opts => opts.filter((_, j) => j !== i))} className="text-agora-400 hover:text-red-500 transition-colors flex-shrink-0">
+                      <Minus size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {pollOptions.length < 6 && (
+                <button onClick={() => setPollOptions(opts => [...opts, ''])} className="flex items-center gap-1.5 text-xs text-agora-500 hover:text-agora-700 transition-colors">
+                  <Plus size={12} /> Add option
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center gap-2 pt-1 border-t border-agora-100 dark:border-agora-700">
             <label className="btn-ghost p-2 cursor-pointer"><Image size={16} />
               <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
             </label>
-            <button onClick={() => createPost.mutate()} disabled={(!content.trim() && !imageUrl) || createPost.isPending || uploading}
-              className="ml-auto btn-primary text-sm">{createPost.isPending ? 'Posting…' : 'Post'}</button>
+            <button
+              onClick={() => { setPollEnabled(v => !v); if (pollEnabled) setPollOptions(['', '']) }}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                pollEnabled
+                  ? 'bg-agora-100 dark:bg-agora-700 border-agora-400 text-agora-700 dark:text-agora-200'
+                  : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400 hover:text-agora-600'
+              }`}
+            >
+              <BarChart2 size={13} /> Poll
+            </button>
+            <button
+              onClick={() => createPost.mutate()}
+              disabled={
+                (!content.trim() && !imageUrl && !(pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
+                || createPost.isPending || uploading
+                || (pollEnabled && pollOptions.filter(o => o.trim()).length < 2)
+              }
+              className="ml-auto btn-primary text-sm"
+            >
+              {createPost.isPending ? 'Posting…' : 'Post'}
+            </button>
           </div>
         </div>
       )}
@@ -267,7 +327,57 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
           </div>
 
           {post.content && <p className="text-sm whitespace-pre-wrap break-words">{renderContent(post.content)}</p>}
-          {post.image_url && <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain bg-agora-50 dark:bg-agora-900" />}
+          {post.image_url && (
+            isGifUrl(post.image_url)
+              ? <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain" />
+              : <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain bg-agora-50 dark:bg-agora-900" />
+          )}
+
+          {/* Poll */}
+          {post.poll_options?.length >= 2 && (() => {
+            const opts: any[] = post.poll_options
+            const totalVotes = opts.reduce((s: number, o: any) => s + o.votes, 0)
+            const hasVoted = !!post.my_poll_vote
+            return (
+              <div className="space-y-2">
+                {opts.map((opt: any) => {
+                  const isMyVote = post.my_poll_vote === opt.id
+                  const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0
+                  return hasVoted ? (
+                    <button key={opt.id}
+                      onClick={() => feedApi.pollVote(post.id, isMyVote ? null as any : opt.id).then(() => qc.invalidateQueries({ queryKey: ['group-feed', slug] }))}
+                      className={`w-full text-left rounded-lg overflow-hidden border transition-colors ${isMyVote ? 'border-agora-500 dark:border-agora-400' : 'border-agora-200 dark:border-agora-600'}`}
+                    >
+                      <div className="relative px-3 py-2">
+                        <div className={`absolute inset-0 ${isMyVote ? 'bg-agora-100 dark:bg-agora-700' : 'bg-agora-50 dark:bg-agora-800/50'}`} style={{ width: `${pct}%` }} />
+                        <div className="relative flex items-center justify-between gap-2">
+                          <span className={`text-sm ${isMyVote ? 'font-semibold text-agora-800 dark:text-agora-100' : 'text-agora-700 dark:text-agora-300'}`}>
+                            {isMyVote && <span className="mr-1">✓</span>}{opt.text}
+                          </span>
+                          <span className="text-xs text-agora-500 flex-shrink-0">{pct}%</span>
+                        </div>
+                      </div>
+                    </button>
+                  ) : (
+                    <button key={opt.id}
+                      onClick={() => feedApi.pollVote(post.id, opt.id).then(() => qc.invalidateQueries({ queryKey: ['group-feed', slug] }))}
+                      className="w-full text-left px-3 py-2 rounded-lg border border-agora-200 dark:border-agora-600 hover:border-agora-500 dark:hover:border-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors text-sm text-agora-700 dark:text-agora-300"
+                    >
+                      {opt.text}
+                    </button>
+                  )
+                })}
+                <p className="text-xs text-agora-400">
+                  {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
+                  {hasVoted && (
+                    <button onClick={() => feedApi.pollUnvote(post.id).then(() => qc.invalidateQueries({ queryKey: ['group-feed', slug] }))} className="ml-2 underline hover:text-agora-600">
+                      Remove vote
+                    </button>
+                  )}
+                </p>
+              </div>
+            )
+          })()}
 
           <div className="flex items-center gap-4 pt-1 border-t border-agora-100 dark:border-agora-700">
             <button onClick={() => likePost.mutate({ id: post.id, liked: post.liked })}

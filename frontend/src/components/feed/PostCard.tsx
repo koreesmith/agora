@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -66,6 +66,11 @@ interface Post {
   // Polls (AGORA-5)
   poll_options?: { id: string; text: string; votes: number; position: number }[]
   my_poll_vote?: string
+  // Wall (AGORA-19)
+  wall_user_id?: string
+  wall_username?: string
+  wall_display_name?: string
+  wall_status?: string
   created_at: string
   edited_at?: string
 }
@@ -317,6 +322,20 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             {post.author_display_name || post.author_username}
           </Link>
           <span>reposted</span>
+        </div>
+      )}
+
+      {/* Wall post banner */}
+      {post.wall_user_id && (
+        <div className="flex items-center gap-1.5 text-xs text-agora-500 dark:text-agora-400 mb-3">
+          <ArrowRight size={13} />
+          <Link to={`/profile/${post.author_username}`} className="font-medium hover:underline">
+            {post.author_display_name || post.author_username}
+          </Link>
+          <span>→</span>
+          <Link to={`/profile/${post.wall_username}`} className="font-medium hover:underline">
+            {post.wall_display_name || post.wall_username}'s wall
+          </Link>
         </div>
       )}
 

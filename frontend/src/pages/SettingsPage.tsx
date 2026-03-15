@@ -14,6 +14,25 @@ export default function SettingsPage() {
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
 
+  // Fetch fresh profile data from server to populate form with up-to-date values
+  const { data: freshProfile } = useQuery({
+    queryKey: ['my-profile'],
+    queryFn: () => authApi.me().then(r => r.data),
+  })
+  useEffect(() => {
+    if (freshProfile) {
+      setProfile({
+        display_name: freshProfile.display_name || '',
+        pronouns:     freshProfile.pronouns     || '',
+        bio:          freshProfile.bio           || '',
+        location:     freshProfile.location      || '',
+        website:      freshProfile.website       || '',
+      })
+      // Also sync any fields the store might be missing
+      updateUser(freshProfile)
+    }
+  }, [freshProfile])
+
   const ok = (m: string) => { setMsg(m); setErr(''); setTimeout(() => setMsg(''), 3000) }
   const fail = (e: any) => setErr(e.response?.data?.error || 'Error')
 

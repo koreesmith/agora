@@ -383,4 +383,22 @@ var schema = []string{
 
 	// Pronouns support
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pronouns VARCHAR(50) NOT NULL DEFAULT ''`,
+
+	// ── Polls (AGORA-5) ────────────────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS poll_options (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		text       VARCHAR(200) NOT NULL,
+		position   INT         NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_poll_options_post ON poll_options(post_id, position ASC)`,
+
+	`CREATE TABLE IF NOT EXISTS poll_votes (
+		user_id    UUID NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+		option_id  UUID NOT NULL REFERENCES poll_options(id)  ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, option_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_poll_votes_option ON poll_votes(option_id)`,
 }

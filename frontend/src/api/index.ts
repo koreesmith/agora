@@ -53,6 +53,8 @@ export const feedApi = {
   createComment: (id: string, data: { content: string, image_url?: string, reply_to_id?: string }) => api.post(`/posts/${id}/comments`, data),
   deleteComment: (postId: string, commentId: string) => api.delete(`/posts/${postId}/comments/${commentId}`),
   editComment:   (postId: string, commentId: string, content: string) => api.patch(`/posts/${postId}/comments/${commentId}`, { content }),
+  pollVote:      (id: string, option_id: string) => api.post(`/posts/${id}/poll/vote`, { option_id }),
+  pollUnvote:    (id: string)              => api.delete(`/posts/${id}/poll/vote`),
   getUserPosts:  (username: string, params?: any) => api.get(`/users/${username}/posts`, { params }),
   uploadMedia:   (file: File, category = 'posts') => {
     const form = new FormData()

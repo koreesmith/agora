@@ -61,6 +61,8 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
 	r.Get("/users/{username}/posts",             s.GetUserPosts)
+	r.Post("/posts/{id}/poll/vote",              s.PollVote)
+	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
 }
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
@@ -166,6 +168,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
+	s.enrichPolls(posts, userID)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -228,6 +231,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichPolls(posts, viewerID)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -236,22 +240,36 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	var req struct {
-		Content        string `json:"content"`
-		ImageURL       string `json:"image_url"`
-		Visibility     string `json:"visibility"`
-		GroupID        string `json:"group_id"`
-		ContentWarning string `json:"content_warning"`
-		LinkURL        string `json:"link_url"`
-		LinkTitle      string `json:"link_title"`
-		LinkDescription string `json:"link_description"`
-		LinkImage      string `json:"link_image"`
-		LinkDomain     string `json:"link_domain"`
+		Content         string   `json:"content"`
+		ImageURL        string   `json:"image_url"`
+		Visibility      string   `json:"visibility"`
+		GroupID         string   `json:"group_id"`
+		ContentWarning  string   `json:"content_warning"`
+		LinkURL         string   `json:"link_url"`
+		LinkTitle       string   `json:"link_title"`
+		LinkDescription string   `json:"link_description"`
+		LinkImage       string   `json:"link_image"`
+		LinkDomain      string   `json:"link_domain"`
+		PollOptions     []string `json:"poll_options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
 		return
 	}
-	if req.Content == "" && req.ImageURL == "" {
+
+	// Validate poll options: 2–6 non-empty options if provided
+	var pollOpts []string
+	for _, o := range req.PollOptions {
+		if t := strings.TrimSpace(o); t != "" {
+			pollOpts = append(pollOpts, t)
+		}
+	}
+	if len(pollOpts) == 1 || len(pollOpts) > 6 {
+		writeError(w, 400, "polls require 2–6 options")
+		return
+	}
+
+	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
 		writeError(w, 400, "post must have content or image")
 		return
 	}
@@ -276,6 +294,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Insert poll options if provided
+	for i, opt := range pollOpts {
+		s.db.Exec(`INSERT INTO poll_options (post_id, text, position) VALUES ($1, $2, $3)`, id, opt, i)
+	}
+
 	go s.notifyMentions(req.Content, userID, id)
 
 	// Add image to user's Timeline Photos album
@@ -291,12 +314,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 			"type":  "post",
 			"actor": username,
 			"object": map[string]any{
-				"id":           id,
-				"content":      req.Content,
-				"image_url":    req.ImageURL,
-				"visibility":   "public",
+				"id":            id,
+				"content":       req.Content,
+				"image_url":     req.ImageURL,
+				"visibility":    "public",
 				"author_handle": username,
-				"created_at":   timeNow(),
+				"created_at":    timeNow(),
 			},
 		})
 	}
@@ -407,6 +430,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichReactions(posts, viewerID)
+	s.enrichPolls(posts, viewerID)
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -520,6 +544,132 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
+}
+
+// ── Polls (AGORA-5) ───────────────────────────────────────────────────────────
+
+type PollOption struct {
+	ID       string `json:"id"`
+	Text     string `json:"text"`
+	Votes    int    `json:"votes"`
+	Position int    `json:"position"`
+}
+
+func (s *Service) PollVote(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var req struct {
+		OptionID string `json:"option_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OptionID == "" {
+		writeError(w, 400, "option_id required")
+		return
+	}
+
+	// Verify option belongs to this post
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM poll_options WHERE id = $1 AND post_id = $2`, req.OptionID, postID).Scan(&count)
+	if count == 0 {
+		writeError(w, 404, "option not found")
+		return
+	}
+
+	// Remove any existing vote on this poll first (one vote per poll)
+	s.db.Exec(`
+		DELETE FROM poll_votes
+		WHERE user_id = $1
+		  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
+	`, userID, postID)
+
+	// Cast new vote
+	s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, req.OptionID)
+
+	writeJSON(w, 200, map[string]string{"message": "voted"})
+}
+
+func (s *Service) PollUnvote(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+	s.db.Exec(`
+		DELETE FROM poll_votes
+		WHERE user_id = $1
+		  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
+	`, userID, postID)
+	writeJSON(w, 200, map[string]string{"message": "unvoted"})
+}
+
+// enrichPolls loads poll options and vote counts for a slice of posts.
+func (s *Service) enrichPolls(posts []Post, userID string) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]string, len(posts))
+	idxMap := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxMap[p.ID] = i
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Fetch options with vote counts
+	rows, err := s.db.Query(
+		fmt.Sprintf(`
+			SELECT po.id, po.post_id, po.text, po.position,
+			       (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) AS votes
+			FROM poll_options po
+			WHERE po.post_id IN (%s)
+			ORDER BY po.post_id, po.position
+		`, inClause),
+		args...,
+	)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var opt PollOption
+			var postID string
+			rows.Scan(&opt.ID, &postID, &opt.Text, &opt.Position, &opt.Votes)
+			if idx, ok := idxMap[postID]; ok {
+				posts[idx].PollOptions = append(posts[idx].PollOptions, opt)
+			}
+		}
+	}
+
+	// Fetch the current user's vote per poll
+	if userID != "" {
+		uph := make([]string, len(ids))
+		uargs := make([]any, len(ids)+1)
+		uargs[0] = userID
+		for i, id := range ids {
+			uph[i] = fmt.Sprintf("$%d", i+2)
+			uargs[i+1] = id
+		}
+		vrows, err := s.db.Query(
+			fmt.Sprintf(`
+				SELECT po.post_id, pv.option_id
+				FROM poll_votes pv
+				JOIN poll_options po ON po.id = pv.option_id
+				WHERE pv.user_id = $1 AND po.post_id IN (%s)
+			`, strings.Join(uph, ",")),
+			uargs...,
+		)
+		if err == nil {
+			defer vrows.Close()
+			for vrows.Next() {
+				var postID, optionID string
+				vrows.Scan(&postID, &optionID)
+				if idx, ok := idxMap[postID]; ok {
+					posts[idx].MyPollVote = optionID
+				}
+			}
+		}
+	}
 }
 
 type ReactionUser struct {
@@ -991,6 +1141,9 @@ type Post struct {
 	ReactionCount  int     `json:"reaction_count"`
 	MyReaction     string  `json:"my_reaction"` // empty string = no reaction
 	ReactionCounts map[string]int `json:"reaction_counts"`
+	// Polls (AGORA-5)
+	PollOptions    []PollOption `json:"poll_options,omitempty"`
+	MyPollVote     string       `json:"my_poll_vote,omitempty"` // option_id or empty
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`

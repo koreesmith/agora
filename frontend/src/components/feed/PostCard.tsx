@@ -62,6 +62,9 @@ interface Post {
   reaction_count: number
   my_reaction: string
   reaction_counts: Record<string, number>
+  // Polls (AGORA-5)
+  poll_options?: { id: string; text: string; votes: number; position: number }[]
+  my_poll_vote?: string
   created_at: string
   edited_at?: string
 }
@@ -277,6 +280,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const repost = useMutation({
     mutationFn: () => feedApi.repost(post.id),
     onSuccess: invalidate,
+  })
+
+  const pollVote = useMutation({
+    mutationFn: (optionId: string | null) =>
+      optionId ? feedApi.pollVote(post.id, optionId) : feedApi.pollUnvote(post.id),
+    onSettled: invalidate,
   })
 
   const isOwn = user?.id === post.author_id
@@ -597,6 +606,60 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               )}
             </>
           )}
+
+          {/* Poll */}
+          {post.poll_options && post.poll_options.length >= 2 && (() => {
+            const opts = post.poll_options!
+            const totalVotes = opts.reduce((s, o) => s + o.votes, 0)
+            const hasVoted = !!post.my_poll_vote
+            return (
+              <div className="mt-3 space-y-2">
+                {opts.map(opt => {
+                  const isMyVote = post.my_poll_vote === opt.id
+                  const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0
+                  return hasVoted ? (
+                    // Results view
+                    <button
+                      key={opt.id}
+                      onClick={() => pollVote.mutate(isMyVote ? null : opt.id)}
+                      className={`w-full text-left rounded-lg overflow-hidden border transition-colors ${
+                        isMyVote
+                          ? 'border-agora-500 dark:border-agora-400'
+                          : 'border-agora-200 dark:border-agora-600'
+                      }`}
+                    >
+                      <div className="relative px-3 py-2">
+                        <div
+                          className={`absolute inset-0 ${isMyVote ? 'bg-agora-100 dark:bg-agora-700' : 'bg-agora-50 dark:bg-agora-800/50'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                        <div className="relative flex items-center justify-between gap-2">
+                          <span className={`text-sm ${isMyVote ? 'font-semibold text-agora-800 dark:text-agora-100' : 'text-agora-700 dark:text-agora-300'}`}>
+                            {isMyVote && <span className="mr-1">✓</span>}{opt.text}
+                          </span>
+                          <span className="text-xs text-agora-500 flex-shrink-0">{pct}%</span>
+                        </div>
+                      </div>
+                    </button>
+                  ) : (
+                    // Voting view
+                    <button
+                      key={opt.id}
+                      onClick={() => pollVote.mutate(opt.id)}
+                      disabled={pollVote.isPending}
+                      className="w-full text-left px-3 py-2 rounded-lg border border-agora-200 dark:border-agora-600 hover:border-agora-500 dark:hover:border-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors text-sm text-agora-700 dark:text-agora-300 disabled:opacity-50"
+                    >
+                      {opt.text}
+                    </button>
+                  )
+                })}
+                <p className="text-xs text-agora-400">
+                  {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
+                  {hasVoted && <button onClick={() => pollVote.mutate(null)} className="ml-2 underline hover:text-agora-600">Remove vote</button>}
+                </p>
+              </div>
+            )
+          })()}
 
           {/* Actions */}
           <div className="mt-3">

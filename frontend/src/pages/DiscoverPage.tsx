@@ -19,7 +19,7 @@ export default function DiscoverPage() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Compass size={22} className="text-agora-600" />
-        <h1 className="text-xl font-bold">Discover People</h1>
+        <h1 className="text-xl font-bold">Find Friends</h1>
       </div>
       <p className="text-sm text-agora-500">People you might know through your friends.</p>
 

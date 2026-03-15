@@ -37,7 +37,7 @@ export default function Layout() {
     { to: '/friends',                   icon: Users,       label: 'Friends' },
     { to: '/groups',                    icon: Users2,      label: 'Groups' },
     { to: '/albums',                    icon: Images,      label: 'Albums' },
-    { to: '/discover',                  icon: Compass,     label: 'Discover' },
+    { to: '/discover',                  icon: Compass,     label: 'Find Friends' },
     { to: '/search',                    icon: Search,  label: 'Search' },
     { to: `/profile/${user?.username}`, icon: User,    label: 'Profile' },
     { to: '/settings',                  icon: Settings,label: 'Settings' },

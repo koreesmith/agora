@@ -1044,15 +1044,23 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 	}
 
 	// Build $1,$2,... placeholders
-	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	inClause := strings.Join(placeholders, ",")
 
 	// Aggregate reaction counts — reactions table UNION legacy likes table (as 'like')
+	// Build three separate placeholder sets with correct $N numbering
+	n := len(ids)
+	ph1 := make([]string, n)
+	ph2 := make([]string, n)
+	ph3 := make([]string, n)
+	for i := range ids {
+		ph1[i] = fmt.Sprintf("$%d", i+1)
+		ph2[i] = fmt.Sprintf("$%d", i+1+n)
+		ph3[i] = fmt.Sprintf("$%d", i+1+n+n)
+	}
+	tripleArgs := append(append(append([]any{}, args...), args...), args...)
 	rows, err := s.db.Query(
 		fmt.Sprintf(`
 			SELECT post_id, reaction_type, COUNT(*)
@@ -1065,8 +1073,8 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 			WHERE post_id IN (%s)
 			  AND post_id NOT IN (SELECT post_id FROM reactions WHERE post_id IN (%s))
 			GROUP BY post_id
-		`, inClause, inClause, inClause),
-		append(args, append(args, args...)...)...,
+		`, strings.Join(ph1, ","), strings.Join(ph2, ","), strings.Join(ph3, ",")),
+		tripleArgs...,
 	)
 	if err == nil {
 		defer rows.Close()
@@ -1083,9 +1091,16 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 
 	// Current user's reaction — check reactions first, fall back to likes
 	if userID != "" {
+		uph := make([]string, n)
+		uargs := make([]any, n+1)
+		uargs[0] = userID
+		for i, id := range ids {
+			uph[i] = fmt.Sprintf("$%d", i+2)
+			uargs[i+1] = id
+		}
 		urows, err := s.db.Query(
-			fmt.Sprintf(`SELECT post_id, reaction_type FROM reactions WHERE user_id = $1 AND post_id IN (%s)`, inClause),
-			append([]any{userID}, args...)...,
+			fmt.Sprintf(`SELECT post_id, reaction_type FROM reactions WHERE user_id = $1 AND post_id IN (%s)`, strings.Join(uph, ",")),
+			uargs...,
 		)
 		if err == nil {
 			defer urows.Close()

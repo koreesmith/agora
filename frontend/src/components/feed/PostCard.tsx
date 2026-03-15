@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -75,7 +75,7 @@ const visIcons: Record<string, React.ReactNode> = {
 
 // ── Reaction Picker ───────────────────────────────────────────────────────────
 
-function ReactionPicker({ onPick }: { onPick: (type: string) => void }) {
+function ReactionPicker({ onPick, activeReaction }: { onPick: (type: string) => void; activeReaction?: string }) {
   return (
     <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
       onMouseLeave={e => e.stopPropagation()}
@@ -83,9 +83,9 @@ function ReactionPicker({ onPick }: { onPick: (type: string) => void }) {
       {REACTIONS.map(r => (
         <button
           key={r.type}
-          title={r.label}
+          title={r.type === activeReaction ? `Remove ${r.label}` : r.label}
           onClick={e => { e.stopPropagation(); onPick(r.type) }}
-          className="text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5"
+          className={`text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
           style={{ lineHeight: 1 }}
         >
           {r.emoji}
@@ -220,7 +220,6 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [editFriendListId, setEditFriendListId] = useState(post.friend_list_id || '')
   const [editTwEnabled, setEditTwEnabled] = useState(!!post.content_warning)
   const [editTwLabel, setEditTwLabel] = useState(post.content_warning || '')
-  const pickerHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const { data: groupsData } = useQuery({
     queryKey: ['friend-groups'],
@@ -231,18 +230,31 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
 
+  // Optimistic reaction state — holds until the refetched prop catches up
+  // undefined = use post.my_reaction; null = optimistically removed; string = optimistically set
+  const [optimisticReaction, setOptimisticReaction] = useState<string | null | undefined>(undefined)
+  const myReaction = optimisticReaction !== undefined ? (optimisticReaction ?? '') : (post.my_reaction ?? '')
+
+  // Once the server-returned prop matches the optimistic value, clear the override
+  useEffect(() => {
+    if (optimisticReaction === null && !post.my_reaction) setOptimisticReaction(undefined)
+    if (typeof optimisticReaction === 'string' && post.my_reaction === optimisticReaction) setOptimisticReaction(undefined)
+  }, [post.my_reaction])
+
   // Reaction mutation — picks or removes
   const react = useMutation({
     mutationFn: (type: string | null) =>
       type ? feedApi.reactPost(post.id, type) : feedApi.unreactPost(post.id),
-    onSuccess: invalidate,
+    onSettled: () => invalidate(),
   })
 
   const handleReactionPick = (type: string) => {
     setShowReactionPicker(false)
-    if (post.my_reaction === type) {
+    if (myReaction === type) {
+      setOptimisticReaction(null)
       react.mutate(null)  // toggle off
     } else {
+      setOptimisticReaction(type)
       react.mutate(type)
     }
   }
@@ -588,27 +600,20 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
           <div className="mt-3">
             <div className="flex items-center gap-4 text-agora-400 dark:text-agora-500">
               {/* Reaction button + picker */}
-              <div
-                className="relative"
-                onMouseEnter={() => {
-                  if (pickerHideTimer.current) clearTimeout(pickerHideTimer.current)
-                  setShowReactionPicker(true)
-                }}
-                onMouseLeave={() => {
-                  pickerHideTimer.current = setTimeout(() => setShowReactionPicker(false), 300)
-                }}
-              >
+              <div className="relative">
                 <button
-                  onClick={() => post.my_reaction ? react.mutate(null) : setShowReactionPicker(p => !p)}
-                  className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${post.my_reaction ? 'text-red-500' : ''}`}
+                  onClick={() => myReaction ? handleReactionPick(myReaction) : setShowReactionPicker(p => !p)}
+                  onContextMenu={e => { e.preventDefault(); setShowReactionPicker(p => !p) }}
+                  className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
+                  title={myReaction ? 'Click to remove · Right-click to change' : 'React'}
                 >
                   <span className="text-base leading-none" style={{lineHeight:1}}>
-                    {post.my_reaction ? REACTION_MAP[post.my_reaction]?.emoji : '🤍'}
+                    {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
                   </span>
                   <span className="text-sm">{post.reaction_count || ''}</span>
                 </button>
                 {showReactionPicker && (
-                  <ReactionPicker onPick={handleReactionPick} />
+                  <ReactionPicker onPick={handleReactionPick} activeReaction={myReaction || undefined} />
                 )}
               </div>
 
@@ -631,7 +636,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             <ReactionBar
               counts={post.reaction_counts || {}}
               total={post.reaction_count || 0}
-              myReaction={post.my_reaction}
+              myReaction={myReaction}
               onOpenModal={() => setShowReactionsModal(true)}
             />
           </div>

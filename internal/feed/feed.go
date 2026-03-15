@@ -602,39 +602,45 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
 
 	type Comment struct {
-		ID          string    `json:"id"`
-		AuthorID    string    `json:"author_id"`
-		Username    string    `json:"username"`
-		DisplayName string    `json:"display_name"`
-		Pronouns    string    `json:"pronouns"`
-		AvatarURL   string    `json:"avatar_url"`
-		Content     string    `json:"content"`
-		ImageURL    string    `json:"image_url"`
-		CreatedAt   string    `json:"created_at"`
-		EditedAt    *string   `json:"edited_at,omitempty"`
-		LikeCount   int       `json:"like_count"`
-		Liked       bool      `json:"liked"`
-		Replies     []Comment `json:"replies"`
+		ID             string         `json:"id"`
+		AuthorID       string         `json:"author_id"`
+		Username       string         `json:"username"`
+		DisplayName    string         `json:"display_name"`
+		Pronouns       string         `json:"pronouns"`
+		AvatarURL      string         `json:"avatar_url"`
+		Content        string         `json:"content"`
+		ImageURL       string         `json:"image_url"`
+		CreatedAt      string         `json:"created_at"`
+		EditedAt       *string        `json:"edited_at,omitempty"`
+		ReactionCount  int            `json:"reaction_count"`
+		MyReaction     string         `json:"my_reaction"`
+		ReactionCounts map[string]int `json:"reaction_counts"`
+		Replies        []Comment      `json:"replies"`
 	}
 
 	scanComment := func(rows interface {
 		Scan(...any) error
 	}) Comment {
 		var c Comment
+		var myReaction *string
 		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.Pronouns, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.LikeCount, &c.Liked)
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction)
+		if myReaction != nil {
+			c.MyReaction = *myReaction
+		}
+		c.ReactionCounts = map[string]int{}
 		c.Replies = []Comment{}
 		return c
 	}
 
-	const commentSQL = `
+	commentSQL := `
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.created_at, p.edited_at,
-		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
-		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked
+		       (SELECT COUNT(*) FROM reactions WHERE post_id = p.id) AS reaction_count,
+		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
-		WHERE p.parent_id = $2 AND p.deleted_at IS NULL
+		WHERE p.parent_id = $2 AND p.deleted_at IS NULL AND u.deletion_scheduled_at IS NULL
 		ORDER BY p.created_at ASC
 	`
 
@@ -677,6 +683,65 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		rrows.Close()
 		if comments[i].Replies == nil {
 			comments[i].Replies = []Comment{}
+		}
+	}
+
+	// Bulk-enrich reaction_counts for all comments + replies (flatten, query, redistribute)
+	{
+		type flatEntry struct {
+			topIdx   int
+			replyIdx int
+			r2Idx    int
+			id       string
+		}
+		var flat []flatEntry
+		for i, c := range comments {
+			flat = append(flat, flatEntry{i, -1, -1, c.ID})
+			for j, r := range c.Replies {
+				flat = append(flat, flatEntry{i, j, -1, r.ID})
+				for k, r2 := range r.Replies {
+					flat = append(flat, flatEntry{i, j, k, r2.ID})
+				}
+			}
+		}
+		if len(flat) > 0 {
+			ids := make([]string, len(flat))
+			idxMap := map[string][]flatEntry{}
+			for n, e := range flat {
+				ids[n] = e.id
+				idxMap[e.id] = append(idxMap[e.id], e)
+			}
+			placeholders := make([]string, len(ids))
+			args := make([]any, len(ids))
+			for n, id := range ids {
+				placeholders[n] = fmt.Sprintf("$%d", n+1)
+				args[n] = id
+			}
+			inClause := strings.Join(placeholders, ",")
+			rcRows, err := s.db.Query(
+				fmt.Sprintf(`SELECT post_id, reaction_type, COUNT(*) FROM reactions WHERE post_id IN (%s) GROUP BY post_id, reaction_type`, inClause),
+				args...,
+			)
+			if err == nil {
+				defer rcRows.Close()
+				for rcRows.Next() {
+					var pid, rtype string
+					var cnt int
+					rcRows.Scan(&pid, &rtype, &cnt)
+					for _, e := range idxMap[pid] {
+						if e.replyIdx == -1 {
+							comments[e.topIdx].ReactionCounts[rtype] = cnt
+							comments[e.topIdx].ReactionCount += cnt
+						} else if e.r2Idx == -1 {
+							comments[e.topIdx].Replies[e.replyIdx].ReactionCounts[rtype] = cnt
+							comments[e.topIdx].Replies[e.replyIdx].ReactionCount += cnt
+						} else {
+							comments[e.topIdx].Replies[e.replyIdx].Replies[e.r2Idx].ReactionCounts[rtype] = cnt
+							comments[e.topIdx].Replies[e.replyIdx].Replies[e.r2Idx].ReactionCount += cnt
+						}
+					}
+				}
+			}
 		}
 	}
 

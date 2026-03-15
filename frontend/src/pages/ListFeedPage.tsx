@@ -47,7 +47,7 @@ export default function ListFeedPage() {
         </div>
       )}
 
-      {posts.map((post: any) => <PostCard key={post.id} post={post} />)}
+      {posts.map((post: any) => <PostCard key={post.id} post={post} invalidateKey="feed" />)}
 
       {hasNextPage && (
         <button onClick={() => fetchNextPage()} disabled={isFetchingNextPage}

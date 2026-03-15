@@ -51,7 +51,7 @@ export default function PostPage() {
       <Link to="/" className="flex items-center gap-1.5 text-sm text-agora-500 hover:text-agora-700 transition-colors">
         <ArrowLeft size={14} /> Back to feed
       </Link>
-      <PostCard post={post} invalidateKey={`post-${id}`} />
+      <PostCard post={post} invalidateKey="post" />
       <CommentsSection postId={id!} postAuthorId={post.author_id} />
     </div>
   )

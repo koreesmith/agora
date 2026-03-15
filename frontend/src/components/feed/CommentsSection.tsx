@@ -4,9 +4,43 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Heart, Pencil, Reply, Image, X as XIcon } from 'lucide-react'
+import { Trash2, Send, Pencil, Reply, Image, X as XIcon } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
+
+// ── Reaction config ───────────────────────────────────────────────────────────
+
+const REACTIONS = [
+  { type: 'like',     emoji: '❤️',  label: 'Like'     },
+  { type: 'love',     emoji: '😍',  label: 'Love'     },
+  { type: 'laugh',    emoji: '😂',  label: 'Laugh'    },
+  { type: 'angry',    emoji: '😡',  label: 'Angry'    },
+  { type: 'care',     emoji: '🤗',  label: 'Care'     },
+  { type: 'pride',    emoji: '🏳️‍🌈', label: 'Pride'    },
+  { type: 'thankful', emoji: '🙏',  label: 'Thankful' },
+  { type: 'vomit',    emoji: '🤮',  label: 'Vomit'    },
+]
+const REACTION_MAP: Record<string, { emoji: string; label: string }> = Object.fromEntries(
+  REACTIONS.map(r => [r.type, r])
+)
+
+function CommentReactionPicker({ onPick, activeReaction }: { onPick: (type: string) => void; activeReaction?: string }) {
+  return (
+    <div className="absolute bottom-6 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1 shadow-xl">
+      {REACTIONS.map(r => (
+        <button
+          key={r.type}
+          title={r.type === activeReaction ? `Remove ${r.label}` : r.label}
+          onClick={e => { e.stopPropagation(); onPick(r.type) }}
+          className={`text-base leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
+          style={{ lineHeight: 1 }}
+        >
+          {r.emoji}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 // Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string) {
@@ -16,7 +50,6 @@ export function renderContent(text: string) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^https?:\/\//i.test(part)) {
-      // Trim trailing punctuation that got caught in the regex
       const url = part.replace(/[.,!?)]+$/, '')
       const trailing = part.slice(url.length)
       return (
@@ -67,38 +100,18 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
     onSuccess: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
   })
 
-  const likeComment = useMutation({
-    mutationFn: ({ id, liked }: { id: string, liked: boolean }) =>
-      liked ? feedApi.unreactPost(id) : feedApi.reactPost(id, 'like'),
-    onMutate: async ({ id, liked }) => {
-      await qc.cancelQueries({ queryKey: ['comments', postId] })
-      const prev = qc.getQueryData(['comments', postId])
-      qc.setQueryData(['comments', postId], (old: any) => ({
-        ...old,
-        comments: old.comments.map((c: any) => {
-          if (c.id === id) return { ...c, liked: !liked, like_count: c.like_count + (liked ? -1 : 1) }
-          return {
-            ...c,
-            replies: c.replies?.map((r: any) => {
-              if (r.id === id) return { ...r, liked: !liked, like_count: r.like_count + (liked ? -1 : 1) }
-              return {
-                ...r,
-                replies: r.replies?.map((rr: any) =>
-                  rr.id === id ? { ...rr, liked: !liked, like_count: rr.like_count + (liked ? -1 : 1) } : rr
-                ),
-              }
-            }),
-          }
-        }),
-      }))
-      return { prev }
-    },
-    onError: (_err, _vars, ctx) => qc.setQueryData(['comments', postId], ctx?.prev),
+  const reactComment = useMutation({
+    mutationFn: ({ id, type }: { id: string; type: string | null }) =>
+      type ? feedApi.reactPost(id, type) : feedApi.unreactPost(id),
     onSettled: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
   })
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['comments', postId] })
   const comments = data?.comments || []
+
+  const handleReact = (id: string, myReaction: string, type: string) => {
+    reactComment.mutate({ id, type: myReaction === type ? null : type })
+  }
 
   return (
     <div className="mt-4 pt-4 border-t border-agora-100 dark:border-agora-700 space-y-3">
@@ -111,13 +124,12 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             currentUserId={user?.id}
             currentUserRole={user?.role}
             onDelete={() => del.mutate(c.id)}
-            onLike={() => likeComment.mutate({ id: c.id, liked: c.liked })}
+            onReact={(type) => handleReact(c.id, c.my_reaction, type)}
             onEdited={invalidate}
             onReplyCreated={invalidate}
             depth={0}
           />
 
-          {/* Depth-1 replies — indented */}
           {c.replies?.length > 0 && (
             <div className="ml-10 mt-2 space-y-2 border-l-2 border-agora-100 dark:border-agora-700 pl-3">
               {c.replies.map((reply: any) => (
@@ -129,12 +141,11 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
                     currentUserId={user?.id}
                     currentUserRole={user?.role}
                     onDelete={() => del.mutate(reply.id)}
-                    onLike={() => likeComment.mutate({ id: reply.id, liked: reply.liked })}
+                    onReact={(type) => handleReact(reply.id, reply.my_reaction, type)}
                     onEdited={invalidate}
                     onReplyCreated={invalidate}
                     depth={1}
                   />
-                  {/* Depth-2 replies — further indented */}
                   {reply.replies?.length > 0 && (
                     <div className="ml-8 mt-2 space-y-2 border-l-2 border-agora-100 dark:border-agora-700 pl-3">
                       {reply.replies.map((r2: any) => (
@@ -146,7 +157,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
                           currentUserId={user?.id}
                           currentUserRole={user?.role}
                           onDelete={() => del.mutate(r2.id)}
-                          onLike={() => likeComment.mutate({ id: r2.id, liked: r2.liked })}
+                          onReact={(type) => handleReact(r2.id, r2.my_reaction, type)}
                           onEdited={invalidate}
                           onReplyCreated={invalidate}
                           depth={2}
@@ -161,7 +172,6 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
         </div>
       ))}
 
-      {/* New top-level comment input */}
       <div className="flex gap-2 pt-1">
         <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
           {user?.avatar_url
@@ -169,7 +179,6 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{user?.username?.[0]?.toUpperCase()}</span>}
         </div>
         <div className="flex-1 space-y-1.5">
-          {/* Image preview */}
           {imageUrl && (
             <div className="relative">
               <img src={imageUrl} alt="" className="rounded-lg max-h-40 object-contain bg-agora-50 dark:bg-agora-900" />
@@ -179,7 +188,6 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             </div>
           )}
           <div className="flex gap-1.5 relative">
-            {/* Image upload button */}
             <label className={`flex-shrink-0 p-1.5 rounded-lg text-agora-400 hover:text-agora-600 hover:bg-agora-100 dark:hover:bg-agora-700 cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : ''}`} title="Add image">
               <Image size={16} />
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
@@ -208,14 +216,14 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
 
 // ── Comment Row ────────────────────────────────────────────────────────────────
 
-function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUserRole, onDelete, onLike, onEdited, onReplyCreated, depth }: {
+function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUserRole, onDelete, onReact, onEdited, onReplyCreated, depth }: {
   comment: any
   postId: string
   postAuthorId: string
   currentUserId?: string
   currentUserRole?: string
   onDelete: () => void
-  onLike: () => void
+  onReact: (type: string) => void
   onEdited: () => void
   onReplyCreated: () => void
   depth: number
@@ -227,6 +235,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const [replyText, setReplyText] = useState('')
   const [replyImageUrl, setReplyImageUrl] = useState('')
   const [replyUploading, setReplyUploading] = useState(false)
+  const [showReactionPicker, setShowReactionPicker] = useState(false)
   const replyFileRef = useRef<HTMLInputElement>(null)
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
@@ -258,16 +267,22 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   })
 
   const openReply = () => {
-    const mention = `@${c.username} `
-    setReplyText(mention)
+    setReplyText(`@${c.username} `)
     setReplyImageUrl('')
     setShowReplyBox(true)
+  }
+
+  const handlePickReaction = (type: string) => {
+    setShowReactionPicker(false)
+    onReact(type)
   }
 
   const isOwn = c.author_id === currentUserId
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
   const avatarSize = depth === 0 ? 'w-8 h-8' : depth === 1 ? 'w-6 h-6' : 'w-5 h-5'
+  const myReaction: string = c.my_reaction || ''
+  const reactionCount: number = c.reaction_count || 0
 
   return (
     <div className="flex gap-2">
@@ -351,14 +366,24 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           </span>
           {c.edited_at && <span className="text-xs text-agora-400 italic">edited</span>}
 
-          <button
-            onClick={onLike}
-            className={`flex items-center gap-1 text-xs transition-colors ${c.liked ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}>
-            <Heart size={12} className={c.liked ? 'fill-current' : ''} />
-            {c.like_count > 0 && <span>{c.like_count}</span>}
-          </button>
+          {/* Reaction button + picker */}
+          <div className="relative">
+            <button
+              onClick={() => myReaction ? (onReact(myReaction)) : setShowReactionPicker(p => !p)}
+              onContextMenu={e => { e.preventDefault(); setShowReactionPicker(p => !p) }}
+              className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+              title={myReaction ? 'Click to remove · Right-click to change' : 'React'}
+            >
+              <span style={{ lineHeight: 1 }}>
+                {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+              </span>
+              {reactionCount > 0 && <span>{reactionCount}</span>}
+            </button>
+            {showReactionPicker && (
+              <CommentReactionPicker onPick={handlePickReaction} activeReaction={myReaction || undefined} />
+            )}
+          </div>
 
-          {/* Reply button — depth 0 and 1, not at depth 2 */}
           {depth < 2 && (
             <button
               onClick={openReply}
@@ -385,7 +410,6 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           )}
         </div>
 
-        {/* Inline reply composer */}
         {showReplyBox && (
           <div className="flex gap-2 mt-2">
             <div className="w-6 h-6 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
@@ -394,7 +418,6 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                 : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{user?.username?.[0]?.toUpperCase()}</span>}
             </div>
             <div className="flex-1 space-y-1.5">
-              {/* Reply image preview */}
               {replyImageUrl && (
                 <div className="relative">
                   <img src={replyImageUrl} alt="" className="rounded-lg max-h-32 object-contain bg-agora-50 dark:bg-agora-900" />
@@ -404,7 +427,6 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                 </div>
               )}
               <div className="flex gap-1.5 relative">
-                {/* Image upload */}
                 <label className={`flex-shrink-0 p-1 rounded text-agora-400 hover:text-agora-600 hover:bg-agora-100 dark:hover:bg-agora-700 cursor-pointer transition-colors ${replyUploading ? 'opacity-50 pointer-events-none' : ''}`} title="Add image">
                   <Image size={14} />
                   <input ref={replyFileRef} type="file" accept="image/*" className="hidden" onChange={handleReplyImageUpload} disabled={replyUploading || !!replyImageUrl} />

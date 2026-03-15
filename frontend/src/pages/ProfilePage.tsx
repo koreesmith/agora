@@ -147,7 +147,7 @@ export default function ProfilePage() {
         </div>
       ) : tab === 'posts' ? (
         <div className="space-y-4">
-          {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts-${username}`} />)}
+          {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts`} />)}
           {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
         </div>
       ) : (

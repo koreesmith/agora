@@ -54,7 +54,7 @@ export default function GroupsPage() {
       {/* Search bar — always visible */}
       <div className="relative">
         <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-agora-400" />
-        <input className="input pl-9 text-sm" placeholder="Search groups…"
+        <input className="input pl-9 text-sm" autoComplete="off" placeholder="Search groups…"
           value={searchInput} onChange={e => setSearchInput(e.target.value)} />
         {searchFetching && (
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-agora-400 animate-pulse">searching…</span>

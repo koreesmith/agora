@@ -196,6 +196,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
               ref={inputRef as React.RefObject<HTMLInputElement>}
               className="input flex-1 text-sm py-1.5"
               placeholder="Write a comment… use @username to tag"
+              autoComplete="off"
               value={text}
               onChange={e => { setText(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
               onKeyDown={e => {
@@ -308,6 +309,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
               <textarea
                 className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400"
                 rows={2}
+                autoComplete="off"
                 value={editContent}
                 onChange={e => setEditContent(e.target.value)}
                 autoFocus
@@ -435,6 +437,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                   ref={inputRef as React.RefObject<HTMLInputElement>}
                   className="input flex-1 text-sm py-1"
                   placeholder={`Reply to ${c.username}…`}
+                  autoComplete="off"
                   value={replyText}
                   autoFocus
                   onChange={e => {

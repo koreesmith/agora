@@ -32,7 +32,7 @@ export default function ResetPasswordPage() {
             <h2 className="text-xl font-bold">Set new password</h2>
             {error && <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700">{error}</div>}
             <div><label className="label">New password</label>
-              <input type="password" className="input" required minLength={8} value={password} onChange={e=>setPassword(e.target.value)} /></div>
+              <input type="password" className="input" required minLength={8} autoComplete="new-password" value={password} onChange={e=>setPassword(e.target.value)} /></div>
             <button type="submit" disabled={loading} className="btn-primary w-full">{loading?'Saving…':'Reset password'}</button>
           </form>
         )}

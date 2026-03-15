@@ -38,19 +38,19 @@ export default function SetupPage() {
           <div className="pb-2 border-b border-agora-100 dark:border-agora-700">
             <p className="text-xs font-semibold uppercase tracking-wide text-agora-400 mb-3">Instance</p>
             <div><label className="label">Instance name</label>
-              <input className="input" value={form.instance_name} onChange={set('instance_name')} /></div>
+              <input className="input" autoComplete="off" value={form.instance_name} onChange={set('instance_name')} /></div>
           </div>
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-agora-400 mb-3">Admin account</p>
             <div className="space-y-3">
               <div><label className="label">Display name</label>
-                <input className="input" value={form.display_name} onChange={set('display_name')} /></div>
+                <input className="input" autoComplete="name" value={form.display_name} onChange={set('display_name')} /></div>
               <div><label className="label">Username *</label>
-                <input className="input" required minLength={3} value={form.username} onChange={set('username')} /></div>
+                <input className="input" required minLength={3} autoComplete="username" value={form.username} onChange={set('username')} /></div>
               <div><label className="label">Email *</label>
-                <input type="email" className="input" required value={form.email} onChange={set('email')} /></div>
+                <input type="email" className="input" required autoComplete="email" value={form.email} onChange={set('email')} /></div>
               <div><label className="label">Password *</label>
-                <input type="password" className="input" required minLength={8} value={form.password} onChange={set('password')} /></div>
+                <input type="password" className="input" required minLength={8} autoComplete="new-password" value={form.password} onChange={set('password')} /></div>
             </div>
           </div>
           <button type="submit" disabled={loading} className="btn-primary w-full">

@@ -137,9 +137,9 @@ export default function AlbumPage() {
               <button onClick={() => setEditingAlbum(false)} className="btn-ghost p-1"><X size={18} /></button>
             </div>
             <div><label className="label">Title</label>
-              <input className="input" value={albumForm.title} onChange={e => setAlbumForm(f => ({ ...f, title: e.target.value }))} /></div>
+              <input className="input" autoComplete="off" value={albumForm.title} onChange={e => setAlbumForm(f => ({ ...f, title: e.target.value }))} /></div>
             <div><label className="label">Description</label>
-              <textarea className="input resize-none" rows={2} value={albumForm.description}
+              <textarea className="input resize-none" autoComplete="off" rows={2} value={albumForm.description}
                 onChange={e => setAlbumForm(f => ({ ...f, description: e.target.value }))} /></div>
             <div>
               <label className="label">Visibility</label>
@@ -240,6 +240,7 @@ export default function AlbumPage() {
               {editingCaption === photos[lightbox].id ? (
                 <div className="flex gap-2" onClick={e => e.stopPropagation()}>
                   <input className="input flex-1 text-sm"
+                    autoComplete="off"
                     value={captionText}
                     onChange={e => setCaptionText(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') saveCaption.mutate(photos[lightbox].id) }}

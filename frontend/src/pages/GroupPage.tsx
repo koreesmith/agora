@@ -70,7 +70,7 @@ export default function GroupPage() {
             <p className="text-sm text-agora-500">This is a private group. Your request will be reviewed by the group admins.</p>
             <div>
               <label className="label">Message (optional)</label>
-              <textarea className="input resize-none" rows={3} placeholder="Introduce yourself or explain why you'd like to join…"
+              <textarea className="input resize-none" autoComplete="off" rows={3} placeholder="Introduce yourself or explain why you'd like to join…"
                 value={requestMsg} onChange={e => setRequestMsg(e.target.value)} />
             </div>
             <div className="flex gap-2 justify-end">
@@ -216,7 +216,7 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
                 : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">{user?.username?.[0]?.toUpperCase()}</span>}
             </div>
             <textarea value={content} onChange={e => setContent(e.target.value)} placeholder={`Post something to ${group.name}…`}
-              rows={2} className="flex-1 resize-none bg-transparent text-sm placeholder-agora-400 focus:outline-none" />
+              rows={2} autoComplete="off" className="flex-1 resize-none bg-transparent text-sm placeholder-agora-400 focus:outline-none" />
           </div>
           {imageUrl && (
             <div className="relative">
@@ -555,8 +555,8 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
       <div className="card p-4 space-y-4">
         <h3 className="font-semibold">Group Settings</h3>
         {msg && <p className="text-sm text-green-600">{msg}</p>}
-        <div><label className="label">Name</label><input className="input" value={name} onChange={e => setName(e.target.value)} /></div>
-        <div><label className="label">Description</label><textarea className="input resize-none" rows={3} value={description} onChange={e => setDescription(e.target.value)} /></div>
+        <div><label className="label">Name</label><input className="input" autoComplete="off" value={name} onChange={e => setName(e.target.value)} /></div>
+        <div><label className="label">Description</label><textarea className="input resize-none" autoComplete="off" rows={3} value={description} onChange={e => setDescription(e.target.value)} /></div>
         {isOwner && (
           <div>
             <label className="label">Privacy</label>

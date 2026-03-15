@@ -73,7 +73,7 @@ export default function AdminPage() {
         <div className="card p-4 space-y-4">
           {([{k:'instance_name',label:'Instance name'},{k:'instance_description',label:'Description'}] as {k:string,label:string}[]).map(({k,label})=>(
             <div key={k}><label className="label">{label}</label>
-              <input className="input" value={settingsForm[k]||''} onChange={sf(k)} /></div>
+              <input className="input" autoComplete="off" value={settingsForm[k]||''} onChange={sf(k)} /></div>
           ))}
           <div><label className="label">Registration mode</label>
             <select className="input" value={settingsForm.registration_mode||'open'} onChange={sf('registration_mode')}>
@@ -82,7 +82,7 @@ export default function AdminPage() {
               <option value="closed">Closed</option>
             </select></div>
           <div><label className="label">Deletion grace period (days)</label>
-            <input type="number" className="input" value={settingsForm.deletion_grace_days||'30'} onChange={sf('deletion_grace_days')} /></div>
+            <input type="number" className="input" autoComplete="off" value={settingsForm.deletion_grace_days||'30'} onChange={sf('deletion_grace_days')} /></div>
           <div className="flex items-center justify-between py-2">
             <div><p className="font-medium text-sm">Enable federation</p>
               <p className="text-xs text-agora-400">Allow connecting with other Agora instances</p></div>
@@ -95,7 +95,7 @@ export default function AdminPage() {
           <h3 className="font-semibold text-sm">SMTP (email)</h3>
           {([{k:'smtp_host',label:'Host',type:'text'},{k:'smtp_port',label:'Port',type:'number'},{k:'smtp_user',label:'Username',type:'text'},{k:'smtp_password',label:'Password',type:'password'},{k:'smtp_from',label:'From address',type:'email'}] as {k:string,label:string,type:string}[]).map(({k,label,type})=>(
             <div key={k}><label className="label">{label}</label>
-              <input type={type} className="input" value={settingsForm[k]||''} onChange={sf(k)} /></div>
+              <input type={type} className="input" autoComplete={type === 'password' ? 'current-password' : type === 'email' ? 'email' : 'off'} value={settingsForm[k]||''} onChange={sf(k)} /></div>
           ))}
           <div className="flex items-center justify-between py-1">
             <p className="text-sm font-medium">Enable email</p>
@@ -226,6 +226,7 @@ function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void 
                     <textarea
                       className="input w-full text-sm resize-none"
                       rows={2}
+                      autoComplete="off"
                       value={editText}
                       onChange={e => setEditText(e.target.value)}
                       autoFocus
@@ -262,6 +263,7 @@ function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void 
           <textarea
             className="input w-full text-sm resize-none"
             rows={2}
+            autoComplete="off"
             placeholder="e.g. No harassment or hate speech"
             value={newText}
             onChange={e => setNewText(e.target.value)}
@@ -315,6 +317,7 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         <div className="flex gap-2">
           <input
             className="input flex-1 text-sm"
+            autoComplete="off"
             placeholder="social.example.com"
             value={domain}
             onChange={e => { setDomain(e.target.value); setAddErr('') }}

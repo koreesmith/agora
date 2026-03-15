@@ -55,12 +55,12 @@ export default function AlbumsPage() {
             {err && <p className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg px-3 py-2">{err}</p>}
             <div>
               <label className="label">Album name <span className="text-red-500">*</span></label>
-              <input className="input" placeholder="e.g. Summer 2025"
+              <input className="input" autoComplete="off" placeholder="e.g. Summer 2025"
                 value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} />
             </div>
             <div>
               <label className="label">Description</label>
-              <textarea className="input resize-none" rows={2} placeholder="What's this album about?"
+              <textarea className="input resize-none" autoComplete="off" rows={2} placeholder="What's this album about?"
                 value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
             </div>
             <div>

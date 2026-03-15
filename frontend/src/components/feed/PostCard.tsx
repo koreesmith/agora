@@ -415,10 +415,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               <textarea
                 className="input w-full resize-none text-sm"
                 rows={3}
+                autoComplete="off"
                 value={editContent}
                 onChange={e => setEditContent(e.target.value)}
                 autoFocus
-              />
+/>
               {/* Trigger warning toggle in edit mode */}
               <div className="flex items-center gap-2">
                 <button
@@ -435,6 +436,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   <input
                     className="flex-1 input text-xs py-1"
                     placeholder="Describe the trigger…"
+                    autoComplete="off"
                     value={editTwLabel}
                     onChange={e => setEditTwLabel(e.target.value)}
                     maxLength={120}

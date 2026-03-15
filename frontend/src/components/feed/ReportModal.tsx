@@ -108,6 +108,7 @@ export default function ReportModal({ postId, userId, onClose }: ReportModalProp
               <textarea
                 className="input w-full resize-none text-sm"
                 rows={3}
+                autoComplete="off"
                 placeholder="Provide any context that might help our moderators…"
                 value={details}
                 onChange={e => setDetails(e.target.value)}

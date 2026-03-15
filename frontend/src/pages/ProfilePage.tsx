@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/auth'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X } from 'lucide-react'
+import FriendListModal from '../components/common/FriendListModal'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={10} />,
@@ -37,6 +38,8 @@ export default function ProfilePage() {
     enabled: !!profile && !profile.profile_private && tab === 'photos',
   })
 
+  const [listModalFriend, setListModalFriend] = useState<any | null>(null)
+
   const inv = () => {
     qc.invalidateQueries({ queryKey: ['profile', username] })
     qc.invalidateQueries({ queryKey: ['friends'] })
@@ -44,8 +47,14 @@ export default function ProfilePage() {
     qc.invalidateQueries({ queryKey: ['notifications'] })
   }
 
-  const sendReq = useMutation({ mutationFn: () => friendsApi.sendRequest(profile.id), onSuccess: inv })
-  const accept  = useMutation({ mutationFn: () => friendsApi.acceptRequest(profile.id), onSuccess: inv })
+  const sendReq = useMutation({
+    mutationFn: () => friendsApi.sendRequest(profile.id),
+    onSuccess: () => { inv(); setListModalFriend(profile) },
+  })
+  const accept  = useMutation({
+    mutationFn: () => friendsApi.acceptRequest(profile.id),
+    onSuccess: () => { inv(); setListModalFriend(profile) },
+  })
   const decline = useMutation({ mutationFn: () => friendsApi.declineRequest(profile.id), onSuccess: inv })
   const unfriend= useMutation({ mutationFn: () => friendsApi.unfriend(profile.id), onSuccess: inv })
 
@@ -61,6 +70,12 @@ export default function ProfilePage() {
 
   return (
     <>
+    {listModalFriend && (
+      <FriendListModal
+        friend={listModalFriend}
+        onClose={() => setListModalFriend(null)}
+      />
+    )}
     <div className="space-y-4">
       {/* Cover + avatar */}
       <div className="card overflow-hidden">

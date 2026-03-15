@@ -42,6 +42,82 @@ function CommentReactionPicker({ onPick, activeReaction }: { onPick: (type: stri
   )
 }
 
+// ── Comment Reactions Modal ───────────────────────────────────────────────────
+
+function CommentReactionsModal({ commentId, onClose }: { commentId: string; onClose: () => void }) {
+  const [activeTab, setActiveTab] = useState<string>('all')
+  const { data } = useQuery({
+    queryKey: ['reactions', commentId],
+    queryFn: () => feedApi.getReactions(commentId).then(r => r.data),
+  })
+  const reactions: any[] = data?.reactions || []
+  const counts: Record<string, number> = data?.counts || {}
+  const total: number = data?.total || 0
+
+  const tabs = [
+    { key: 'all', label: `All ${total}` },
+    ...REACTIONS.filter(r => counts[r.type]).map(r => ({
+      key: r.type,
+      label: `${r.emoji} ${counts[r.type]}`,
+    })),
+  ]
+  const filtered = activeTab === 'all' ? reactions : reactions.filter((r: any) => r.type === activeTab)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+      onClick={onClose}>
+      <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-sm"
+        onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 pt-4 pb-2">
+          <h3 className="font-semibold text-agora-900 dark:text-agora-100">Reactions</h3>
+          <button onClick={onClose} className="text-agora-400 hover:text-agora-600 transition-colors">
+            <XIcon size={18} />
+          </button>
+        </div>
+        <div className="flex gap-1 px-3 pb-2 overflow-x-auto border-b border-agora-100 dark:border-agora-700">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              className={`flex-shrink-0 px-3 py-1 rounded-full text-sm transition-colors ${
+                activeTab === t.key
+                  ? 'bg-agora-600 text-white'
+                  : 'text-agora-500 hover:bg-agora-100 dark:hover:bg-agora-700'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="max-h-72 overflow-y-auto py-2">
+          {filtered.length === 0
+            ? <p className="text-center text-sm text-agora-400 py-6">No reactions yet</p>
+            : filtered.map((r: any) => (
+                <div key={r.user_id} className="flex items-center gap-3 px-4 py-2 hover:bg-agora-50 dark:hover:bg-agora-700/50">
+                  <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {r.avatar_url
+                      ? <img src={r.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
+                          {(r.display_name || r.username)[0].toUpperCase()}
+                        </span>
+                    }
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
+                      {r.display_name || r.username}
+                    </p>
+                    <p className="text-xs text-agora-400">@{r.username}</p>
+                  </div>
+                  <span className="text-lg leading-none">{REACTION_MAP[r.type]?.emoji}</span>
+                </div>
+              ))
+          }
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string) {
   const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+)/g)
@@ -280,6 +356,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
 
   const isOwn = c.author_id === currentUserId
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+  const [showReactionsModal, setShowReactionsModal] = useState(false)
   const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
   const avatarSize = depth === 0 ? 'w-8 h-8' : depth === 1 ? 'w-6 h-6' : 'w-5 h-5'
   const myReaction: string = c.my_reaction || ''
@@ -379,12 +456,22 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
               <span style={{ lineHeight: 1 }}>
                 {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
               </span>
-              {reactionCount > 0 && <span>{reactionCount}</span>}
             </button>
             {showReactionPicker && (
               <CommentReactionPicker onPick={handlePickReaction} activeReaction={myReaction || undefined} />
             )}
           </div>
+          {reactionCount > 0 && (
+            <button
+              onClick={() => setShowReactionsModal(true)}
+              className="text-xs text-agora-400 hover:text-agora-600 transition-colors"
+            >
+              {reactionCount}
+            </button>
+          )}
+          {showReactionsModal && (
+            <CommentReactionsModal commentId={c.id} onClose={() => setShowReactionsModal(false)} />
+          )}
 
           {depth < 2 && (
             <button

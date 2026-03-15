@@ -6,6 +6,7 @@ import { feedApi, friendsApi, previewApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
+import { isGifUrl } from '../../utils/gif'
 
 // Detect the first URL in a string
 const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/i
@@ -59,6 +60,16 @@ export default function CreatePost() {
       setDetectedUrl('')
       setPreviewDismissed(false)
       lastFetchedUrl.current = ''
+      return
+    }
+
+    // GIF URLs: set as image directly, skip link preview entirely
+    if (isGifUrl(url)) {
+      if (!imageUrl) {
+        setImageUrl(url)
+        // Strip the URL from the content so it doesn't show as text
+        setContent(c => c.replace(url, '').trim())
+      }
       return
     }
 
@@ -161,10 +172,13 @@ export default function CreatePost() {
         </div>
       </div>
 
-      {/* Uploaded image preview */}
+      {/* Uploaded image / GIF preview */}
       {imageUrl && (
         <div className="relative ml-13">
-          <img src={imageUrl} alt="" className="rounded-lg w-full max-h-48 object-contain bg-agora-50 dark:bg-agora-900" />
+          {isGifUrl(imageUrl) && (
+            <span className="absolute top-2 left-2 bg-black/60 text-white text-xs font-bold px-1.5 py-0.5 rounded z-10">GIF</span>
+          )}
+          <img src={imageUrl} alt="" className={`rounded-lg w-full max-h-48 object-contain ${isGifUrl(imageUrl) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
           <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80">
             <X size={12} />
           </button>

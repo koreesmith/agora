@@ -400,6 +400,7 @@ var schema = []string{
 		CHECK (wall_status IN ('approved','pending','rejected'))`,
 	`CREATE INDEX IF NOT EXISTS idx_posts_wall ON posts(wall_user_id, wall_status, created_at DESC)`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS wall_approval_required BOOLEAN NOT NULL DEFAULT FALSE`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS expo_push_token TEXT NOT NULL DEFAULT ''`,
 
 	// ── Polls (AGORA-5) ────────────────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS poll_options (

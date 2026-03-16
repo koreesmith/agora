@@ -153,6 +153,72 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
 	go s.maybeEmailNotif(userID, actorID, notifType)
+	go s.maybePushNotif(userID, actorID, notifType)
+}
+
+func (s *Service) maybePushNotif(userID, actorID, notifType string) {
+	var pushToken string
+	s.db.QueryRow(`SELECT COALESCE(expo_push_token,'') FROM users WHERE id = $1`, userID).Scan(&pushToken)
+	if pushToken == "" { return }
+
+	actorName := "Someone"
+	if actorID != "" {
+		var display, username string
+		s.db.QueryRow(`SELECT COALESCE(display_name,''), username FROM users WHERE id = $1`, actorID).Scan(&display, &username)
+		if display != "" { actorName = display } else if username != "" { actorName = username }
+	}
+
+	title, body := pushNotifContent(notifType, actorName)
+	if title == "" { return }
+
+	payload := map[string]any{
+		"to":    pushToken,
+		"title": title,
+		"body":  body,
+		"sound": "default",
+		"data":  map[string]string{"type": notifType},
+	}
+	jsonBytes, _ := json.Marshal([]any{payload})
+	req, err := http.NewRequest("POST", "https://exp.host/--/api/v2/push/send", strings.NewReader(string(jsonBytes)))
+	if err != nil { return }
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil { log.Printf("push notif error: %v", err); return }
+	defer resp.Body.Close()
+}
+
+func pushNotifContent(t, actorName string) (title, body string) {
+	switch t {
+	case "friend_request":
+		return "New friend request", actorName + " sent you a friend request"
+	case "friend_accepted":
+		return "Friend request accepted", actorName + " accepted your friend request"
+	case "post_like":
+		return "New like", actorName + " liked your post"
+	case "post_reaction":
+		return "New reaction", actorName + " reacted to your post"
+	case "post_comment":
+		return "New comment", actorName + " commented on your post"
+	case "comment_reply":
+		return "New reply", actorName + " replied to your comment"
+	case "post_mention":
+		return "You were mentioned", actorName + " mentioned you in a post"
+	case "post_repost":
+		return "New repost", actorName + " reposted your post"
+	case "wall_post":
+		return "New wall post", actorName + " posted on your wall"
+	case "wall_post_pending":
+		return "Wall post request", actorName + " wants to post on your wall"
+	case "user_post":
+		return "New post", actorName + " just posted something new"
+	case "group_join_request":
+		return "Join request", actorName + " wants to join your group"
+	case "group_join_approved":
+		return "Request approved", "Your group join request was approved"
+	}
+	return "", ""
 }
 
 func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {

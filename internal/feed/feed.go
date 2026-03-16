@@ -150,6 +150,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
+			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND (
 			    p.author_id = $1
 			    OR p.wall_user_id = $1
@@ -220,6 +221,17 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	if profilePrivate && !isSelf && !isFriend {
 		writeJSON(w, 200, map[string]any{"posts": []any{}})
 		return
+	}
+
+	// Block gate
+	if !isSelf && viewerID != "" {
+		var isBlocked bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+			viewerID, authorID).Scan(&isBlocked)
+		if isBlocked {
+			writeJSON(w, 200, map[string]any{"posts": []any{}})
+			return
+		}
 	}
 
 	// Build visibility filter
@@ -354,6 +366,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		s.db.QueryRow(`SELECT wall_approval_required FROM users WHERE id = $1`, req.WallUserID).Scan(&approvalRequired)
 		if approvalRequired {
 			wallStatus = "pending"
+		}
+
+		// Block check — can't post on wall of someone who blocked you or vice versa
+		var isBlocked bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+			userID, req.WallUserID).Scan(&isBlocked)
+		if isBlocked {
+			writeError(w, 403, "cannot post on this user's wall")
+			return
 		}
 		// Wall posts are always friends visibility
 		req.Visibility = "friends"

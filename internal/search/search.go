@@ -52,6 +52,8 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		)
 		WHERE u.deletion_scheduled_at IS NULL
 		  AND u.is_suspended = false
+		  AND u.id != $1
+		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=u.id) OR (blocker_id=u.id AND blocked_id=$1))
 		  AND (
 		    u.username     ILIKE '%' || $2 || '%'
 		    OR u.display_name ILIKE '%' || $2 || '%'

@@ -296,6 +296,12 @@ func (s *Service) StartConversation(w http.ResponseWriter, r *http.Request) {
 	if dmPrivacy == "nobody"                    { writeError(w, 403, "this user is not accepting messages"); return }
 	if dmPrivacy == "friends" && !isFriend      { writeError(w, 403, "this user only accepts messages from friends"); return }
 
+	// Block check
+	var isBlocked bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+		userID, recipientID).Scan(&isBlocked)
+	if isBlocked { writeError(w, 404, "user not found"); return }
+
 	// Return existing conversation if one already exists
 	var existingID string
 	s.db.QueryRow(`

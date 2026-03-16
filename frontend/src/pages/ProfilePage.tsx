@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usersApi, feedApi, friendsApi, albumsApi, dmApi } from '../api'
+import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const visIcon: Record<string, React.ReactNode> = {
@@ -95,6 +95,16 @@ export default function ProfilePage() {
     onSuccess: (res) => openChat(res.data.id),
   })
 
+  const toggleBlock = useMutation({
+    mutationFn: () => profile.is_blocked
+      ? blocksApi.unblock(profile.username)
+      : blocksApi.block(profile.username),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['profile', username] })
+      qc.invalidateQueries({ queryKey: ['friends'] })
+    },
+  })
+
   const handlePostToWall = async () => {
     if (!wallContent.trim()) return
     setWallPosting(true)
@@ -149,9 +159,20 @@ export default function ProfilePage() {
             </div>
             <div className="flex gap-2 mt-10">
               {!isSelf && !status && (
-                <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
-                  <UserPlus size={16}/> Add friend
-                </button>
+                <div className="flex gap-2">
+                  <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
+                    <UserPlus size={16}/> Add friend
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(profile.is_blocked ? `Unblock ${profile.display_name}?` : `Block ${profile.display_name}? They won't be able to see your profile or contact you.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-agora-400"
+                    title={profile.is_blocked ? 'Unblock' : 'Block'}
+                  >
+                    {profile.is_blocked ? <ShieldOff size={15}/> : <Shield size={15}/>}
+                    {profile.is_blocked ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
               )}
               {!isSelf && status === 'pending' && (
                 <button disabled className="btn-secondary text-sm flex items-center gap-1"><Clock size={16}/> Pending</button>
@@ -194,6 +215,14 @@ export default function ProfilePage() {
                     className="btn-primary text-sm flex items-center gap-1"
                   >
                     <PenLine size={15}/> Write on wall
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(`Block ${profile.display_name}? This will also unfriend them.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-red-400"
+                    title="Block"
+                  >
+                    <Shield size={15}/> Block
                   </button>
                 </div>
               )}

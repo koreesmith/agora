@@ -567,6 +567,16 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "forbidden"); return
 	}
 
+	// Check if viewer is owner/mod of this group (block exception for admins)
+	var viewerRole string
+	s.db.QueryRow(`SELECT COALESCE(role,'') FROM community_group_members WHERE group_id=$1 AND user_id=$2`, groupID, userID).Scan(&viewerRole)
+	isGroupAdmin := viewerRole == "owner" || viewerRole == "mod"
+
+	var blockFilter string
+	if !isGroupAdmin {
+		blockFilter = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))`
+	}
+
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       COALESCE(m.role,'') AS author_role,
@@ -581,6 +591,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 		WHERE p.community_group_id = $2
 		  AND p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
+		  `+blockFilter+`
 		ORDER BY p.created_at DESC
 		LIMIT $3 OFFSET $4
 	`, userID, groupID, limit, offset)

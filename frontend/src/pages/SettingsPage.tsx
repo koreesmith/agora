@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
-import { usersApi, authApi, notificationsApi } from '../api'
+import { usersApi, authApi, notificationsApi, blocksApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
 
 export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
   const qc = useQueryClient()
-  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'data'>('profile')
+  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'data'|'blocked'>('profile')
 
   const [profile, setProfile] = useState({ display_name: user?.display_name||'', pronouns: user?.pronouns||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
   const [passwords, setPasswords] = useState({ current_password:'', new_password:'' })
@@ -118,7 +119,18 @@ export default function SettingsPage() {
     onError: fail,
   })
 
-  const tabs = ['profile','account','privacy','notifications','data'] as const
+  const { data: blockedData, refetch: refetchBlocked } = useQuery({
+    queryKey: ['blocks'],
+    queryFn: () => blocksApi.list().then(r => r.data),
+    enabled: tab === 'blocked',
+  })
+
+  const unblock = useMutation({
+    mutationFn: (username: string) => blocksApi.unblock(username),
+    onSuccess: () => refetchBlocked(),
+  })
+
+  const tabs = ['profile','account','privacy','notifications','data','blocked'] as const
 
   return (
     <div className="space-y-4">
@@ -259,6 +271,39 @@ export default function SettingsPage() {
               Schedule deletion
             </button>
           </div>
+        </div>
+      )}
+
+      {tab === 'blocked' && (
+        <div className="card p-4 space-y-3">
+          <h3 className="font-semibold">Blocked users</h3>
+          <p className="text-sm text-agora-500">Blocked users cannot see your profile, contact you, or appear in your feed.</p>
+          {(blockedData?.blocked || []).length === 0 ? (
+            <p className="text-sm text-agora-400 py-4 text-center">You haven't blocked anyone.</p>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {(blockedData?.blocked || []).map((u: any) => (
+                <div key={u.id} className="flex items-center gap-3 py-2 border-b border-agora-100 dark:border-agora-700 last:border-0">
+                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {u.avatar_url
+                      ? <img src={u.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">{(u.display_name || u.username)[0].toUpperCase()}</span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Link to={`/profile/${u.username}`} className="text-sm font-medium hover:underline">{u.display_name || u.username}</Link>
+                    <p className="text-xs text-agora-400">@{u.username}</p>
+                  </div>
+                  <button
+                    onClick={() => { if (confirm(`Unblock ${u.display_name || u.username}?`)) unblock.mutate(u.username) }}
+                    disabled={unblock.isPending}
+                    className="btn-secondary text-xs py-1 px-3"
+                  >
+                    Unblock
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

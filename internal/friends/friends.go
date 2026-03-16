@@ -153,6 +153,15 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Block check — treat as if user doesn't exist
+	var isBlocked bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+		requesterID, addresseeID).Scan(&isBlocked)
+	if isBlocked {
+		writeError(w, 404, "user not found")
+		return
+	}
+
 	// Check not already friends / pending
 	var status string
 	s.db.QueryRow(`

@@ -229,7 +229,12 @@ export const instanceApi = {
   },
 }
 
-// ── Direct Messages ───────────────────────────────────────────────────────────
+// ── Blocks ────────────────────────────────────────────────────────────────────
+export const blocksApi = {
+  list:     ()                 => api.get('/blocks'),
+  block:    (username: string) => api.post(`/blocks/${username}`),
+  unblock:  (username: string) => api.delete(`/blocks/${username}`),
+}
 export const dmApi = {
   listConversations:  ()                                     => api.get('/conversations'),
   startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),

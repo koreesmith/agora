@@ -75,6 +75,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		FriendStatus   string  `json:"friend_status"`
 		FriendCount    int     `json:"friend_count"`
 		PostNotify     bool    `json:"post_notifications_enabled"`
+		IsBlocked      bool    `json:"is_blocked"`
 	}
 
 	err := s.db.QueryRow(`
@@ -90,6 +91,22 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 404, "user not found")
 		return
+	}
+
+	// Block check — make it appear as if the user doesn't exist
+	if viewerID != "" && viewerID != u.ID {
+		var isBlocked bool
+		s.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM blocks
+				WHERE (blocker_id = $1 AND blocked_id = $2)
+				   OR (blocker_id = $2 AND blocked_id = $1)
+			)
+		`, viewerID, u.ID).Scan(&isBlocked)
+		if isBlocked {
+			writeError(w, 404, "user not found")
+			return
+		}
 	}
 
 	// Friend status (directional: pending_incoming = they requested us)
@@ -122,6 +139,10 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_notifications WHERE follower_id = $1 AND followed_id = $2)`,
 			viewerID, u.ID).Scan(&exists)
 		u.PostNotify = exists
+
+		// Is this viewer blocking the profile user (one-directional — viewer blocked them)
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2)`,
+			viewerID, u.ID).Scan(&u.IsBlocked)
 	}
 
 	// Enforce privacy

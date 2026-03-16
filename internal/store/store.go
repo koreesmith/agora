@@ -420,6 +420,16 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_poll_votes_option ON poll_votes(option_id)`,
 
+	// ── Blocks (AGORA-45) ─────────────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS blocks (
+		blocker_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		blocked_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (blocker_id, blocked_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id)`,
+
 	// ── Direct Messages (AGORA-34) ─────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS conversations (
 		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),

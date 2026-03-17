@@ -1587,8 +1587,21 @@ func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
 		return nil, fmt.Errorf("invalid URL")
 	}
 
+	// Expand known short URLs to canonical forms before fetching
+	rawURL = expandShortURL(rawURL, parsed)
+	parsed, _ = url.ParseRequestURI(rawURL)
+
+	// ── YouTube oEmbed fast path ───────────────────────────────────────────
+	// YouTube blocks scrapers but has a public oEmbed API that always works.
+	host := strings.ToLower(parsed.Hostname())
+	if host == "www.youtube.com" || host == "youtube.com" || host == "youtu.be" {
+		if p := youtubePreview(rawURL); p != nil {
+			return p, nil
+		}
+	}
+
 	// Resolve the hostname and check for private IPs (SSRF protection)
-	host := parsed.Hostname()
+	host = parsed.Hostname()
 	addrs, err := net.LookupHost(host)
 	if err != nil {
 		return nil, fmt.Errorf("could not resolve host")
@@ -1602,17 +1615,19 @@ func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
 	}
 
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 8 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 { return fmt.Errorf("too many redirects") }
+			if len(via) >= 5 { return fmt.Errorf("too many redirects") }
 			return nil
 		},
 	}
 
 	req, _ := http.NewRequest("GET", rawURL, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Agora/1.0; +https://github.com/agora-social/agora) AppleWebKit/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+	// Use a realistic browser user agent — many sites block bot UAs
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := client.Do(req)
 	if err != nil { return nil, fmt.Errorf("could not fetch URL") }
@@ -1620,6 +1635,12 @@ func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("remote returned %d", resp.StatusCode)
+	}
+
+	// Update host to the final redirected URL's host
+	finalHost := parsed.Hostname()
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalHost = resp.Request.URL.Hostname()
 	}
 
 	// Only parse HTML responses
@@ -1635,7 +1656,7 @@ func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
 
 	preview := &LinkPreview{
 		URL:    rawURL,
-		Domain: host,
+		Domain: finalHost,
 	}
 
 	// Extract OG tags and fallback meta tags with simple regex
@@ -1703,6 +1724,70 @@ func extractTitle(html string) string {
 		return htmlUnescape(strings.TrimSpace(m[1]))
 	}
 	return ""
+}
+
+// expandShortURL converts short/redirect URLs to their canonical long-form equivalents.
+func expandShortURL(rawURL string, parsed *url.URL) string {
+	host := strings.ToLower(parsed.Hostname())
+	if host == "youtu.be" || host == "www.youtube.com" || host == "youtube.com" {
+		return cleanYouTubeURL(rawURL)
+	}
+	return rawURL
+}
+
+// youtubePreview uses YouTube's public oEmbed API to get video metadata.
+func youtubePreview(rawURL string) *LinkPreview {
+	cleanURL := cleanYouTubeURL(rawURL)
+	oembedURL := "https://www.youtube.com/oembed?url=" + url.QueryEscape(cleanURL) + "&format=json"
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(oembedURL)
+	if err != nil || resp.StatusCode != 200 { return nil }
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var data struct {
+		Title        string `json:"title"`
+		AuthorName   string `json:"author_name"`
+		ThumbnailURL string `json:"thumbnail_url"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil || data.Title == "" { return nil }
+
+	return &LinkPreview{
+		URL:         rawURL,
+		Title:       data.Title,
+		Description: "YouTube video by " + data.AuthorName,
+		Image:       data.ThumbnailURL,
+		Domain:      "www.youtube.com",
+	}
+}
+
+// cleanYouTubeURL strips tracking parameters from YouTube URLs, keeping only v= and list=.
+func cleanYouTubeURL(rawURL string) string {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil { return rawURL }
+
+	host := strings.ToLower(parsed.Hostname())
+
+	// youtu.be short links — extract video ID
+	if host == "youtu.be" {
+		videoID := strings.TrimPrefix(parsed.Path, "/")
+		if videoID != "" {
+			return "https://www.youtube.com/watch?v=" + videoID
+		}
+	}
+
+	// youtube.com — keep only v= and list= params
+	if host == "www.youtube.com" || host == "youtube.com" {
+		q := parsed.Query()
+		clean := url.Values{}
+		if v := q.Get("v"); v != "" { clean.Set("v", v) }
+		if l := q.Get("list"); l != "" { clean.Set("list", l) }
+		parsed.RawQuery = clean.Encode()
+		return parsed.String()
+	}
+
+	return rawURL
 }
 
 func htmlUnescape(s string) string {

@@ -6,7 +6,7 @@ import { Users, Lock, Globe, Plus, Search, TrendingUp, UserCheck } from 'lucide-
 import CreateGroupModal from '../components/groups/CreateGroupModal'
 
 export default function GroupsPage() {
-  const [filter, setFilter] = useState<'discover'|'joined'|'mine'>('discover')
+  const [filter, setFilter] = useState<'discover'|'joined'|'mine'>('joined')
   const [searchInput, setSearchInput] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [showCreate, setShowCreate] = useState(false)
@@ -37,9 +37,9 @@ export default function GroupsPage() {
   const refresh = () => qc.invalidateQueries({ queryKey: ['groups-browse'] })
 
   const filters = [
-    { id: 'discover', label: 'Discover' },
     { id: 'joined',   label: 'Joined' },
     { id: 'mine',     label: 'My Groups' },
+    { id: 'discover', label: 'Find Groups' },
   ]
 
   return (

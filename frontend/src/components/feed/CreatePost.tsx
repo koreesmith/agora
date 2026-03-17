@@ -166,6 +166,9 @@ export default function CreatePost() {
             placeholder="What's on your mind? Use @username to tag someone."
             rows={3}
             autoComplete="off"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-form-type="other"
             className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
           />
           {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}

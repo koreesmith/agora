@@ -9,6 +9,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 import CommentsSection from '../components/feed/CommentsSection'
 import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList, BarChart2, Plus, Minus } from 'lucide-react'
+import { REACTIONS, REACTION_MAP } from '../utils/reactions'
 import CoverPhoto from '../components/common/CoverPhoto'
 
 export default function GroupPage() {
@@ -161,6 +162,7 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
   const [imageUrl, setImageUrl] = useState('')
   const [uploading, setUploading] = useState(false)
   const [openComments, setOpenComments] = useState<string|null>(null)
+  const [openReactionPicker, setOpenReactionPicker] = useState<string|null>(null)
   const [pollEnabled, setPollEnabled] = useState(false)
   const [pollOptions, setPollOptions] = useState(['', ''])
 
@@ -196,22 +198,9 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
     finally { setUploading(false) }
   }
 
-  const likePost = useMutation({
-    mutationFn: ({ id, liked }: { id: string, liked: boolean }) => liked ? feedApi.unlikePost(id) : feedApi.likePost(id),
-    onMutate: async ({ id, liked }) => {
-      await qc.cancelQueries({ queryKey: ['group-feed', slug] })
-      const prev = qc.getQueryData(['group-feed', slug])
-      qc.setQueryData(['group-feed', slug], (old: any) => ({
-        ...old,
-        pages: old.pages.map((p: any) => ({
-          ...p,
-          posts: p.posts.map((post: any) => post.id === id
-            ? { ...post, liked: !liked, like_count: post.like_count + (liked ? -1 : 1) } : post)
-        }))
-      }))
-      return { prev }
-    },
-    onError: (_e, _v, ctx) => qc.setQueryData(['group-feed', slug], ctx?.prev),
+  const reactPost = useMutation({
+    mutationFn: ({ id, type, myReaction }: { id: string, type: string, myReaction: string }) =>
+      myReaction === type ? feedApi.unreactPost(id) : feedApi.reactPost(id, type),
     onSettled: () => qc.invalidateQueries({ queryKey: ['group-feed', slug] }),
   })
 
@@ -380,11 +369,30 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
           })()}
 
           <div className="flex items-center gap-4 pt-1 border-t border-agora-100 dark:border-agora-700">
-            <button onClick={() => likePost.mutate({ id: post.id, liked: post.liked })}
-              className={`flex items-center gap-1.5 text-sm transition-colors ${post.liked ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}>
-              <Heart size={15} className={post.liked ? 'fill-current' : ''} />
-              {post.like_count > 0 && <span>{post.like_count}</span>}
-            </button>
+            {/* Reaction button */}
+            <div className="relative">
+              <button
+                onClick={() => post.my_reaction ? reactPost.mutate({ id: post.id, type: post.my_reaction, myReaction: post.my_reaction }) : setOpenReactionPicker(openReactionPicker === post.id ? null : post.id)}
+                onContextMenu={e => { e.preventDefault(); setOpenReactionPicker(openReactionPicker === post.id ? null : post.id) }}
+                className={`flex items-center gap-1.5 text-sm transition-colors ${post.my_reaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+                title={post.my_reaction ? 'Click to remove · Right-click to change' : 'React'}
+              >
+                <span style={{ fontSize: 15 }}>{post.my_reaction ? REACTION_MAP[post.my_reaction]?.emoji || '❤️' : '🤍'}</span>
+                {(post.reaction_count || 0) > 0 && <span>{post.reaction_count}</span>}
+              </button>
+              {openReactionPicker === post.id && (
+                <div className="absolute bottom-8 left-0 z-20 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-2xl shadow-xl p-2 flex gap-1"
+                  onMouseLeave={() => setOpenReactionPicker(null)}>
+                  {REACTIONS.map(r => (
+                    <button key={r.type} title={r.label}
+                      onClick={() => { reactPost.mutate({ id: post.id, type: r.type, myReaction: post.my_reaction || '' }); setOpenReactionPicker(null) }}
+                      className={`text-xl p-1 rounded-lg hover:bg-agora-100 dark:hover:bg-agora-700 transition-colors hover:scale-125 ${post.my_reaction === r.type ? 'bg-agora-100 dark:bg-agora-700' : ''}`}>
+                      {r.emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button onClick={() => setOpenComments(openComments === post.id ? null : post.id)}
               className="flex items-center gap-1.5 text-sm text-agora-400 hover:text-agora-600">
               <MessageCircle size={15} />

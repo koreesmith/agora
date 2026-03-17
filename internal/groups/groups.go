@@ -547,6 +547,9 @@ type GroupPost struct {
 	CreatedAt    string            `json:"created_at"`
 	PollOptions  []GroupPollOption `json:"poll_options,omitempty"`
 	MyPollVote   string            `json:"my_poll_vote,omitempty"`
+	MyReaction   string            `json:"my_reaction,omitempty"`
+	ReactionCount int              `json:"reaction_count"`
+	ReactionCounts map[string]int  `json:"reaction_counts"`
 }
 
 func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
@@ -661,6 +664,67 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 					vRows.Scan(&postID, &optionID)
 					if idx, ok := idxMap[postID]; ok {
 						posts[idx].MyPollVote = optionID
+					}
+				}
+			}
+		}
+	}
+
+	// Enrich with reaction data
+	if len(posts) > 0 {
+		ids := make([]string, len(posts))
+		idxMap := map[string]int{}
+		for i, p := range posts {
+			ids[i] = p.ID
+			idxMap[p.ID] = i
+			posts[i].ReactionCounts = map[string]int{}
+		}
+		phs := make([]string, len(ids))
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			phs[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		inClause := strings.Join(phs, ",")
+
+		// Reaction counts per post
+		rRows, err := s.db.Query(
+			fmt.Sprintf(`SELECT post_id, reaction_type, COUNT(*) FROM reactions WHERE post_id IN (%s) GROUP BY post_id, reaction_type`, inClause),
+			args...,
+		)
+		if err == nil {
+			defer rRows.Close()
+			for rRows.Next() {
+				var postID, rType string
+				var count int
+				rRows.Scan(&postID, &rType, &count)
+				if idx, ok := idxMap[postID]; ok {
+					posts[idx].ReactionCounts[rType] += count
+					posts[idx].ReactionCount += count
+				}
+			}
+		}
+
+		// Current user's reaction
+		if userID != "" {
+			uargs := make([]any, len(ids)+1)
+			uargs[0] = userID
+			uphs := make([]string, len(ids))
+			for i, id := range ids {
+				uphs[i] = fmt.Sprintf("$%d", i+2)
+				uargs[i+1] = id
+			}
+			mrRows, err := s.db.Query(
+				fmt.Sprintf(`SELECT post_id, reaction_type FROM reactions WHERE user_id = $1 AND post_id IN (%s)`, strings.Join(uphs, ",")),
+				uargs...,
+			)
+			if err == nil {
+				defer mrRows.Close()
+				for mrRows.Next() {
+					var postID, rType string
+					mrRows.Scan(&postID, &rType)
+					if idx, ok := idxMap[postID]; ok {
+						posts[idx].MyReaction = rType
 					}
 				}
 			}

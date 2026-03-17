@@ -11,19 +11,7 @@ import { isGifUrl } from '../../utils/gif'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
-const REACTIONS = [
-  { type: 'like',     emoji: '❤️',  label: 'Like'     },
-  { type: 'love',     emoji: '😍',  label: 'Love'     },
-  { type: 'laugh',    emoji: '😂',  label: 'Laugh'    },
-  { type: 'angry',    emoji: '😡',  label: 'Angry'    },
-  { type: 'care',     emoji: '🤗',  label: 'Care'     },
-  { type: 'pride',    emoji: '🏳️‍🌈', label: 'Pride'    },
-  { type: 'thankful', emoji: '🙏',  label: 'Thankful' },
-  { type: 'vomit',    emoji: '🤮',  label: 'Vomit'    },
-]
-const REACTION_MAP: Record<string, { emoji: string; label: string }> = Object.fromEntries(
-  REACTIONS.map(r => [r.type, r])
-)
+import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
 function CommentReactionPicker({ onPick, activeReaction }: { onPick: (type: string) => void; activeReaction?: string }) {
   return (

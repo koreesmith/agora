@@ -12,19 +12,7 @@ import { isGifUrl } from '../../utils/gif'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
-const REACTIONS = [
-  { type: 'like',     emoji: '❤️',  label: 'Like'     },
-  { type: 'love',     emoji: '😍',  label: 'Love'     },
-  { type: 'laugh',    emoji: '😂',  label: 'Laugh'    },
-  { type: 'angry',    emoji: '😡',  label: 'Angry'    },
-  { type: 'care',     emoji: '🤗',  label: 'Care'     },
-  { type: 'pride',    emoji: '🏳️‍🌈', label: 'Pride'    },
-  { type: 'thankful', emoji: '🙏',  label: 'Thankful' },
-  { type: 'vomit',    emoji: '🤮',  label: 'Vomit'    },
-]
-const REACTION_MAP: Record<string, { emoji: string; label: string }> = Object.fromEntries(
-  REACTIONS.map(r => [r.type, { emoji: r.emoji, label: r.label }])
-)
+import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
 interface Post {
   id: string

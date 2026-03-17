@@ -610,7 +610,7 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 // ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
 
 var validReactions = map[string]bool{
-	"like": true, "love": true, "laugh": true, "angry": true,
+	"like": true, "love": true, "laugh": true, "wow": true, "angry": true,
 	"care": true, "pride": true, "thankful": true, "vomit": true,
 }
 

@@ -401,6 +401,9 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_posts_wall ON posts(wall_user_id, wall_status, created_at DESC)`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS wall_approval_required BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS expo_push_token TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT NOT NULL DEFAULT ''`,
+	// Backfill unsubscribe tokens using uuid instead of gen_random_bytes
+	`UPDATE users SET unsubscribe_token = replace(uuid_generate_v4()::text, '-', '') || replace(uuid_generate_v4()::text, '-', '') WHERE unsubscribe_token = ''`,
 
 	// ── Polls (AGORA-5) ────────────────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS poll_options (

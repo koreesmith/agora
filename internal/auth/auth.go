@@ -222,8 +222,9 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	var userID string
 	err = s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name,
-		                   email_verify_token, email_verify_expires)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+		                   email_verify_token, email_verify_expires,
+		                   unsubscribe_token)
+		VALUES ($1, $2, $3, $4, $5, $6, replace(uuid_generate_v4()::text, '-', '') || replace(uuid_generate_v4()::text, '-', '')) RETURNING id
 	`, req.Username, strings.ToLower(req.Email), string(hash), displayName,
 		verifyToken, verifyExpires).Scan(&userID)
 	if err != nil {

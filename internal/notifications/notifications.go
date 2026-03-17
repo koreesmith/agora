@@ -224,18 +224,16 @@ func pushNotifContent(t, actorName string) (title, body string) {
 func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 	if !s.email.enabled() { return }
 
-	// Check user's email notification preference (never blocks verification emails)
-	var toEmail, displayName string
+	var toEmail, displayName, unsubToken string
 	var emailNotifsEnabled bool
 	if err := s.db.QueryRow(`
-		SELECT email, display_name, email_notifications_enabled
+		SELECT email, display_name, email_notifications_enabled, COALESCE(unsubscribe_token,'')
 		FROM users WHERE id = $1 AND email_verified = true
-	`, userID).Scan(&toEmail, &displayName, &emailNotifsEnabled); err != nil {
+	`, userID).Scan(&toEmail, &displayName, &emailNotifsEnabled, &unsubToken); err != nil {
 		return
 	}
 	if !emailNotifsEnabled { return }
 
-	// Look up actor name
 	actorName := "Someone"
 	if actorID != "" {
 		var aDisplay, aUsername string
@@ -255,7 +253,7 @@ func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 	subject, body := notifEmailContent(notifType, actorName, instanceName, baseURL)
 	if subject == "" { return }
 
-	s.email.Send(toEmail, subject, buildBody(displayName, instanceName, domain, baseURL, body))
+	s.email.SendHTML(toEmail, subject, buildBody(displayName, instanceName, domain, baseURL, body), "", unsubToken)
 }
 
 func notifEmailContent(t, actorName, instanceName, baseURL string) (subject, body string) {
@@ -302,11 +300,70 @@ func buildBody(displayName, instanceName, _, baseURL, content string) string {
 
 %s
 
-To manage your email notification preferences, visit:
-%s/settings
+---
+You're receiving this because you have email notifications enabled on %s.
+To unsubscribe, visit: %s/settings
 
-— The %s team
-`, displayName, content, baseURL, instanceName)
+The %s team
+`, displayName, content, instanceName, baseURL, instanceName)
+}
+
+// ── One-click unsubscribe ─────────────────────────────────────────────────────
+
+// OneClickUnsubscribe handles POST /api/notifications/unsubscribe
+// Called by email clients that support RFC 8058 one-click unsubscribe.
+func (s *Service) OneClickUnsubscribe(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		if err := r.ParseForm(); err == nil {
+			token = r.FormValue("token")
+		}
+	}
+	if token == "" {
+		http.Error(w, "missing token", http.StatusBadRequest)
+		return
+	}
+	s.db.Exec(`UPDATE users SET email_notifications_enabled = false WHERE unsubscribe_token = $1`, token)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Unsubscribed successfully."))
+}
+
+// UnsubscribePage handles GET /api/notifications/unsubscribe
+// Shown when a user clicks the unsubscribe link in their email client.
+func (s *Service) UnsubscribePage(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	baseURL := s.email.instanceBaseURL()
+	instanceName := s.email.instanceName()
+
+	if token == "" {
+		http.Redirect(w, r, baseURL+"/settings", http.StatusSeeOther)
+		return
+	}
+
+	var userID, displayName string
+	s.db.QueryRow(`SELECT id, display_name FROM users WHERE unsubscribe_token = $1`, token).Scan(&userID, &displayName)
+	if userID == "" {
+		http.Redirect(w, r, baseURL+"/settings", http.StatusSeeOther)
+		return
+	}
+
+	// Unsubscribe immediately on GET click too
+	s.db.Exec(`UPDATE users SET email_notifications_enabled = false WHERE id = $1`, userID)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unsubscribed — %s</title>
+<style>body{margin:0;padding:40px 20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f4f5;text-align:center}
+.box{max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;border:1px solid #e4e4e7}
+h1{color:#3f3f46;font-size:22px;margin:0 0 12px}p{color:#71717a;font-size:15px;line-height:1.6;margin:0 0 20px}
+a{color:#7c3aed;text-decoration:none;font-weight:600}</style></head>
+<body><div class="box">
+<h1>You've been unsubscribed</h1>
+<p>Hi %s, you'll no longer receive email notifications from %s.</p>
+<p>You can re-enable notifications at any time in your <a href="%s/settings">account settings</a>.</p>
+</div></body></html>`, instanceName, displayName, instanceName, baseURL)
 }
 
 // ── Transactional emails (verification, password reset) ───────────────────────
@@ -323,7 +380,7 @@ func (s *Service) SendEmailVerification(_, email, displayName, token string) {
 
 	plain := fmt.Sprintf(`Hi %s,
 
-Welcome to %s! You're almost ready — just verify your email address to activate your account.
+Welcome to %s! You're almost ready - just verify your email address to activate your account.
 
 Verify your email here:
 %s
@@ -333,12 +390,12 @@ This link expires in 24 hours.
 If you didn't create an account on %s (%s), you can safely ignore this email.
 Your email address will not be used for anything without your confirmation.
 
-— The %s team
+The %s team
 %s
 `, displayName, instanceName, link, instanceName, domain, instanceName, domain)
 
 	html := buildVerificationHTML(instanceName, domain, baseURL, displayName, link)
-	s.email.SendHTML(email, subject, plain, html)
+	s.email.SendHTML(email, subject, plain, html, "") // no unsubscribe — transactional
 }
 
 func (s *Service) SendPasswordReset(_, email, displayName, token string) {
@@ -357,14 +414,14 @@ We received a request to reset the password for your account on %s (%s).
 Reset your password here:
 %s
 
-This link expires in 2 hours. If you didn't request a password reset, you can safely ignore this email — your password has not been changed.
+This link expires in 2 hours. If you didn't request a password reset, you can safely ignore this email - your password has not been changed.
 
-— The %s team
+The %s team
 %s
 `, displayName, instanceName, domain, link, instanceName, domain)
 
 	html := buildPasswordResetHTML(instanceName, domain, baseURL, displayName, link)
-	s.email.SendHTML(email, subject, plain, html)
+	s.email.SendHTML(email, subject, plain, html, "") // no unsubscribe — transactional
 }
 
 func (s *Service) SendModerationAction(userID, action, reason string) {
@@ -385,10 +442,10 @@ Reason: %s
 
 If you have questions, please contact the instance administrators at %s.
 
-— The %s team
+The %s team
 %s
 `, displayName, instanceName, action, reason, domain, instanceName, domain)
-	s.email.Send(email, fmt.Sprintf("Account notice from %s", instanceName), body)
+	s.email.Send(email, fmt.Sprintf("Account notice from %s", instanceName), body, "")
 }
 
 // ── HTML email templates ──────────────────────────────────────────────────────
@@ -543,12 +600,12 @@ func (e *EmailService) smtpConfig() (host, port, user, pass, from string) {
 }
 
 // Send sends a plain-text email.
-func (e *EmailService) Send(to, subject, plainBody string) error {
-	return e.SendHTML(to, subject, plainBody, "")
+func (e *EmailService) Send(to, subject, plainBody, unsubToken string) error {
+	return e.SendHTML(to, subject, plainBody, "", unsubToken)
 }
 
 // SendHTML sends a multipart/alternative email with plain-text and optional HTML parts.
-func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody string) error {
+func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody, unsubToken string) error {
 	host, portStr, user, pass, from := e.smtpConfig()
 	log.Printf("email: sending to=%s subject=%q via %s", to, subject, host)
 	if host == "" {
@@ -559,12 +616,23 @@ func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody string) error {
 
 	domain := e.instanceDomain()
 	instanceName := e.instanceName()
+	baseURL := e.instanceBaseURL()
 	fromHeader := fmt.Sprintf("%s <%s>", instanceName, from)
 	msgID := fmt.Sprintf("<%s.%s@%s>", randomID(), randomID(), domain)
 	date := time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 +0000")
 
-	// Encode subject as UTF-8 Q-encoded word to handle any special characters
 	encodedSubject := fmt.Sprintf("=?UTF-8?Q?%s?=", qEncode(subject))
+
+	// Build unsubscribe URLs — one-click requires both a POST URL and a mailto fallback
+	unsubURL := baseURL + "/api/notifications/unsubscribe?token=" + unsubToken
+	unsubMailto := "mailto:unsubscribe@" + domain + "?subject=unsubscribe"
+	var unsubHeaders []string
+	if unsubToken != "" {
+		unsubHeaders = []string{
+			"List-Unsubscribe: <" + unsubURL + ">, <" + unsubMailto + ">",
+			"List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+		}
+	}
 
 	var msg string
 	if htmlBody != "" {
@@ -577,11 +645,9 @@ func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody string) error {
 			"Message-ID: " + msgID,
 			"MIME-Version: 1.0",
 			"Content-Type: multipart/alternative; boundary=\"" + boundary + "\"",
-			// Deliverability headers
 			"X-Mailer: Agora/" + domain,
-			"List-Unsubscribe-Post: List-Unsubscribe=One-Click",
-			"List-Unsubscribe: <" + e.instanceBaseURL() + "/settings>",
 		}
+		headers = append(headers, unsubHeaders...)
 		parts := []string{
 			strings.Join(headers, "\r\n"),
 			"",
@@ -611,8 +677,8 @@ func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody string) error {
 			"Content-Type: text/plain; charset=UTF-8",
 			"Content-Transfer-Encoding: quoted-printable",
 			"X-Mailer: Agora/" + domain,
-			"List-Unsubscribe: <" + e.instanceBaseURL() + "/settings>",
 		}
+		headers = append(headers, unsubHeaders...)
 		msg = strings.Join(headers, "\r\n") + "\r\n\r\n" + toQP(plainBody)
 	}
 

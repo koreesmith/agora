@@ -103,6 +103,9 @@ func main() {
 		// Public (includes /setup, /instance, and /auth/*)
 		auth.RegisterPublicRoutes(r, authSvc)
 		auth.RegisterInstanceRoute(r, authSvc)
+		// Public one-click unsubscribe (no auth required — linked from emails)
+		r.Post("/notifications/unsubscribe", notifSvc.OneClickUnsubscribe)
+		r.Get("/notifications/unsubscribe",  notifSvc.UnsubscribePage)
 
 		// Authenticated
 		r.Group(func(r chi.Router) {

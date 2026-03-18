@@ -196,6 +196,8 @@ export default function LandingPage() {
         <div style={{ display: 'flex', gap: 24, fontSize: 13 }}>
           <Link to="/login" style={{ color: '#829ab1', textDecoration: 'none' }}>Sign in</Link>
           {canRegister && <Link to="/register" style={{ color: '#829ab1', textDecoration: 'none' }}>Register</Link>}
+          <Link to="/privacy" style={{ color: '#829ab1', textDecoration: 'none' }}>Privacy</Link>
+          <Link to="/terms" style={{ color: '#829ab1', textDecoration: 'none' }}>Terms</Link>
         </div>
       </div>
 

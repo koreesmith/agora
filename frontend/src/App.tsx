@@ -12,6 +12,8 @@ import RegisterPage       from './pages/RegisterPage'
 import VerifyEmailPage    from './pages/VerifyEmailPage'
 import ResetPasswordPage  from './pages/ResetPasswordPage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
+import PrivacyPage        from './pages/PrivacyPage'
+import TermsPage          from './pages/TermsPage'
 import FeedPage           from './pages/FeedPage'
 import ProfilePage        from './pages/ProfilePage'
 import FriendsPage        from './pages/FriendsPage'
@@ -76,6 +78,8 @@ function AppRoutes() {
       <Route path="/verify-email"   element={<VerifyEmailPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/change-password" element={<RequireAuth><ChangePasswordPage /></RequireAuth>} />
+      <Route path="/privacy"        element={<PrivacyPage />} />
+      <Route path="/terms"          element={<TermsPage />} />
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
         <Route path="/feed"                    element={<FeedPage />} />
         <Route path="/profile/:username"       element={<ProfilePage />} />

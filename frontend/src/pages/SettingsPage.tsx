@@ -50,14 +50,20 @@ export default function SettingsPage() {
   })
 
   const togglePrivacy = useMutation({
-    mutationFn: () => usersApi.updateProfile({ profile_private: !user?.profile_private }),
-    onSuccess: () => { updateUser({ profile_private: !user?.profile_private }); ok('Privacy updated') },
+    mutationFn: () => {
+      const newVal = !user?.profile_private
+      return usersApi.updateProfile({ profile_private: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ profile_private: newVal }); ok('Privacy updated') },
     onError: fail,
   })
 
   const toggleWallApproval = useMutation({
-    mutationFn: () => usersApi.updateProfile({ wall_approval_required: !user?.wall_approval_required }),
-    onSuccess: () => { updateUser({ wall_approval_required: !user?.wall_approval_required }); ok('Wall setting updated') },
+    mutationFn: () => {
+      const newVal = !user?.wall_approval_required
+      return usersApi.updateProfile({ wall_approval_required: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ wall_approval_required: newVal }); ok('Wall setting updated') },
     onError: fail,
   })
 

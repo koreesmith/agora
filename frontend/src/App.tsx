@@ -6,6 +6,7 @@ import api from './api'
 import Layout from './components/layout/Layout'
 
 import SetupPage          from './pages/SetupPage'
+import LandingPage        from './pages/LandingPage'
 import LoginPage          from './pages/LoginPage'
 import RegisterPage       from './pages/RegisterPage'
 import VerifyEmailPage    from './pages/VerifyEmailPage'
@@ -40,13 +41,13 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore()
-  if (user?.role !== 'admin' && user?.role !== 'moderator') return <Navigate to="/" replace />
+  if (user?.role !== 'admin' && user?.role !== 'moderator') return <Navigate to="/feed" replace />
   return <>{children}</>
 }
 
 function GuestOnly({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
-  return isAuthenticated ? <Navigate to="/" replace /> : <>{children}</>
+  return isAuthenticated ? <Navigate to="/feed" replace /> : <>{children}</>
 }
 
 function AppRoutes() {
@@ -68,29 +69,31 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* Public landing — unauthenticated visitors see this at / */}
+      <Route path="/"               element={<GuestOnly><LandingPage /></GuestOnly>} />
       <Route path="/login"          element={<GuestOnly><LoginPage /></GuestOnly>} />
       <Route path="/register"       element={<GuestOnly><RegisterPage /></GuestOnly>} />
       <Route path="/verify-email"   element={<VerifyEmailPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/change-password" element={<RequireAuth><ChangePasswordPage /></RequireAuth>} />
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
-        <Route index                       element={<FeedPage />} />
-        <Route path="/profile/:username"   element={<ProfilePage />} />
-        <Route path="/friends"             element={<FriendsPage />} />
-        <Route path="/search"              element={<SearchPage />} />
-        <Route path="/notifications"       element={<NotificationsPage />} />
-        <Route path="/settings"            element={<SettingsPage />} />
-        <Route path="/admin"               element={<RequireAdmin><AdminPage /></RequireAdmin>} />
-        <Route path="/post/:id"             element={<PostPage />} />
-        <Route path="/discover"             element={<DiscoverPage />} />
-        <Route path="/lists/:id"            element={<ListFeedPage />} />
-        <Route path="/groups"               element={<GroupsPage />} />
-        <Route path="/groups/:slug"         element={<GroupPage />} />
-        <Route path="/invite/:token"        element={<InvitePage />} />
-        <Route path="/albums"               element={<AlbumsPage />} />
-        <Route path="/albums/:id"           element={<AlbumPage />} />
-        <Route path="/messages"             element={<MessagesPage />} />
-        <Route path="/messages/:convId"     element={<MessagesPage />} />
+        <Route path="/feed"                    element={<FeedPage />} />
+        <Route path="/profile/:username"       element={<ProfilePage />} />
+        <Route path="/friends"                 element={<FriendsPage />} />
+        <Route path="/search"                  element={<SearchPage />} />
+        <Route path="/notifications"           element={<NotificationsPage />} />
+        <Route path="/settings"                element={<SettingsPage />} />
+        <Route path="/admin"                   element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+        <Route path="/post/:id"                element={<PostPage />} />
+        <Route path="/discover"                element={<DiscoverPage />} />
+        <Route path="/lists/:id"               element={<ListFeedPage />} />
+        <Route path="/groups"                  element={<GroupsPage />} />
+        <Route path="/groups/:slug"            element={<GroupPage />} />
+        <Route path="/invite/:token"           element={<InvitePage />} />
+        <Route path="/albums"                  element={<AlbumsPage />} />
+        <Route path="/albums/:id"              element={<AlbumPage />} />
+        <Route path="/messages"                element={<MessagesPage />} />
+        <Route path="/messages/:convId"        element={<MessagesPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -1,0 +1,25 @@
+<svg width="400" height="400" viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Circular format for social profiles -->
+  <circle cx="200" cy="200" r="200" fill="#486581"/>
+  <circle cx="200" cy="200" r="200" fill="url(#profileGlow)" opacity="0.35"/>
+
+  <!-- A left leg -->
+  <path d="M200 72L100 296" stroke="white" stroke-width="28" stroke-linecap="round"/>
+  <!-- A right leg -->
+  <path d="M200 72L300 296" stroke="white" stroke-width="28" stroke-linecap="round"/>
+  <!-- Crossbar -->
+  <line x1="143" y1="208" x2="257" y2="208" stroke="white" stroke-width="25" stroke-linecap="round"/>
+  <!-- Inner dots -->
+  <circle cx="116" cy="208" r="15" fill="#9fb3c8"/>
+  <circle cx="284" cy="208" r="15" fill="#9fb3c8"/>
+  <!-- Outer dots -->
+  <circle cx="87" cy="208" r="10" fill="#9fb3c8" opacity="0.55"/>
+  <circle cx="313" cy="208" r="10" fill="#9fb3c8" opacity="0.55"/>
+
+  <defs>
+    <radialGradient id="profileGlow" cx="50%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#7aa0bb"/>
+      <stop offset="100%" stop-color="#2c4a62"/>
+    </radialGradient>
+  </defs>
+</svg>

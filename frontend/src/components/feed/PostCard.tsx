@@ -8,7 +8,7 @@ import { formatDistanceToNow } from 'date-fns'
 import CommentsSection, { renderContent } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
-import { isGifUrl } from '../../utils/gif'
+import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -576,8 +576,22 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Image */}
               {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
                 const url = post.repost_of_id ? post.repost_image_url : post.image_url
-                const isGif = isGifUrl(url!)
-                return isGif ? (
+                const isDirectGif = isDirectGifUrl(url!)
+                const isGif = isDirectGif || isGifUrl(url!)
+                // If it's a GIF share page URL (not direct media), show as a link instead
+                if (isGif && !isDirectGif) {
+                  return (
+                    <a href={url} target="_blank" rel="noopener noreferrer"
+                      className="mt-2 flex items-center gap-2 border border-agora-200 dark:border-agora-700 rounded-xl px-3 py-2 hover:bg-agora-50 dark:hover:bg-agora-900/40 transition-colors">
+                      <span className="text-lg">🎞️</span>
+                      <div>
+                        <p className="text-xs text-agora-500">GIF</p>
+                        <p className="text-sm text-agora-700 dark:text-agora-300 truncate">{url}</p>
+                      </div>
+                    </a>
+                  )
+                }
+                return isDirectGif ? (
                   // GIFs: display inline, no lightbox (animation would pause in lightbox)
                   <div className="mt-2 rounded-lg overflow-hidden">
                     <img

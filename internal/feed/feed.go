@@ -338,6 +338,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
+	// Resolve Tenor/Giphy share page URLs to direct media URLs
+	if req.ImageURL != "" {
+		if resolved := resolveGifURL(req.ImageURL); resolved != "" {
+			req.ImageURL = resolved
+		}
+	}
+
 	var groupID *string
 	if req.GroupID != "" && req.Visibility == "group" {
 		groupID = &req.GroupID
@@ -1600,6 +1607,22 @@ func fetchLinkPreview(rawURL string) (*LinkPreview, error) {
 		}
 	}
 
+	// ── Tenor fast path ────────────────────────────────────────────────────
+	// tenor.com/XYZ.gif share pages → resolve to direct media URL via oEmbed
+	if host == "tenor.com" || host == "www.tenor.com" {
+		if p := tenorPreview(rawURL); p != nil {
+			return p, nil
+		}
+	}
+
+	// ── Giphy fast path ────────────────────────────────────────────────────
+	// giphy.com/gifs/slug → extract direct media URL
+	if host == "giphy.com" || host == "www.giphy.com" || host == "media.giphy.com" {
+		if p := giphyPreview(rawURL, parsed); p != nil {
+			return p, nil
+		}
+	}
+
 	// Resolve the hostname and check for private IPs (SSRF protection)
 	host = parsed.Hostname()
 	addrs, err := net.LookupHost(host)
@@ -1759,6 +1782,80 @@ func youtubePreview(rawURL string) *LinkPreview {
 		Description: "YouTube video by " + data.AuthorName,
 		Image:       data.ThumbnailURL,
 		Domain:      "www.youtube.com",
+	}
+}
+
+// resolveGifURL converts Tenor/Giphy share page URLs to direct media GIF URLs.
+// Returns "" if the URL is already a direct media URL or not a GIF service.
+func resolveGifURL(rawURL string) string {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil { return "" }
+	host := strings.ToLower(parsed.Hostname())
+
+	// Only process known GIF share page hosts
+	isTenorShare := (host == "tenor.com" || host == "www.tenor.com") && !strings.Contains(parsed.Hostname(), "media")
+	isGiphyShare := (host == "giphy.com" || host == "www.giphy.com")
+
+	if isTenorShare {
+		if p := tenorPreview(rawURL); p != nil && p.URL != rawURL {
+			return p.URL
+		}
+	}
+	if isGiphyShare {
+		if p := giphyPreview(rawURL, parsed); p != nil {
+			return p.URL
+		}
+	}
+	return ""
+}
+
+// tenorPreview resolves a tenor.com share URL to its direct GIF media URL via oEmbed.
+func tenorPreview(rawURL string) *LinkPreview {
+	oembedURL := "https://tenor.com/oembed?url=" + url.QueryEscape(rawURL) + "&format=json"
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(oembedURL)
+	if err != nil || resp.StatusCode != 200 { return nil }
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var data struct {
+		URL          string `json:"url"`
+		ThumbnailURL string `json:"thumbnail_url"`
+		Title        string `json:"title"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil { return nil }
+	// Prefer the direct GIF URL, fall back to thumbnail
+	mediaURL := data.URL
+	if mediaURL == "" { mediaURL = data.ThumbnailURL }
+	if mediaURL == "" { return nil }
+	return &LinkPreview{
+		URL:    mediaURL,
+		Image:  mediaURL, // Image field used by mobile to get direct GIF URL
+		Domain: "tenor.com",
+		Title:  data.Title,
+	}
+}
+
+// giphyPreview extracts a direct media URL from a Giphy share URL.
+func giphyPreview(rawURL string, parsed *url.URL) *LinkPreview {
+	// Extract GIF ID from paths like /gifs/name-GIPHYID or /media/GIPHYID/...
+	path := parsed.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	var gifID string
+	for _, part := range parts {
+		// Giphy IDs are at the end of hyphenated slug or as bare ID
+		if idx := strings.LastIndex(part, "-"); idx != -1 {
+			gifID = part[idx+1:]
+		} else if len(part) > 8 {
+			gifID = part
+		}
+	}
+	if gifID == "" { return nil }
+	mediaURL := "https://media.giphy.com/media/" + gifID + "/giphy.gif"
+	return &LinkPreview{
+		URL:    mediaURL,
+		Image:  mediaURL,
+		Domain: "giphy.com",
+		Title:  "GIF",
 	}
 }
 

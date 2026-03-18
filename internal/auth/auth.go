@@ -497,6 +497,7 @@ var _ = sql.ErrNoRows
 func RegisterInstanceRoute(r chi.Router, s *Service) {
 	r.Get("/instance",       s.InstanceInfo)
 	r.Get("/instance/rules", s.InstanceRules)
+	r.Get("/stats",          s.PublicStats)
 }
 
 func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
@@ -527,4 +528,14 @@ func (s *Service) InstanceRules(w http.ResponseWriter, r *http.Request) {
 	}
 	if rules == nil { rules = []Rule{} }
 	writeJSON(w, 200, map[string]any{"rules": rules})
+}
+
+func (s *Service) PublicStats(w http.ResponseWriter, r *http.Request) {
+	var userCount, postCount int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE deletion_scheduled_at IS NULL`).Scan(&userCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL AND parent_id IS NULL`).Scan(&postCount)
+	writeJSON(w, 200, map[string]any{
+		"user_count": userCount,
+		"post_count": postCount,
+	})
 }

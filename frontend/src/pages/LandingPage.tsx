@@ -32,6 +32,7 @@ export default function LandingPage() {
   const name = instance?.instance_name || 'Agora'
   const desc = instance?.instance_description || 'A private, federated social network for the people you actually know.'
   const canRegister = instance?.registration_mode !== 'closed'
+  const isWaitlist = instance?.registration_mode === 'waitlist'
 
   return (
     <div style={{ minHeight: '100vh', fontFamily: 'Inter, system-ui, sans-serif', backgroundColor: '#f0f4f8' }}>
@@ -77,15 +78,24 @@ export default function LandingPage() {
               {desc}
             </p>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
-              {canRegister && (
+              {canRegister ? (
                 <Link to="/register" style={{ backgroundColor: '#486581', color: '#fff', fontWeight: 600, padding: '12px 24px', borderRadius: 12, textDecoration: 'none', fontSize: 16 }}>
-                  Get started — free
+                  {isWaitlist ? 'Join the waitlist' : 'Get started — free'}
                 </Link>
+              ) : (
+                <div style={{ backgroundColor: '#f0f4f8', color: '#829ab1', fontWeight: 500, padding: '12px 24px', borderRadius: 12, fontSize: 14 }}>
+                  Registrations currently closed
+                </div>
               )}
               <Link to="/login" style={{ border: '1px solid #d9e2ec', color: '#334e68', fontWeight: 600, padding: '12px 24px', borderRadius: 12, textDecoration: 'none', fontSize: 16 }}>
                 Sign in
               </Link>
             </div>
+            {isWaitlist && (
+              <p style={{ fontSize: 13, color: '#829ab1', marginTop: 12 }}>
+                ℹ️ This instance is currently in waitlist mode — accounts are reviewed before approval.
+              </p>
+            )}
             {(userCount > 0 || postCount > 0) && (
               <div style={{ display: 'flex', gap: 32, marginTop: 40 }}>
                 {userCount > 0 && (
@@ -158,10 +168,16 @@ export default function LandingPage() {
       {/* CTA */}
       {canRegister && (
         <div style={{ backgroundColor: '#486581', padding: '64px 24px', textAlign: 'center' as const }}>
-          <h2 style={{ fontSize: 32, fontWeight: 700, color: '#fff', marginBottom: 16 }}>Ready to join?</h2>
-          <p style={{ color: '#d9e2ec', marginBottom: 32, fontSize: 18 }}>Create your account in seconds. No phone number required.</p>
+          <h2 style={{ fontSize: 32, fontWeight: 700, color: '#fff', marginBottom: 16 }}>
+            {isWaitlist ? 'Join the waitlist' : 'Ready to join?'}
+          </h2>
+          <p style={{ color: '#d9e2ec', marginBottom: 32, fontSize: 18 }}>
+            {isWaitlist
+              ? 'Sign up and we\'ll review your account and send you an invite when you\'re approved.'
+              : 'Create your account in seconds. No phone number required.'}
+          </p>
           <Link to="/register" style={{ display: 'inline-block', backgroundColor: '#fff', color: '#334e68', fontWeight: 700, padding: '14px 32px', borderRadius: 12, textDecoration: 'none', fontSize: 18 }}>
-            Create your account
+            {isWaitlist ? 'Request access →' : 'Create your account'}
           </Link>
         </div>
       )}

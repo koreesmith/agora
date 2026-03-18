@@ -69,14 +69,15 @@ func RoleFromCtx(ctx context.Context) string     { return ctxkeys.GetUserRole(ct
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 func RegisterPublicRoutes(r chi.Router, s *Service) {
-	r.Get("/setup",                 s.SetupStatus)
-	r.Post("/setup",                s.RunSetup)
-	r.Post("/auth/register",        s.Register)
-	r.Post("/auth/login",           s.Login)
-	r.Get("/auth/verify-email",     s.VerifyEmail)
-	r.Post("/auth/forgot-password", s.ForgotPassword)
-	r.Post("/auth/reset-password",  s.ResetPassword)
-	r.Get("/auth/me",               s.Me)
+	r.Get("/setup",                  s.SetupStatus)
+	r.Post("/setup",                 s.RunSetup)
+	r.Post("/auth/register",         s.Register)
+	r.Post("/auth/login",            s.Login)
+	r.Get("/auth/verify-email",      s.VerifyEmail)
+	r.Post("/auth/forgot-password",  s.ForgotPassword)
+	r.Post("/auth/reset-password",   s.ResetPassword)
+	r.Get("/auth/me",                s.Me)
+	r.Get("/auth/waitlist/accept",   s.WaitlistAccept)
 }
 
 // ── Setup (first-run) ─────────────────────────────────────────────────────────
@@ -219,14 +220,23 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	displayName := req.DisplayName
 	if displayName == "" { displayName = req.Username }
 
+	// Generate waitlist token upfront (used if mode is waitlist)
+	waitlistToken, _ := randomHex(32)
+	waitlistStatus := ""
+	if regMode == "waitlist" {
+		waitlistStatus = "pending"
+	}
+
 	var userID string
 	err = s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name,
 		                   email_verify_token, email_verify_expires,
-		                   unsubscribe_token)
-		VALUES ($1, $2, $3, $4, $5, $6, replace(uuid_generate_v4()::text, '-', '') || replace(uuid_generate_v4()::text, '-', '')) RETURNING id
+		                   unsubscribe_token, waitlist_status, waitlist_token)
+		VALUES ($1, $2, $3, $4, $5, $6,
+		        replace(uuid_generate_v4()::text, '-', '') || replace(uuid_generate_v4()::text, '-', ''),
+		        $7, $8) RETURNING id
 	`, req.Username, strings.ToLower(req.Email), string(hash), displayName,
-		verifyToken, verifyExpires).Scan(&userID)
+		verifyToken, verifyExpires, waitlistStatus, waitlistToken).Scan(&userID)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
 			if strings.Contains(err.Error(), "username") {
@@ -243,7 +253,18 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 		s.db.Exec(`UPDATE invite_codes SET used_by = $1, used_at = NOW() WHERE code = $2`, userID, req.InviteCode)
 	}
 
+	// Always send email verification
 	go s.notifSvc.SendEmailVerification(userID, req.Email, displayName, verifyToken)
+
+	if regMode == "waitlist" {
+		// Also send waitlist confirmation email
+		go s.notifSvc.SendWaitlistConfirmation(userID, req.Email, displayName)
+		writeJSON(w, 201, map[string]string{
+			"message": "waitlist",
+			"detail":  "You've been added to the waitlist. Check your email — you'll receive an invite once approved.",
+		})
+		return
+	}
 
 	writeJSON(w, 201, map[string]string{"message": "account created — check your email to verify"})
 }
@@ -294,6 +315,13 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !u.EmailVerified {
 		writeError(w, 403, "email not verified — check your inbox"); return
+	}
+
+	// Block waitlisted users from logging in
+	var waitlistStatus string
+	s.db.QueryRow(`SELECT waitlist_status FROM users WHERE id = $1`, u.ID).Scan(&waitlistStatus)
+	if waitlistStatus == "pending" {
+		writeError(w, 403, "waitlist — your account is on the waitlist and hasn't been approved yet"); return
 	}
 
 	token, err := s.makeToken(u.ID, u.Role)
@@ -374,6 +402,32 @@ func (s *Service) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	n, _ := res.RowsAffected()
 	if n == 0 { writeError(w, 400, "invalid or expired verification token"); return }
 	writeJSON(w, 200, map[string]string{"message": "email verified"})
+}
+
+// WaitlistAccept is called when an admin approves a user. The link is emailed to the user.
+func (s *Service) WaitlistAccept(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Redirect(w, r, "/login?error=invalid_token", http.StatusFound); return
+	}
+
+	var userID, username string
+	err := s.db.QueryRow(`
+		SELECT id, username FROM users
+		WHERE waitlist_token = $1 AND waitlist_status = 'approved'
+		  AND deletion_scheduled_at IS NULL
+	`, token).Scan(&userID, &username)
+	if err != nil {
+		http.Redirect(w, r, "/login?error=invalid_token", http.StatusFound); return
+	}
+
+	// Clear the token so it can only be used once, and ensure email is verified
+	s.db.Exec(`
+		UPDATE users SET waitlist_token = '', email_verified = true
+		WHERE id = $1
+	`, userID)
+
+	http.Redirect(w, r, "/login?waitlist=accepted&username="+username, http.StatusFound)
 }
 
 func (s *Service) ForgotPassword(w http.ResponseWriter, r *http.Request) {

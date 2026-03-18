@@ -7,16 +7,35 @@ export default function RegisterPage() {
   const [form, setForm] = useState({ username:'', email:'', password:'', display_name:'', invite_code: params.get('invite')||'' })
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
+  const [waitlisted, setWaitlisted] = useState(false)
   const [loading, setLoading] = useState(false)
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(f=>({...f,[k]:e.target.value}))
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setLoading(true)
-    try { await authApi.register(form); setSuccess(true) }
+    try {
+      const res = await authApi.register(form)
+      if (res.data?.message === 'waitlist') {
+        setWaitlisted(true)
+      } else {
+        setSuccess(true)
+      }
+    }
     catch (err:any) { setError(err.response?.data?.error||'Registration failed') }
     finally { setLoading(false) }
   }
+
+  if (waitlisted) return (
+    <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="card p-8 max-w-sm w-full text-center space-y-4">
+        <div className="w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto text-2xl">⏳</div>
+        <h2 className="text-xl font-bold">You're on the waitlist!</h2>
+        <p className="text-agora-500 text-sm">Thanks for signing up, <strong>{form.display_name || form.username}</strong>. We're reviewing new accounts — you'll receive an invite link by email once you're approved.</p>
+        <p className="text-agora-400 text-xs">Also check your inbox for an email verification link — you'll need to verify your email too.</p>
+      </div>
+    </div>
+  )
 
   if (success) return (
     <div className="min-h-screen flex items-center justify-center px-4">

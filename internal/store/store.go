@@ -467,4 +467,7 @@ var schema = []string{
 		PRIMARY KEY (message_id, user_id)
 	)`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS dm_privacy VARCHAR(20) NOT NULL DEFAULT 'everyone'`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_status VARCHAR(20) NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_token TEXT NOT NULL DEFAULT ''`,
+	`CREATE INDEX IF NOT EXISTS idx_users_waitlist ON users(waitlist_status, created_at) WHERE waitlist_status = 'pending'`,
 }

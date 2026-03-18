@@ -183,6 +183,10 @@ export const adminApi = {
   updateRule:  (id: string, text: string)       => api.patch(`/admin/rules/${id}`, { text }),
   deleteRule:  (id: string)                     => api.delete(`/admin/rules/${id}`),
   moveRule:    (id: string, direction: 'up'|'down') => api.patch(`/admin/rules/${id}/move`, { direction }),
+  // Waitlist
+  listWaitlist:    ()           => api.get('/admin/waitlist'),
+  approveWaitlist: (id: string) => api.post(`/admin/waitlist/${id}/approve`),
+  rejectWaitlist:  (id: string) => api.delete(`/admin/waitlist/${id}`),
 }
 
 

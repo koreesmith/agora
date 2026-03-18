@@ -424,6 +424,82 @@ The %s team
 	s.email.SendHTML(email, subject, plain, html, "") // no unsubscribe — transactional
 }
 
+func (s *Service) SendWaitlistConfirmation(_, email, displayName string) {
+	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+
+	subject := fmt.Sprintf("You're on the %s waitlist!", instanceName)
+	plain := fmt.Sprintf(`Hi %s,
+
+Thanks for signing up for %s! You're on the waitlist.
+
+We're reviewing new accounts and will send you an invite link once you're approved. We'll try to get to you as quickly as possible.
+
+In the meantime, make sure to verify your email address using the separate verification email we sent you.
+
+The %s team
+%s
+`, displayName, instanceName, instanceName, domain)
+
+	html := fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:560px;margin:40px auto;padding:0 20px;color:#243b53">
+<div style="text-align:center;margin-bottom:32px">
+  <div style="width:56px;height:56px;background:#486581;border-radius:14px;display:inline-flex;align-items:center;justify-content:center">
+    <svg width="32" height="32" viewBox="0 0 96 96" fill="none"><path d="M48 12L18 78" stroke="white" stroke-width="8" stroke-linecap="round"/><path d="M48 12L78 78" stroke="white" stroke-width="8" stroke-linecap="round"/><line x1="31" y1="52" x2="65" y2="52" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="24" cy="52" r="5" fill="#9fb3c8"/><circle cx="72" cy="52" r="5" fill="#9fb3c8"/></svg>
+  </div>
+</div>
+<h1 style="font-size:24px;font-weight:700;color:#102a43;text-align:center;margin-bottom:8px">You're on the waitlist!</h1>
+<p style="font-size:16px;color:#627d98;text-align:center;margin-bottom:32px">We'll review your account and send you an invite soon.</p>
+<div style="background:#f0f4f8;border-radius:12px;padding:24px;margin-bottom:24px">
+  <p style="margin:0;color:#334e68;font-size:15px">Hi <strong>%s</strong>,</p>
+  <p style="color:#486581;font-size:14px;margin:12px 0 0">Thanks for signing up for <strong>%s</strong>. Your account is on the waitlist — we'll notify you with an invite link as soon as you're approved.</p>
+</div>
+<p style="color:#829ab1;font-size:13px;text-align:center">Please also verify your email address using the separate verification email we sent you.</p>
+<p style="color:#829ab1;font-size:12px;text-align:center;margin-top:32px">%s &middot; %s</p>
+</body></html>`, displayName, instanceName, instanceName, domain)
+
+	s.email.SendHTML(email, subject, plain, html, "")
+}
+
+func (s *Service) SendWaitlistApproved(email, displayName, acceptURL string) {
+	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+
+	subject := fmt.Sprintf("You're approved — welcome to %s!", instanceName)
+	plain := fmt.Sprintf(`Hi %s,
+
+Great news! Your account on %s has been approved.
+
+Click the link below to complete your signup and log in:
+%s
+
+This link will log you in automatically. If you have any trouble, you can also visit %s and sign in with the username and password you chose when you signed up.
+
+Welcome aboard!
+
+The %s team
+%s
+`, displayName, instanceName, acceptURL, domain, instanceName, domain)
+
+	html := fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:560px;margin:40px auto;padding:0 20px;color:#243b53">
+<div style="text-align:center;margin-bottom:32px">
+  <div style="width:56px;height:56px;background:#486581;border-radius:14px;display:inline-flex;align-items:center;justify-content:center">
+    <svg width="32" height="32" viewBox="0 0 96 96" fill="none"><path d="M48 12L18 78" stroke="white" stroke-width="8" stroke-linecap="round"/><path d="M48 12L78 78" stroke="white" stroke-width="8" stroke-linecap="round"/><line x1="31" y1="52" x2="65" y2="52" stroke="white" stroke-width="7" stroke-linecap="round"/><circle cx="24" cy="52" r="5" fill="#9fb3c8"/><circle cx="72" cy="52" r="5" fill="#9fb3c8"/></svg>
+  </div>
+</div>
+<h1 style="font-size:24px;font-weight:700;color:#102a43;text-align:center;margin-bottom:8px">You're approved! 🎉</h1>
+<p style="font-size:16px;color:#627d98;text-align:center;margin-bottom:32px">Welcome to %s, %s.</p>
+<div style="text-align:center;margin-bottom:32px">
+  <a href="%s" style="display:inline-block;background:#486581;color:white;font-weight:700;font-size:16px;padding:14px 32px;border-radius:12px;text-decoration:none">Complete signup &amp; sign in →</a>
+</div>
+<p style="color:#829ab1;font-size:13px;text-align:center">If the button doesn't work, copy and paste this link:<br><a href="%s" style="color:#486581">%s</a></p>
+<p style="color:#829ab1;font-size:12px;text-align:center;margin-top:32px">%s &middot; %s</p>
+</body></html>`, instanceName, displayName, acceptURL, acceptURL, acceptURL, instanceName, domain)
+
+	s.email.SendHTML(email, subject, plain, html, "")
+}
+
 func (s *Service) SendModerationAction(userID, action, reason string) {
 	if !s.email.enabled() { return }
 	var email, displayName string

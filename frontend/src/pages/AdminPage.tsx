@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock } from 'lucide-react'
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'federation'|'invites'|'rules'>('overview')
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'federation'|'invites'|'rules'|'waitlist'>('overview')
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
   const qc = useQueryClient()
@@ -17,6 +17,7 @@ export default function AdminPage() {
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
+  const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
 
   // Populate settings form when data loads (RQ v5: no onSuccess in useQuery)
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
@@ -30,11 +31,14 @@ export default function AdminPage() {
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const revokeInvite   = useMutation({ mutationFn: (id:string)=>adminApi.revokeInvite(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const resendVerif    = useMutation({ mutationFn: (id:string)=>adminApi.resendVerification(id) })
+  const approveWait    = useMutation({ mutationFn: (id:string)=>adminApi.approveWaitlist(id), onSuccess:()=>{ ok('Approved — invite sent'); qc.invalidateQueries({queryKey:['admin-waitlist']}) } })
+  const rejectWait     = useMutation({ mutationFn: (id:string)=>adminApi.rejectWaitlist(id),  onSuccess:()=>{ ok('Rejected'); qc.invalidateQueries({queryKey:['admin-waitlist']}) } })
 
   const tabs = [
     { id:'overview',   label:'Overview',    icon: BookOpen },
     { id:'settings',   label:'Settings',    icon: Settings },
     { id:'users',      label:'Users',       icon: Users },
+    { id:'waitlist',   label:'Waitlist',    icon: Clock },
     { id:'reports',    label:'Reports',     icon: Flag },
     { id:'federation', label:'Federation',  icon: Link2 },
     { id:'invites',    label:'Invites',     icon: Ticket },
@@ -111,6 +115,7 @@ export default function AdminPage() {
           <div><label className="label">Registration mode</label>
             <select className="input" value={settingsForm.registration_mode||'open'} onChange={sf('registration_mode')}>
               <option value="open">Open</option>
+              <option value="waitlist">Waitlist</option>
               <option value="invite">Invite only</option>
               <option value="closed">Closed</option>
             </select></div>
@@ -210,6 +215,51 @@ export default function AdminPage() {
 
       {tab==='rules' && (
         <RulesPanel rules={rulesData?.rules ?? []} onChanged={()=>qc.invalidateQueries({queryKey:['admin-rules']})} />
+      )}
+
+      {tab==='waitlist' && (
+        <div className="space-y-4">
+          <div className="card p-4">
+            <h3 className="font-semibold mb-1">Waitlist Queue</h3>
+            <p className="text-sm text-agora-500 mb-4">Users who signed up while the instance is in waitlist mode. Oldest first. Approving sends them an invite link by email.</p>
+            {(waitlistData?.users ?? []).length === 0 ? (
+              <p className="text-sm text-agora-400 italic py-4 text-center">No one on the waitlist right now.</p>
+            ) : (
+              <div className="divide-y divide-agora-100 dark:divide-agora-800">
+                {(waitlistData?.users ?? []).map((u: any) => (
+                  <div key={u.id} className="flex items-center gap-3 py-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{u.display_name}</span>
+                        <span className="text-agora-400 text-xs">@{u.username}</span>
+                        {!u.email_verified && (
+                          <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded">unverified email</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-agora-400">{u.email} · Joined {new Date(u.created_at).toLocaleDateString()}</div>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => approveWait.mutate(u.id)}
+                        disabled={approveWait.isPending}
+                        className="text-xs bg-agora-600 hover:bg-agora-700 text-white px-3 py-1.5 rounded-lg font-medium transition-colors"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => { if (confirm(`Reject ${u.username}? This will permanently delete their account.`)) rejectWait.mutate(u.id) }}
+                        disabled={rejectWait.isPending}
+                        className="text-xs bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 px-3 py-1.5 rounded-lg font-medium transition-colors"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )

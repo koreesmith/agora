@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { authApi } from '../api'
 import { useAuthStore } from '../store/auth'
 
 export default function LoginPage() {
-  const [form, setForm] = useState({ username_or_email: '', password: '' })
+  const [params] = useSearchParams()
+  const [form, setForm] = useState({ username_or_email: params.get('username') || '', password: '' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [forgotMode, setForgotMode] = useState(false)
@@ -13,6 +14,8 @@ export default function LoginPage() {
   const { setAuth } = useAuthStore()
   const navigate = useNavigate()
 
+  const waitlistAccepted = params.get('waitlist') === 'accepted'
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setLoading(true)
     try {
@@ -20,7 +23,13 @@ export default function LoginPage() {
       const { token, ...userData } = res.data
       setAuth(userData, token)
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Login failed')
+      const msg = err.response?.data?.error || 'Login failed'
+      // Give a friendlier message for waitlisted users
+      if (msg.startsWith('waitlist')) {
+        setError('Your account is on the waitlist and hasn\'t been approved yet. You\'ll receive an email with a login link when you\'re approved.')
+      } else {
+        setError(msg)
+      }
     } finally { setLoading(false) }
   }
 
@@ -46,6 +55,13 @@ export default function LoginPage() {
             {forgotMode ? 'Enter your email to get a reset link' : 'Sign in to Agora'}
           </p>
         </div>
+
+        {waitlistAccepted && (
+          <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl px-4 py-3 mb-4 text-center">
+            <p className="text-sm font-semibold text-green-700 dark:text-green-400">🎉 You're approved!</p>
+            <p className="text-xs text-green-600 dark:text-green-500 mt-0.5">Welcome to Agora. Sign in below with the account you created.</p>
+          </div>
+        )}
 
         {forgotMode ? (
           forgotSent ? (

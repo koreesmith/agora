@@ -22,6 +22,8 @@ type Service struct {
 
 type notifSender interface {
 	SendEmailVerification(userID, email, displayName, token string)
+	SendWaitlistConfirmation(userID, email, displayName string)
+	SendWaitlistApproved(email, displayName, acceptURL string)
 }
 
 func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender) *Service {
@@ -62,6 +64,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Patch("/admin/rules/{id}",      s.UpdateRule)
 	r.Delete("/admin/rules/{id}",     s.DeleteRule)
 	r.Patch("/admin/rules/{id}/move", s.MoveRule)
+
+	// Waitlist
+	r.Get("/admin/waitlist",              s.ListWaitlist)
+	r.Post("/admin/waitlist/{id}/approve", s.ApproveWaitlist)
+	r.Delete("/admin/waitlist/{id}",      s.RejectWaitlist)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -571,4 +578,74 @@ func (s *Service) MoveRule(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`UPDATE instance_rules SET position = $1 WHERE id = $2`, swapPos, id)
 	s.db.Exec(`UPDATE instance_rules SET position = $1 WHERE id = $2`, pos, swapID)
 	writeJSON(w, 200, map[string]string{"message": "moved"})
+}
+
+// ── Waitlist ──────────────────────────────────────────────────────────────────
+
+func (s *Service) ListWaitlist(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT id, username, email, display_name, created_at, email_verified
+		FROM users
+		WHERE waitlist_status = 'pending' AND deletion_scheduled_at IS NULL
+		ORDER BY created_at ASC
+	`)
+	if err != nil { writeError(w, 500, "db error"); return }
+	defer rows.Close()
+
+	type WaitlistUser struct {
+		ID            string `json:"id"`
+		Username      string `json:"username"`
+		Email         string `json:"email"`
+		DisplayName   string `json:"display_name"`
+		CreatedAt     string `json:"created_at"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+
+	var users []WaitlistUser
+	for rows.Next() {
+		var u WaitlistUser
+		rows.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.CreatedAt, &u.EmailVerified)
+		users = append(users, u)
+	}
+	if users == nil { users = []WaitlistUser{} }
+	writeJSON(w, 200, map[string]any{"users": users})
+}
+
+func (s *Service) ApproveWaitlist(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+
+	var email, displayName, waitlistToken string
+	err := s.db.QueryRow(`
+		SELECT email, display_name, waitlist_token FROM users
+		WHERE id = $1 AND waitlist_status = 'pending'
+	`, userID).Scan(&email, &displayName, &waitlistToken)
+	if err != nil { writeError(w, 404, "user not found or not on waitlist"); return }
+
+	// Mark approved
+	_, err = s.db.Exec(`
+		UPDATE users SET waitlist_status = 'approved', email_verified = true WHERE id = $1
+	`, userID)
+	if err != nil { writeError(w, 500, "db error"); return }
+
+	// Build accept URL — ensure no double scheme
+	domain := s.cfg.InstanceDomain
+	if !strings.HasPrefix(domain, "http://") && !strings.HasPrefix(domain, "https://") {
+		domain = "https://" + domain
+	}
+	domain = strings.TrimRight(domain, "/")
+	acceptURL := domain + "/api/auth/waitlist/accept?token=" + waitlistToken
+	go s.notifSvc.SendWaitlistApproved(email, displayName, acceptURL)
+
+	writeJSON(w, 200, map[string]string{"message": "approved"})
+}
+
+func (s *Service) RejectWaitlist(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	res, err := s.db.Exec(`
+		DELETE FROM users WHERE id = $1 AND waitlist_status = 'pending'
+	`, userID)
+	if err != nil { writeError(w, 500, "db error"); return }
+	n, _ := res.RowsAffected()
+	if n == 0 { writeError(w, 404, "user not found or not on waitlist"); return }
+	writeJSON(w, 200, map[string]string{"message": "rejected"})
 }

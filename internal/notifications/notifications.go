@@ -153,30 +153,38 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
 	go s.maybeEmailNotif(userID, actorID, notifType)
-	go s.maybePushNotif(userID, actorID, notifType)
+	go s.maybePushNotif(userID, actorID, notifType, postID)
 }
 
-func (s *Service) maybePushNotif(userID, actorID, notifType string) {
+func (s *Service) maybePushNotif(userID, actorID, notifType, postID string) {
 	var pushToken string
 	s.db.QueryRow(`SELECT COALESCE(expo_push_token,'') FROM users WHERE id = $1`, userID).Scan(&pushToken)
 	if pushToken == "" { return }
 
 	actorName := "Someone"
+	actorUsername := ""
 	if actorID != "" {
 		var display, username string
 		s.db.QueryRow(`SELECT COALESCE(display_name,''), username FROM users WHERE id = $1`, actorID).Scan(&display, &username)
 		if display != "" { actorName = display } else if username != "" { actorName = username }
+		actorUsername = username
 	}
 
 	title, body := pushNotifContent(notifType, actorName)
 	if title == "" { return }
+
+	data := map[string]string{
+		"type":     notifType,
+		"post_id":  postID,
+		"actor_username": actorUsername,
+	}
 
 	payload := map[string]any{
 		"to":    pushToken,
 		"title": title,
 		"body":  body,
 		"sound": "default",
-		"data":  map[string]string{"type": notifType},
+		"data":  data,
 	}
 	jsonBytes, _ := json.Marshal([]any{payload})
 	req, err := http.NewRequest("POST", "https://exp.host/--/api/v2/push/send", strings.NewReader(string(jsonBytes)))

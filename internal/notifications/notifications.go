@@ -97,6 +97,22 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 				notifs[i].FriendStatus = "pending_outgoing"
 			}
 		}
+		// For comment_reaction and comment_reply, post_id may point to a comment
+		// rather than the root post. Resolve upward so the client navigates correctly.
+		if n.PostID != nil && (n.Type == "comment_reaction" || n.Type == "comment_reply" || n.Type == "comment_like") {
+			var parentID *string
+			s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, *n.PostID).Scan(&parentID)
+			if parentID != nil {
+				// It's a comment — walk up one more level in case it's a depth-2 reply
+				rootID := *parentID
+				var grandParentID *string
+				s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, rootID).Scan(&grandParentID)
+				if grandParentID != nil {
+					rootID = *grandParentID
+				}
+				notifs[i].PostID = &rootID
+			}
+		}
 	}
 	if notifs == nil {
 		notifs = []Notification{}

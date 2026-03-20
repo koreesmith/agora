@@ -99,7 +99,7 @@ func (s *Service) canView(albumID, viewerID string) (bool, Album) {
 
 func (s *Service) ListAlbums(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
-	limit := 20
+	limit := 50
 	offset := 0
 	if p, _ := strconv.Atoi(r.URL.Query().Get("page")); p > 0 {
 		offset = p * limit
@@ -111,13 +111,6 @@ func (s *Service) ListAlbums(w http.ResponseWriter, r *http.Request) {
 		FROM albums a
 		JOIN users u ON u.id = a.owner_id
 		WHERE a.owner_id = $1
-		   OR (a.visibility = 'public')
-		   OR (a.visibility = 'friends' AND EXISTS(
-		         SELECT 1 FROM friendships f
-		         WHERE ((f.requester_id = $1 AND f.addressee_id = a.owner_id)
-		             OR (f.addressee_id = $1 AND f.requester_id = a.owner_id))
-		         AND f.status = 'accepted'
-		       ))
 		ORDER BY a.created_at DESC
 		LIMIT $2 OFFSET $3
 	`, viewerID, limit, offset)

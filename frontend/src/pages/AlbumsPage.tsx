@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom'
 import { albumsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { Image as ImageIcon, Plus, Globe, Users, Lock, X } from 'lucide-react'
-import { handle } from '../utils/handle'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={11} />,
@@ -12,9 +11,15 @@ const visIcon: Record<string, React.ReactNode> = {
   private: <Lock  size={11} />,
 }
 
+const visLabel: Record<string, string> = {
+  public:  'Public',
+  friends: 'Friends',
+  private: 'Only me',
+}
+
 export default function AlbumsPage() {
-  const { user } = useAuthStore()
   const qc = useQueryClient()
+  const { user } = useAuthStore()
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState({ title: '', description: '', visibility: 'friends' })
   const [err, setErr] = useState('')
@@ -27,10 +32,11 @@ export default function AlbumsPage() {
 
   const create = useMutation({
     mutationFn: () => albumsApi.create(form),
-    onSuccess: (res) => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['albums'] })
       setShowCreate(false)
       setForm({ title: '', description: '', visibility: 'friends' })
+      setErr('')
     },
     onError: (e: any) => setErr(e.response?.data?.error || 'Could not create album'),
   })
@@ -38,7 +44,12 @@ export default function AlbumsPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">Photo Albums</h1>
+        <div>
+          <h1 className="text-xl font-bold">My Photo Albums</h1>
+          <p className="text-sm text-agora-500 dark:text-agora-400 mt-0.5">
+            Your personal albums · <Link to={`/profile/${user?.username}`} className="text-agora-600 dark:text-agora-400 hover:underline">View on profile →</Link>
+          </p>
+        </div>
         <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-1.5 text-sm">
           <Plus size={15} /> New Album
         </button>
@@ -93,39 +104,40 @@ export default function AlbumsPage() {
       {isLoading && <div className="text-center py-8 text-agora-400">Loading…</div>}
 
       {!isLoading && albums.length === 0 && (
-        <div className="card p-12 text-center text-agora-400 space-y-2">
-          <ImageIcon size={32} className="mx-auto opacity-40" />
-          <p className="font-medium">No albums yet</p>
-          <p className="text-sm">Create an album to share your photos.</p>
-          <button onClick={() => setShowCreate(true)} className="btn-primary text-sm mt-2">Create an album</button>
+        <div className="card p-12 text-center text-agora-400 space-y-3">
+          <ImageIcon size={36} className="mx-auto opacity-40" />
+          <p className="font-medium text-agora-600 dark:text-agora-300">No albums yet</p>
+          <p className="text-sm">Create an album to organise and share your photos with friends.</p>
+          <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">Create your first album</button>
         </div>
       )}
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {albums.map((a: any) => <AlbumCard key={a.id} album={a} currentUserId={user?.id} />)}
+        {albums.map((a: any) => <AlbumCard key={a.id} album={a} />)}
       </div>
     </div>
   )
 }
 
-function AlbumCard({ album: a, currentUserId }: { album: any, currentUserId?: string }) {
-  const isOwn = a.owner_id === currentUserId
+function AlbumCard({ album: a }: { album: any }) {
   return (
     <Link to={`/albums/${a.id}`} className="card overflow-hidden group hover:shadow-md transition-shadow">
-      <div className="aspect-square bg-agora-100 dark:bg-agora-800 overflow-hidden">
+      <div className="aspect-square bg-agora-100 dark:bg-agora-800 overflow-hidden relative">
         {a.cover_url
           ? <img src={a.cover_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
           : <div className="w-full h-full flex items-center justify-center">
               <ImageIcon size={32} className="text-agora-300 dark:text-agora-600" />
             </div>}
+        {/* Visibility badge */}
+        <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/40 text-white text-[10px] px-1.5 py-0.5 rounded-full backdrop-blur-sm">
+          {visIcon[a.visibility]}
+          <span>{visLabel[a.visibility]}</span>
+        </div>
       </div>
       <div className="p-3">
         <p className="font-semibold text-sm truncate">{a.title}</p>
-        <div className="flex items-center gap-1.5 text-xs text-agora-400 mt-0.5">
-          {visIcon[a.visibility]}
-          <span>{a.photo_count} photo{a.photo_count !== 1 ? 's' : ''}</span>
-          {!isOwn && <><span>·</span><span className="truncate">{handle(a.owner_username, a.is_remote, a.remote_instance)}</span></>}
-        </div>
+        <p className="text-xs text-agora-400 mt-0.5">{a.photo_count} photo{a.photo_count !== 1 ? 's' : ''}</p>
+        {a.description && <p className="text-xs text-agora-400 truncate mt-0.5">{a.description}</p>}
       </div>
     </Link>
   )

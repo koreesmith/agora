@@ -649,10 +649,20 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow(`SELECT author_id, parent_id FROM posts WHERE id = $1`, postID).Scan(&authorID, &parentID)
 	if authorID != "" && authorID != userID {
 		notifType := "post_reaction"
+		notifPostID := postID
 		if parentID != nil {
 			notifType = "comment_reaction"
+			// Navigate to the parent post, not the comment itself
+			// Walk up to find the root post (handles depth-2 replies too)
+			rootID := *parentID
+			var grandParentID *string
+			s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, rootID).Scan(&grandParentID)
+			if grandParentID != nil {
+				rootID = *grandParentID
+			}
+			notifPostID = rootID
 		}
-		go s.notif.Create(authorID, userID, notifType, postID, req.Type)
+		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})

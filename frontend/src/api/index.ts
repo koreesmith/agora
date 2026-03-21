@@ -55,6 +55,7 @@ export const feedApi = {
   editComment:   (postId: string, commentId: string, content: string) => api.patch(`/posts/${postId}/comments/${commentId}`, { content }),
   pollVote:      (id: string, option_id: string) => api.post(`/posts/${id}/poll/vote`, { option_id }),
   pollUnvote:    (id: string)              => api.delete(`/posts/${id}/poll/vote`),
+  pollAddOption: (id: string, text: string) => api.post(`/posts/${id}/poll/options`, { text }),
   getWall:       (username: string)        => api.get(`/users/${username}/wall`),
   getWallQueue:  ()                        => api.get('/users/me/wall-queue'),
   wallApprove:   (id: string)              => api.post(`/posts/${id}/wall-approve`),

@@ -63,6 +63,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/users/{username}/posts",             s.GetUserPosts)
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
+	r.Post("/posts/{id}/poll/options",           s.PollAddOption)
 	r.Get("/users/{username}/wall",              s.GetWall)
 	r.Get("/users/me/wall-queue",                s.GetWallQueue)
 	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
@@ -310,8 +311,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		LinkDescription string   `json:"link_description"`
 		LinkImage       string   `json:"link_image"`
 		LinkDomain      string   `json:"link_domain"`
-		PollOptions     []string `json:"poll_options"`
-		WallUserID      string   `json:"wall_user_id"`
+		PollOptions          []string `json:"poll_options"`
+		PollExpiresHours     int      `json:"poll_expires_hours"`
+		PollMultipleChoice   bool     `json:"poll_multiple_choice"`
+		PollAllowsNewOptions bool     `json:"poll_allows_new_options"`
+		WallUserID           string   `json:"wall_user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -391,11 +395,16 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning,
 		                   link_url, link_title, link_description, link_image, link_domain,
-		                   wall_user_id, wall_status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id
+		                   wall_user_id, wall_status,
+		                   poll_multiple_choice, poll_allows_new_options,
+		                   poll_expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+		        CASE WHEN $16 > 0 THEN NOW() + ($16 * INTERVAL '1 hour') ELSE NULL END)
+		RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
-		wallUserID, wallStatus).Scan(&id)
+		wallUserID, wallStatus,
+		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -705,17 +714,83 @@ func (s *Service) PollVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove any existing vote on this poll first (one vote per poll)
-	s.db.Exec(`
-		DELETE FROM poll_votes
-		WHERE user_id = $1
-		  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
-	`, userID, postID)
+	// Check poll hasn't expired
+	var isExpired bool
+	s.db.QueryRow(`SELECT poll_expires_at IS NOT NULL AND poll_expires_at < NOW() FROM posts WHERE id = $1`, postID).Scan(&isExpired)
+	if isExpired {
+		writeError(w, 403, "this poll has ended")
+		return
+	}
 
-	// Cast new vote
+	// Check if multiple choice
+	var multipleChoice bool
+	s.db.QueryRow(`SELECT poll_multiple_choice FROM posts WHERE id = $1`, postID).Scan(&multipleChoice)
+
+	if !multipleChoice {
+		// Single choice: remove any existing vote on this poll first
+		s.db.Exec(`
+			DELETE FROM poll_votes
+			WHERE user_id = $1
+			  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
+		`, userID, postID)
+	}
+
+	// Cast vote
 	s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, req.OptionID)
 
 	writeJSON(w, 200, map[string]string{"message": "voted"})
+}
+
+func (s *Service) PollAddOption(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	postID := chi.URLParam(r, "id")
+
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		writeError(w, 400, "text required")
+		return
+	}
+
+	// Check post allows new options and poll hasn't expired
+	var allowsNew bool
+	var isExpired bool
+	err := s.db.QueryRow(`
+		SELECT poll_allows_new_options,
+		       (poll_expires_at IS NOT NULL AND poll_expires_at < NOW())
+		FROM posts WHERE id = $1
+	`, postID).Scan(&allowsNew, &isExpired)
+	if err != nil {
+		writeError(w, 404, "post not found"); return
+	}
+	if !allowsNew {
+		writeError(w, 403, "this poll does not allow new options"); return
+	}
+	if isExpired {
+		writeError(w, 403, "this poll has ended"); return
+	}
+
+	// Check option count doesn't exceed 10
+	var optCount int
+	s.db.QueryRow(`SELECT COUNT(*) FROM poll_options WHERE post_id = $1`, postID).Scan(&optCount)
+	if optCount >= 10 {
+		writeError(w, 400, "poll already has maximum options"); return
+	}
+
+	var optID string
+	s.db.QueryRow(`
+		INSERT INTO poll_options (post_id, text, position)
+		VALUES ($1, $2, (SELECT COALESCE(MAX(position)+1, 0) FROM poll_options WHERE post_id = $1))
+		RETURNING id
+	`, postID, strings.TrimSpace(req.Text)).Scan(&optID)
+
+	// Auto-vote for the user who added the option
+	if optID != "" {
+		s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, optID)
+	}
+
+	writeJSON(w, 201, map[string]string{"message": "option added", "id": optID})
 }
 
 func (s *Service) PollUnvote(w http.ResponseWriter, r *http.Request) {
@@ -868,6 +943,35 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 	}
 	inClause := strings.Join(placeholders, ",")
 
+	// Fetch poll settings (multiple_choice, allows_new_options, expires_at)
+	settingsRows, err := s.db.Query(
+		fmt.Sprintf(`
+			SELECT id, poll_multiple_choice, poll_allows_new_options,
+			       poll_expires_at,
+			       (poll_expires_at IS NOT NULL AND poll_expires_at < NOW()) AS is_expired
+			FROM posts
+			WHERE id IN (%s) AND EXISTS (SELECT 1 FROM poll_options WHERE post_id = posts.id)
+		`, inClause),
+		args...,
+	)
+	if err == nil {
+		defer settingsRows.Close()
+		for settingsRows.Next() {
+			var postID string
+			var multiChoice, allowsNew, isExpired bool
+			var expiresAt *string
+			settingsRows.Scan(&postID, &multiChoice, &allowsNew, &expiresAt, &isExpired)
+			if idx, ok := idxMap[postID]; ok {
+				posts[idx].PollMultipleChoice = multiChoice
+				posts[idx].PollAllowsNewOptions = allowsNew
+				posts[idx].PollExpiresAt = expiresAt
+				if isExpired {
+					posts[idx].PollExpired = true
+				}
+			}
+		}
+	}
+
 	// Fetch options with vote counts
 	rows, err := s.db.Query(
 		fmt.Sprintf(`
@@ -891,7 +995,7 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 		}
 	}
 
-	// Fetch the current user's vote per poll
+	// Fetch the current user's vote(s) per poll
 	if userID != "" {
 		uph := make([]string, len(ids))
 		uargs := make([]any, len(ids)+1)
@@ -915,7 +1019,12 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 				var postID, optionID string
 				vrows.Scan(&postID, &optionID)
 				if idx, ok := idxMap[postID]; ok {
-					posts[idx].MyPollVote = optionID
+					// Support multiple votes for multiple-choice polls
+					if posts[idx].MyPollVote == "" {
+						posts[idx].MyPollVote = optionID
+					} else {
+						posts[idx].MyPollVotes = append(posts[idx].MyPollVotes, optionID)
+					}
 				}
 			}
 		}
@@ -979,20 +1088,39 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
-	var id string
+	// Check the original post exists and that the sharer can see it
+	var origAuthorID, origVisibility string
+	var origGroupID *string
 	err := s.db.QueryRow(`
+		SELECT author_id, visibility, community_group_id
+		FROM posts WHERE id = $1 AND deleted_at IS NULL AND repost_of_id IS NULL
+	`, repostOfID).Scan(&origAuthorID, &origVisibility, &origGroupID)
+	if err != nil {
+		writeError(w, 404, "post not found or cannot be shared"); return
+	}
+
+	// Only public posts can be shared (friends-only posts stay within their intended audience)
+	if origVisibility == "private" || origVisibility == "friends" {
+		writeError(w, 403, "this post cannot be shared — it is only visible to the author's friends"); return
+	}
+
+	// Group posts can only be shared within the group context — block sharing to general feed
+	if origGroupID != nil {
+		writeError(w, 403, "group posts cannot be shared outside the group"); return
+	}
+
+	var id string
+	err = s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, visibility, repost_of_id)
 		VALUES ($1, $2, $3, $4) RETURNING id
 	`, userID, req.Content, req.Visibility, repostOfID).Scan(&id)
 	if err != nil {
-		writeError(w, 500, "could not repost")
+		writeError(w, 500, "could not share post")
 		return
 	}
 
-	var authorID string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, repostOfID).Scan(&authorID)
-	if authorID != "" && authorID != userID {
-		go s.notif.Create(authorID, userID, "post_repost", repostOfID, "")
+	if origAuthorID != "" && origAuthorID != userID {
+		go s.notif.Create(origAuthorID, userID, "post_repost", repostOfID, "")
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -1392,8 +1520,13 @@ type Post struct {
 	MyReaction     string  `json:"my_reaction"` // empty string = no reaction
 	ReactionCounts map[string]int `json:"reaction_counts"`
 	// Polls (AGORA-5)
-	PollOptions    []PollOption `json:"poll_options,omitempty"`
-	MyPollVote     string       `json:"my_poll_vote,omitempty"` // option_id or empty
+	PollOptions          []PollOption `json:"poll_options,omitempty"`
+	MyPollVote           string       `json:"my_poll_vote,omitempty"`
+	MyPollVotes          []string     `json:"my_poll_votes,omitempty"`
+	PollExpiresAt        *string      `json:"poll_expires_at,omitempty"`
+	PollMultipleChoice   bool         `json:"poll_multiple_choice,omitempty"`
+	PollAllowsNewOptions bool         `json:"poll_allows_new_options,omitempty"`
+	PollExpired          bool         `json:"poll_expired,omitempty"`
 	// Wall (AGORA-19)
 	WallUserID       *string `json:"wall_user_id,omitempty"`
 	WallUsername     *string `json:"wall_username,omitempty"`

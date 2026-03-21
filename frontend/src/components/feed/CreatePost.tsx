@@ -31,6 +31,9 @@ export default function CreatePost() {
   const [twLabel, setTwLabel] = useState('')
   const [pollEnabled, setPollEnabled] = useState(false)
   const [pollOptions, setPollOptions] = useState(['', ''])
+  const [pollMultipleChoice, setPollMultipleChoice] = useState(false)
+  const [pollAllowsNewOptions, setPollAllowsNewOptions] = useState(false)
+  const [pollExpiresHours, setPollExpiresHours] = useState(24)
   const [preview, setPreview] = useState<Preview | null>(null)
   const [previewDismissed, setPreviewDismissed] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -118,11 +121,15 @@ export default function CreatePost() {
       link_image: preview ? preview.image : '',
       link_domain: preview ? preview.domain : '',
       poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
+      poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
+      poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
+      poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
     }),
     onSuccess: () => {
       setContent(''); setImageUrl(''); setGroupId('')
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
+      setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
       setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
@@ -251,7 +258,7 @@ export default function CreatePost() {
 
       {/* Poll editor */}
       {pollEnabled && (
-        <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-2">
+        <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-3">
           <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Poll options</p>
           {pollOptions.map((opt, i) => (
             <div key={i} className="flex items-center gap-2">
@@ -281,6 +288,50 @@ export default function CreatePost() {
               <Plus size={12} /> Add option
             </button>
           )}
+
+          {/* Poll settings */}
+          <div className="border-t border-agora-100 dark:border-agora-700 pt-3 space-y-2">
+            <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Poll settings</p>
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Duration */}
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-agora-500">Duration</label>
+                <select
+                  className="text-xs border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1 bg-white dark:bg-agora-800 text-agora-700 dark:text-agora-200"
+                  value={pollExpiresHours}
+                  onChange={e => setPollExpiresHours(Number(e.target.value))}
+                >
+                  <option value={1}>1 hour</option>
+                  <option value={6}>6 hours</option>
+                  <option value={12}>12 hours</option>
+                  <option value={24}>1 day</option>
+                  <option value={72}>3 days</option>
+                  <option value={168}>1 week</option>
+                  <option value={0}>No limit</option>
+                </select>
+              </div>
+              {/* Multiple choice */}
+              <label className="flex items-center gap-1.5 text-xs text-agora-500 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={pollMultipleChoice}
+                  onChange={e => setPollMultipleChoice(e.target.checked)}
+                  className="rounded"
+                />
+                Allow multiple selections
+              </label>
+              {/* Allow new options */}
+              <label className="flex items-center gap-1.5 text-xs text-agora-500 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={pollAllowsNewOptions}
+                  onChange={e => setPollAllowsNewOptions(e.target.checked)}
+                  className="rounded"
+                />
+                Let respondents add options
+              </label>
+            </div>
+          </div>
         </div>
       )}
 

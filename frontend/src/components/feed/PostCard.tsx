@@ -54,6 +54,11 @@ interface Post {
   // Polls (AGORA-5)
   poll_options?: { id: string; text: string; votes: number; position: number }[]
   my_poll_vote?: string
+  my_poll_votes?: string[]
+  poll_expires_at?: string
+  poll_multiple_choice?: boolean
+  poll_allows_new_options?: boolean
+  poll_expired?: boolean
   // Wall (AGORA-19)
   wall_user_id?: string
   wall_username?: string
@@ -199,6 +204,88 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
   )
 }
 
+// ── PollWidget ────────────────────────────────────────────────────────────────
+
+function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: string | null) => void; invalidate: () => void }) {
+  const [showAddOption, setShowAddOption] = useState(false)
+  const [newOptionText, setNewOptionText] = useState('')
+
+  const pollAddOption = useMutation({
+    mutationFn: () => feedApi.pollAddOption(post.id, newOptionText.trim()),
+    onSuccess: () => { setNewOptionText(''); setShowAddOption(false); invalidate() },
+  })
+
+  const opts = post.poll_options!
+  const totalVotes = opts.reduce((s, o) => s + o.votes, 0)
+  const myVotes = new Set([post.my_poll_vote, ...(post.my_poll_votes || [])].filter(Boolean))
+  const hasVoted = myVotes.size > 0
+  const isExpired = !!post.poll_expired
+  const canVote = !isExpired
+
+  return (
+    <div className="mt-3 space-y-2">
+      {isExpired && (
+        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">🔒 This poll has ended</p>
+      )}
+      {!isExpired && post.poll_expires_at && (
+        <p className="text-xs text-agora-400 dark:text-agora-500">⏱ Closes {new Date(post.poll_expires_at).toLocaleString()}</p>
+      )}
+      {opts.map(opt => {
+        const isMyVote = myVotes.has(opt.id)
+        const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0
+        const showResults = hasVoted || isExpired
+        return showResults ? (
+          <button key={opt.id}
+            onClick={() => canVote && onVote(isMyVote ? null : opt.id)}
+            disabled={!canVote}
+            className={`w-full text-left rounded-lg overflow-hidden border transition-colors ${isMyVote ? 'border-agora-500 dark:border-agora-400' : 'border-agora-200 dark:border-agora-600'} ${canVote ? '' : 'cursor-default'}`}
+          >
+            <div className="relative px-3 py-2">
+              <div className={`absolute inset-0 transition-all duration-500 ${isMyVote ? 'bg-agora-100 dark:bg-agora-700' : 'bg-agora-50 dark:bg-agora-800/50'}`} style={{ width: `${pct}%` }} />
+              <div className="relative flex items-center justify-between gap-2">
+                <span className={`text-sm ${isMyVote ? 'font-semibold text-agora-800 dark:text-agora-100' : 'text-agora-700 dark:text-agora-300'}`}>
+                  {isMyVote && <span className="mr-1">✓</span>}{opt.text}
+                </span>
+                <span className="text-xs text-agora-500 flex-shrink-0">{pct}%</span>
+              </div>
+            </div>
+          </button>
+        ) : (
+          <button key={opt.id}
+            onClick={() => onVote(opt.id)}
+            className="w-full text-left px-3 py-2 rounded-lg border border-agora-200 dark:border-agora-600 hover:border-agora-500 dark:hover:border-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors text-sm text-agora-700 dark:text-agora-300"
+          >
+            {post.poll_multiple_choice && <span className="mr-2 text-agora-300">☐</span>}
+            {opt.text}
+          </button>
+        )
+      })}
+      {canVote && post.poll_allows_new_options && !showAddOption && (
+        <button onClick={() => setShowAddOption(true)}
+          className="w-full text-left px-3 py-2 rounded-lg border border-dashed border-agora-300 dark:border-agora-600 hover:border-agora-500 text-sm text-agora-400 hover:text-agora-600 transition-colors">
+          + Add your own option…
+        </button>
+      )}
+      {showAddOption && (
+        <div className="flex gap-2">
+          <input className="input flex-1 text-sm" autoComplete="off" placeholder="Your option…" maxLength={100}
+            value={newOptionText} onChange={e => setNewOptionText(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && newOptionText.trim() && pollAddOption.mutate()} autoFocus />
+          <button onClick={() => pollAddOption.mutate()} disabled={!newOptionText.trim() || pollAddOption.isPending} className="btn-primary text-sm px-3">
+            {pollAddOption.isPending ? '…' : 'Add'}
+          </button>
+          <button onClick={() => { setShowAddOption(false); setNewOptionText('') }} className="btn-secondary text-sm px-3">Cancel</button>
+        </div>
+      )}
+      <p className="text-xs text-agora-400">
+        {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
+        {post.poll_multiple_choice && canVote && !hasVoted && <span className="ml-2">· Select all that apply</span>}
+        {hasVoted && canVote && <button onClick={() => onVote(null)} className="ml-2 underline hover:text-agora-600">Remove vote</button>}
+      </p>
+    </div>
+  )
+}
+
 // ── PostCard ──────────────────────────────────────────────────────────────────
 
 export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
@@ -209,6 +296,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showComments, setShowComments] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showReport, setShowReport] = useState(false)
+  const [showShare, setShowShare] = useState(false)
+  const [shareContent, setShareContent] = useState('')
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -272,8 +361,9 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   })
 
   const repost = useMutation({
-    mutationFn: () => feedApi.repost(post.id),
-    onSuccess: invalidate,
+    mutationFn: () => feedApi.repost(post.id, { content: shareContent, visibility: 'friends' }),
+    onSuccess: () => { setShowShare(false); setShareContent(''); invalidate() },
+    onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
   })
 
   const pollVote = useMutation({
@@ -640,58 +730,9 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
           )}
 
           {/* Poll */}
-          {post.poll_options && post.poll_options.length >= 2 && (() => {
-            const opts = post.poll_options!
-            const totalVotes = opts.reduce((s, o) => s + o.votes, 0)
-            const hasVoted = !!post.my_poll_vote
-            return (
-              <div className="mt-3 space-y-2">
-                {opts.map(opt => {
-                  const isMyVote = post.my_poll_vote === opt.id
-                  const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0
-                  return hasVoted ? (
-                    // Results view
-                    <button
-                      key={opt.id}
-                      onClick={() => pollVote.mutate(isMyVote ? null : opt.id)}
-                      className={`w-full text-left rounded-lg overflow-hidden border transition-colors ${
-                        isMyVote
-                          ? 'border-agora-500 dark:border-agora-400'
-                          : 'border-agora-200 dark:border-agora-600'
-                      }`}
-                    >
-                      <div className="relative px-3 py-2">
-                        <div
-                          className={`absolute inset-0 ${isMyVote ? 'bg-agora-100 dark:bg-agora-700' : 'bg-agora-50 dark:bg-agora-800/50'}`}
-                          style={{ width: `${pct}%` }}
-                        />
-                        <div className="relative flex items-center justify-between gap-2">
-                          <span className={`text-sm ${isMyVote ? 'font-semibold text-agora-800 dark:text-agora-100' : 'text-agora-700 dark:text-agora-300'}`}>
-                            {isMyVote && <span className="mr-1">✓</span>}{opt.text}
-                          </span>
-                          <span className="text-xs text-agora-500 flex-shrink-0">{pct}%</span>
-                        </div>
-                      </div>
-                    </button>
-                  ) : (
-                    // Voting view
-                    <button
-                      key={opt.id}
-                      onClick={() => pollVote.mutate(opt.id)}
-                      disabled={pollVote.isPending}
-                      className="w-full text-left px-3 py-2 rounded-lg border border-agora-200 dark:border-agora-600 hover:border-agora-500 dark:hover:border-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors text-sm text-agora-700 dark:text-agora-300 disabled:opacity-50"
-                    >
-                      {opt.text}
-                    </button>
-                  )
-                })}
-                <p className="text-xs text-agora-400">
-                  {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
-                  {hasVoted && <button onClick={() => pollVote.mutate(null)} className="ml-2 underline hover:text-agora-600">Remove vote</button>}
-                </p>
-              </div>
-            )
-          })()}
+          {post.poll_options && post.poll_options.length >= 2 && (
+            <PollWidget post={post} onVote={pollVote.mutate} invalidate={invalidate} />
+          )}
 
           {/* Actions */}
           <div className="mt-3">
@@ -722,10 +763,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               </button>
 
               <button
-                onClick={() => repost.mutate()}
-                className={`flex items-center gap-1.5 text-sm transition-colors hover:text-green-500 ${post.reposted ? 'text-green-500' : ''}`}>
+                onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
+                disabled={post.visibility !== 'public'}
+                title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
+                className={`flex items-center gap-1.5 text-sm transition-colors ${post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
                 <Repeat2 size={16} />
-                <span>{post.repost_count}</span>
+                <span>{post.repost_count || ''}</span>
               </button>
             </div>
 
@@ -743,6 +786,57 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
       {/* Reactions synopsis modal */}
       {showReactionsModal && (
         <ReactionsModal postId={post.id} onClose={() => setShowReactionsModal(false)} />
+      )}
+
+      {/* Share modal */}
+      {showShare && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowShare(false)}>
+          <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-agora-100 dark:border-agora-700">
+              <h2 className="font-bold text-lg">Share post</h2>
+              <button onClick={() => setShowShare(false)} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
+            </div>
+            <div className="p-4 space-y-3">
+              {/* Author's comment */}
+              <textarea
+                className="input w-full resize-none text-sm"
+                rows={3}
+                placeholder="Say something about this… (optional)"
+                value={shareContent}
+                onChange={e => setShareContent(e.target.value)}
+                autoFocus
+              />
+              {/* Preview of the post being shared */}
+              <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 bg-agora-50 dark:bg-agora-900 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {post.author_avatar_url
+                      ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(post.author_display_name || post.author_username || '?')[0].toUpperCase()}</span>}
+                  </div>
+                  <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name || post.author_username}</span>
+                  <span className="text-xs text-agora-400">@{post.author_username}</span>
+                </div>
+                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{post.content}</p>}
+                {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
+              </div>
+              <p className="text-xs text-agora-400 dark:text-agora-500">
+                This will be shared with your friends.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-4 pb-4">
+              <button onClick={() => setShowShare(false)} className="btn-secondary">Cancel</button>
+              <button
+                onClick={() => repost.mutate()}
+                disabled={repost.isPending}
+                className="btn-primary flex items-center gap-1.5"
+              >
+                <Repeat2 size={14} />
+                {repost.isPending ? 'Sharing…' : 'Share'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Comments */}

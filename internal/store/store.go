@@ -154,7 +154,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS reactions (
 		user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		post_id         UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','angry','care','pride','thankful','vomit')),
+		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit')),
 		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (user_id, post_id)
 	)`,
@@ -470,4 +470,6 @@ var schema = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_status VARCHAR(20) NOT NULL DEFAULT ''`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_token TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_users_waitlist ON users(waitlist_status, created_at) WHERE waitlist_status = 'pending'`,
+	`ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_reaction_type_check`,
+	`ALTER TABLE reactions ADD CONSTRAINT reactions_reaction_type_check CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit'))`,
 }

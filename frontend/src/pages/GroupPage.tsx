@@ -381,12 +381,13 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
                 {(post.reaction_count || 0) > 0 && <span>{post.reaction_count}</span>}
               </button>
               {openReactionPicker === post.id && (
-                <div className="absolute bottom-8 left-0 z-20 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-2xl shadow-xl p-2 flex gap-1"
-                  onMouseLeave={() => setOpenReactionPicker(null)}>
+                <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
+                  onMouseLeave={e => e.stopPropagation()}>
                   {REACTIONS.map(r => (
                     <button key={r.type} title={r.label}
-                      onClick={() => { reactPost.mutate({ id: post.id, type: r.type, myReaction: post.my_reaction || '' }); setOpenReactionPicker(null) }}
-                      className={`text-xl p-1 rounded-lg hover:bg-agora-100 dark:hover:bg-agora-700 transition-colors hover:scale-125 ${post.my_reaction === r.type ? 'bg-agora-100 dark:bg-agora-700' : ''}`}>
+                      onClick={e => { e.stopPropagation(); reactPost.mutate({ id: post.id, type: r.type, myReaction: post.my_reaction || '' }); setOpenReactionPicker(null) }}
+                      className={`text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${post.my_reaction === r.type ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
+                      style={{ lineHeight: 1 }}>
                       {r.emoji}
                     </button>
                   ))}

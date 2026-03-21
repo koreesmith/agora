@@ -168,7 +168,7 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	if actorID != "" { aID = &actorID }
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
-	go s.maybeEmailNotif(userID, actorID, notifType)
+	go s.maybeEmailNotif(userID, actorID, notifType, postID)
 	go s.maybePushNotif(userID, actorID, notifType, postID)
 }
 
@@ -245,7 +245,7 @@ func pushNotifContent(t, actorName string) (title, body string) {
 	return "", ""
 }
 
-func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
+func (s *Service) maybeEmailNotif(userID, actorID, notifType, postID string) {
 	if !s.email.enabled() { return }
 
 	var toEmail, displayName, unsubToken string
@@ -259,6 +259,7 @@ func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 	if !emailNotifsEnabled { return }
 
 	actorName := "Someone"
+	actorUsername := ""
 	if actorID != "" {
 		var aDisplay, aUsername string
 		s.db.QueryRow(`SELECT display_name, username FROM users WHERE id = $1`, actorID).
@@ -268,53 +269,66 @@ func (s *Service) maybeEmailNotif(userID, actorID, notifType string) {
 		} else if aUsername != "" {
 			actorName = aUsername
 		}
+		actorUsername = aUsername
 	}
 
 	instanceName := s.email.instanceName()
 	domain := s.email.instanceDomain()
 	baseURL := s.email.instanceBaseURL()
 
-	subject, body := notifEmailContent(notifType, actorName, instanceName, baseURL)
+	subject, body := notifEmailContent(notifType, actorName, actorUsername, postID, instanceName, baseURL)
 	if subject == "" { return }
 
 	s.email.SendHTML(toEmail, subject, buildBody(displayName, instanceName, domain, baseURL, body), "", unsubToken)
 }
 
-func notifEmailContent(t, actorName, instanceName, baseURL string) (subject, body string) {
+func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseURL string) (subject, body string) {
+	postURL := baseURL
+	if postID != "" {
+		postURL = fmt.Sprintf("%s/post/%s", baseURL, postID)
+	}
+	profileURL := baseURL
+	if actorUsername != "" {
+		profileURL = fmt.Sprintf("%s/profile/%s", baseURL, actorUsername)
+	}
+
 	switch t {
 	case "friend_request":
 		return fmt.Sprintf("%s sent you a friend request on %s", actorName, instanceName),
 			fmt.Sprintf("%s sent you a friend request on %s.\n\nAccept or decline: %s/friends", actorName, instanceName, baseURL)
 	case "friend_accepted":
 		return fmt.Sprintf("%s accepted your friend request", actorName),
-			fmt.Sprintf("%s accepted your friend request on %s.\n\nView their profile: %s/friends", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s accepted your friend request on %s.\n\nView their profile: %s", actorName, instanceName, profileURL)
 	case "post_like":
 		return fmt.Sprintf("%s liked your post on %s", actorName, instanceName),
-			fmt.Sprintf("%s liked one of your posts on %s.\n\nSee what's happening: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s liked one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "post_reaction", "comment_reaction":
 		return fmt.Sprintf("%s reacted to your post on %s", actorName, instanceName),
-			fmt.Sprintf("%s reacted to one of your posts on %s.\n\nSee what's happening: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s reacted to one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "post_comment":
 		return fmt.Sprintf("%s commented on your post", actorName),
-			fmt.Sprintf("%s left a comment on your post on %s.\n\nSee the discussion: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s left a comment on your post on %s.\n\nSee the discussion: %s", actorName, instanceName, postURL)
+	case "comment_reply":
+		return fmt.Sprintf("%s replied to your comment", actorName),
+			fmt.Sprintf("%s replied to your comment on %s.\n\nSee the reply: %s", actorName, instanceName, postURL)
 	case "post_repost":
 		return fmt.Sprintf("%s shared your post on %s", actorName, instanceName),
-			fmt.Sprintf("%s shared one of your posts on %s.\n\nSee what's happening: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s shared one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "post_mention":
 		return fmt.Sprintf("%s mentioned you in a post", actorName),
-			fmt.Sprintf("%s mentioned you in a post on %s.\n\nSee the post: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s mentioned you in a post on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "user_post":
 		return fmt.Sprintf("%s just posted on %s", actorName, instanceName),
-			fmt.Sprintf("%s just posted something new on %s.\n\nSee the post: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s just posted something new on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "wall_post":
 		return fmt.Sprintf("%s posted on your wall", actorName),
-			fmt.Sprintf("%s wrote something on your wall on %s.\n\nSee it: %s", actorName, instanceName, baseURL)
+			fmt.Sprintf("%s wrote something on your wall on %s.\n\nSee it: %s", actorName, instanceName, postURL)
 	case "wall_post_pending":
 		return fmt.Sprintf("%s wants to post on your wall", actorName),
-			fmt.Sprintf("%s posted on your wall on %s but it needs your approval.\n\nReview it: %s/profile/%s", actorName, instanceName, baseURL, "me")
+			fmt.Sprintf("%s wants to post on your wall on %s but it needs your approval.\n\nReview it: %s", actorName, instanceName, postURL)
 	case "wall_post_approved":
-		return fmt.Sprintf("Your wall post was approved", actorName),
-			fmt.Sprintf("Your post on someone's wall on %s was approved.\n\nSee it: %s", instanceName, baseURL)
+		return "Your wall post was approved",
+			fmt.Sprintf("Your post on someone's wall on %s was approved.\n\nSee it: %s", instanceName, postURL)
 	}
 	return "", ""
 }

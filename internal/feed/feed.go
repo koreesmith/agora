@@ -349,9 +349,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var groupID *string
+	var friendGroupID *string
+	var communityGroupID *string
 	if req.GroupID != "" && req.Visibility == "group" {
-		groupID = &req.GroupID
+		// group_id on posts references friend_groups (friend lists)
+		// community_group_id references community_groups — separate concept
+		friendGroupID = &req.GroupID
 	}
 
 	// Wall post handling
@@ -393,15 +396,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, content_warning,
+		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, group_id, content_warning,
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
 		                   poll_expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        CASE WHEN $16 > 0 THEN NOW() + ($16 * INTERVAL '1 hour') ELSE NULL END)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
 		RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, groupID, req.ContentWarning,
+	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
 		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours).Scan(&id)

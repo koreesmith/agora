@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 const EFFECTIVE_DATE = 'March 18, 2026'
 const OPERATOR = 'Koree A. Smith'
 const CONTACT_EMAIL = 'koree@ameth.social'
-const INSTANCE_DOMAIN = 'ameth.social'
+const INSTANCE_DOMAIN = 'agorasocial.online'
 const APP_NAME = 'Agora'
 
 export default function TermsPage() {

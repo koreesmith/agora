@@ -256,3 +256,6 @@ export const dmApi = {
   leaveConversation:  (id: string)                          => api.delete(`/conversations/${id}`),
 }
 
+export const inviteApi = {
+  send: (email: string) => api.post('/invites/send', { email }),
+}

@@ -106,7 +106,7 @@ func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"instance_name": true, "instance_description": true, "registration_mode": true,
 		"federation_enabled": true, "deletion_grace_days": true, "logo_url": true,
 		"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
-		"smtp_from": true, "smtp_enabled": true,
+		"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
 	}
 
 	for k, v := range updates {

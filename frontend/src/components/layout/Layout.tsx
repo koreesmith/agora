@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail } from 'lucide-react'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
@@ -40,6 +40,8 @@ export default function Layout() {
   const instanceName: string = instanceData?.instance_name || 'Agora'
   const logoUrl: string = instanceData?.logo_url || ''
 
+  const invitesEnabled = instanceData?.user_invites_enabled === 'true'
+
   const nav = [
     { to: '/',                          icon: Home,           label: 'Feed' },
     { to: '/notifications',             icon: Bell,           label: 'Notifications', badge: unread },
@@ -51,6 +53,9 @@ export default function Layout() {
     { to: '/search',                    icon: Search,         label: 'Search' },
     { to: `/profile/${user?.username}`, icon: User,           label: 'Profile' },
     { to: '/settings',                  icon: Settings,       label: 'Settings' },
+    ...(invitesEnabled
+      ? [{ to: '/invite-friend', icon: Mail, label: 'Invite a Friend' }]
+      : []),
     ...(user?.role === 'admin' || user?.role === 'moderator'
       ? [{ to: '/admin', icon: Shield, label: 'Admin' }]
       : []),

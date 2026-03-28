@@ -140,6 +140,8 @@ func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
+// ── User Invites (AGORA-75) ───────────────────────────────────────────────────
+
 func (s *Service) GetEmailPrefs(w http.ResponseWriter, r *http.Request) {
 	userID := ctxkeys.GetUserID(r.Context())
 	var enabled bool
@@ -460,6 +462,76 @@ The %s team
 
 	html := buildPasswordResetHTML(instanceName, domain, baseURL, displayName, link)
 	s.email.SendHTML(email, subject, plain, html, "") // no unsubscribe — transactional
+}
+
+func (s *Service) SendUserInvite(toEmail, inviterName, inviterUsername string) {
+	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+	baseURL := s.email.instanceBaseURL()
+	registerURL := fmt.Sprintf("%s/register", baseURL)
+
+	subject := fmt.Sprintf("%s invited you to join %s", inviterName, instanceName)
+
+	plain := fmt.Sprintf(`Hi there,
+
+%s (@%s) has invited you to join %s — a private, federated social network.
+
+Sign up here:
+%s
+
+%s is a place to connect with the people you actually know, without ads, tracking, or algorithmic manipulation.
+
+If you didn't expect this invitation, you can safely ignore this email.
+
+The %s team
+%s
+`, inviterName, inviterUsername, instanceName, registerURL, instanceName, instanceName, domain)
+
+	html := fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:560px;margin:40px auto;padding:0 20px;color:#243b53">
+<div style="text-align:center;margin-bottom:32px">
+  <div style="width:56px;height:56px;background:#486581;border-radius:14px;display:inline-flex;align-items:center;justify-content:center">
+    <svg width="32" height="32" viewBox="0 0 96 96" fill="none">
+      <path d="M48 12L18 78" stroke="white" stroke-width="8" stroke-linecap="round"/>
+      <path d="M48 12L78 78" stroke="white" stroke-width="8" stroke-linecap="round"/>
+      <line x1="31" y1="52" x2="65" y2="52" stroke="white" stroke-width="7" stroke-linecap="round"/>
+      <circle cx="24" cy="52" r="5" fill="#9fb3c8"/>
+      <circle cx="72" cy="52" r="5" fill="#9fb3c8"/>
+    </svg>
+  </div>
+</div>
+<h1 style="font-size:24px;font-weight:700;color:#102a43;text-align:center;margin-bottom:8px">You're invited to join %s!</h1>
+<p style="font-size:16px;color:#627d98;text-align:center;margin-bottom:32px">Your friend wants to connect with you.</p>
+<div style="background:#f0f4f8;border-radius:12px;padding:24px;margin-bottom:24px">
+  <p style="margin:0 0 8px;color:#334e68;font-size:15px">
+    <strong>%s</strong> <span style="color:#829ab1">(@%s)</span> has invited you to join <strong>%s</strong>.
+  </p>
+  <p style="color:#486581;font-size:14px;margin:12px 0 0">
+    %s is a private, federated social network — no ads, no tracking, no algorithmic manipulation. Just people you actually know.
+  </p>
+</div>
+<div style="text-align:center;margin-bottom:32px">
+  <a href="%s" style="display:inline-block;background:#486581;color:white;font-weight:700;font-size:16px;padding:14px 32px;border-radius:12px;text-decoration:none">Create your account →</a>
+</div>
+<p style="color:#829ab1;font-size:13px;text-align:center">If the button doesn't work, copy and paste this link:<br><a href="%s" style="color:#486581">%s</a></p>
+<hr style="border:none;border-top:1px solid #e8edf2;margin:32px 0">
+<p style="color:#b0bec5;font-size:11px;text-align:center">
+  You received this because %s (@%s) entered your email address on %s (%s).<br>
+  If you didn't expect this, you can safely ignore it — no account will be created without your action.<br>
+  <a href="%s/privacy" style="color:#9fb3c8">Privacy Policy</a>
+</p>
+</body></html>`,
+		instanceName,
+		inviterName, inviterUsername, instanceName,
+		instanceName,
+		registerURL,
+		registerURL, registerURL,
+		inviterName, inviterUsername, instanceName, domain,
+		baseURL,
+	)
+
+	// No unsubscribe token — this goes to non-users who have no account
+	s.email.SendHTML(toEmail, subject, plain, html, "")
 }
 
 func (s *Service) SendWaitlistConfirmation(_, email, displayName string) {

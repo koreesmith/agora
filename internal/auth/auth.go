@@ -404,6 +404,43 @@ func (s *Service) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "email verified"})
 }
 
+// SendUserInvite allows authenticated users to invite a friend by email (AGORA-75)
+func (s *Service) SendUserInvite(w http.ResponseWriter, r *http.Request) {
+	userID := UserIDFromCtx(r.Context())
+
+	// Check feature is enabled
+	if s.getSetting("user_invites_enabled") != "true" {
+		writeError(w, 403, "invitations are not enabled on this instance"); return
+	}
+
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, 400, "email required"); return
+	}
+	if !strings.Contains(req.Email, "@") {
+		writeError(w, 400, "valid email required"); return
+	}
+
+	// Get inviter info
+	var inviterName, inviterUsername string
+	s.db.QueryRow(`SELECT display_name, username FROM users WHERE id = $1`, userID).
+		Scan(&inviterName, &inviterUsername)
+	if inviterName == "" { inviterName = inviterUsername }
+
+	// Don't invite existing users
+	var existing int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)`, req.Email).Scan(&existing)
+	if existing > 0 {
+		writeError(w, 409, "that email address already has an account"); return
+	}
+
+	go s.notifSvc.SendUserInvite(req.Email, inviterName, inviterUsername)
+
+	writeJSON(w, 200, map[string]string{"message": "invite sent"})
+}
+
 // WaitlistAccept is called when an admin approves a user. The link is emailed to the user.
 func (s *Service) WaitlistAccept(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
@@ -555,7 +592,7 @@ func RegisterInstanceRoute(r chi.Router, s *Service) {
 }
 
 func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
-	keys := []string{"instance_name", "instance_description", "registration_mode", "logo_url"}
+	keys := []string{"instance_name", "instance_description", "registration_mode", "logo_url", "user_invites_enabled"}
 	info := map[string]string{}
 	for _, k := range keys {
 		info[k] = s.getSetting(k)

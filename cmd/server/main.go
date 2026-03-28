@@ -111,6 +111,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)
 			r.Post("/auth/change-password", authSvc.ChangePassword)
+			r.Post("/invites/send",         authSvc.SendUserInvite)
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)

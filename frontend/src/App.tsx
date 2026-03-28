@@ -30,6 +30,7 @@ import InvitePage          from './pages/InvitePage'
 import AlbumsPage          from './pages/AlbumsPage'
 import AlbumPage           from './pages/AlbumPage'
 import MessagesPage        from './pages/MessagesPage'
+import InviteFriendPage   from './pages/InviteFriendPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -98,6 +99,7 @@ function AppRoutes() {
         <Route path="/albums/:id"              element={<AlbumPage />} />
         <Route path="/messages"                element={<MessagesPage />} />
         <Route path="/messages/:convId"        element={<MessagesPage />} />
+        <Route path="/invite-friend"           element={<InviteFriendPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -129,6 +129,14 @@ export default function AdminPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.federation_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
             </button>
           </div>
+          <div className="flex items-center justify-between py-2">
+            <div><p className="font-medium text-sm">Allow users to invite friends</p>
+              <p className="text-xs text-agora-400">Users can send email invitations to friends</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,user_invites_enabled:f.user_invites_enabled==='true'?'false':'true'}))}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors ${settingsForm.user_invites_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.user_invites_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
           <hr className="border-agora-100 dark:border-agora-700"/>
           <h3 className="font-semibold text-sm">SMTP (email)</h3>
           {([{k:'smtp_host',label:'Host',type:'text'},{k:'smtp_port',label:'Port',type:'number'},{k:'smtp_user',label:'Username',type:'text'},{k:'smtp_password',label:'Password',type:'password'},{k:'smtp_from',label:'From address',type:'email'}] as {k:string,label:string,type:string}[]).map(({k,label,type})=>(

@@ -213,8 +213,8 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageParams(r)
 
 	var authorID string
-	var profilePrivate bool
-	s.db.QueryRow(`SELECT id, profile_private FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&authorID, &profilePrivate)
+	var profilePrivate, hideTimeline bool
+	s.db.QueryRow(`SELECT id, profile_private, hide_timeline FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&authorID, &profilePrivate, &hideTimeline)
 	if authorID == "" {
 		writeError(w, 404, "user not found")
 		return
@@ -233,10 +233,18 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		`, viewerID, authorID).Scan(&isFriend)
 	}
 
-	// Private profile gate — enforce at backend level
-	if profilePrivate && !isSelf && !isFriend {
-		writeJSON(w, 200, map[string]any{"posts": []any{}})
-		return
+	// Self always sees their own timeline regardless of any privacy setting
+	if !isSelf {
+		// Private profile: non-friends see nothing
+		if profilePrivate && !isFriend {
+			writeJSON(w, 200, map[string]any{"posts": []any{}})
+			return
+		}
+		// Hide timeline: nobody sees the profile timeline (posts still flow to feeds by visibility)
+		if hideTimeline {
+			writeJSON(w, 200, map[string]any{"posts": []any{}})
+			return
+		}
 	}
 
 	// Block gate

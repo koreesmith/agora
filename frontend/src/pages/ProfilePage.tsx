@@ -31,16 +31,19 @@ export default function ProfilePage() {
     queryFn: () => usersApi.getProfile(username!).then(r => r.data),
   })
 
+  const isSelf = me?.id === profile?.id || me?.username === username
+  const canSeeTimeline = isSelf || (!profile?.hide_timeline && (!profile?.profile_private || profile?.friend_status === 'accepted'))
+
   const { data: postsData } = useQuery({
     queryKey: ['user-posts', username],
     queryFn: () => feedApi.getUserPosts(username!).then(r => r.data),
-    enabled: !!profile && !profile.profile_private && tab === 'posts',
+    enabled: !!profile && canSeeTimeline && tab === 'posts',
   })
 
   const { data: albumsData } = useQuery({
     queryKey: ['user-albums', username],
     queryFn: () => albumsApi.listForUser(username!).then(r => r.data),
-    enabled: !!profile && !profile.profile_private && tab === 'photos',
+    enabled: !!profile && canSeeTimeline && tab === 'photos',
   })
 
   const { data: wallData, refetch: refetchWall } = useQuery({
@@ -121,9 +124,8 @@ export default function ProfilePage() {
   if (isLoading) return <div className="text-center py-12 text-agora-400">Loading…</div>
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
 
-  const isSelf = me?.id === profile.id || me?.username === username
   const status = profile.friend_status
-  const canSeeContent = !profile.profile_private || isSelf || status === 'accepted'
+  const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
 
   const albums: any[] = albumsData?.albums ?? []
   const posts: any[]  = postsData?.posts ?? []
@@ -266,8 +268,16 @@ export default function ProfilePage() {
       {!canSeeContent ? (
         <div className="card p-8 text-center text-agora-400">
           <Lock size={32} className="mx-auto mb-2" />
-          <p className="font-medium">This profile is private</p>
-          <p className="text-sm mt-1">Add {profile.display_name} as a friend to see their posts.</p>
+          {profile.hide_timeline
+            ? <>
+                <p className="font-medium">Timeline hidden</p>
+                <p className="text-sm mt-1">{profile.display_name} has hidden their post timeline.</p>
+              </>
+            : <>
+                <p className="font-medium">This profile is private</p>
+                <p className="text-sm mt-1">Add {profile.display_name} as a friend to see their posts.</p>
+              </>
+          }
         </div>
       ) : tab === 'posts' ? (
         <div className="space-y-4">

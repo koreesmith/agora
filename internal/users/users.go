@@ -69,6 +69,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		Location       string  `json:"location"`
 		Website        string  `json:"website"`
 		ProfilePrivate bool    `json:"profile_private"`
+		HideTimeline   bool    `json:"hide_timeline"`
 		IsRemote       bool    `json:"is_remote"`
 		RemoteInstance string  `json:"remote_instance,omitempty"`
 		CreatedAt      string  `json:"created_at"`
@@ -80,12 +81,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
-		       location, website, profile_private, is_remote, remote_instance,
+		       location, website, profile_private, hide_timeline, is_remote, remote_instance,
 		       created_at
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
-		&u.Location, &u.Website, &u.ProfilePrivate, &u.IsRemote, &u.RemoteInstance,
+		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance,
 		&u.CreatedAt,
 	)
 	if err != nil {
@@ -170,6 +171,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		Location             *string `json:"location"`
 		Website              *string `json:"website"`
 		ProfilePrivate       *bool   `json:"profile_private"`
+		HideTimeline         *bool   `json:"hide_timeline"`
 		CoverPosition        *string `json:"cover_position"`
 		WallApprovalRequired *bool   `json:"wall_approval_required"`
 		DmPrivacy            *string `json:"dm_privacy"`
@@ -201,6 +203,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ProfilePrivate != nil {
 		sets = append(sets, fmt.Sprintf("profile_private = $%d", i)); args = append(args, *req.ProfilePrivate); i++
+	}
+	if req.HideTimeline != nil {
+		sets = append(sets, fmt.Sprintf("hide_timeline = $%d", i)); args = append(args, *req.HideTimeline); i++
 	}
 	if req.CoverPosition != nil {
 		sets = append(sets, fmt.Sprintf("cover_position = $%d", i)); args = append(args, *req.CoverPosition); i++

@@ -58,6 +58,15 @@ export default function SettingsPage() {
     onError: fail,
   })
 
+  const toggleHideTimeline = useMutation({
+    mutationFn: () => {
+      const newVal = !(user as any)?.hide_timeline
+      return usersApi.updateProfile({ hide_timeline: newVal } as any).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ hide_timeline: newVal } as any); ok('Timeline setting updated') },
+    onError: fail,
+  })
+
   const toggleWallApproval = useMutation({
     mutationFn: () => {
       const newVal = !user?.wall_approval_required
@@ -210,11 +219,21 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Private profile</p>
-              <p className="text-xs text-agora-400">Only friends can see your posts and full profile</p>
+              <p className="text-xs text-agora-400">Only friends can see your profile page and timeline</p>
             </div>
             <button onClick={() => togglePrivacy.mutate()}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.profile_private ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.profile_private ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
+            <div>
+              <p className="font-medium text-sm">Hide timeline from profile</p>
+              <p className="text-xs text-agora-400">Nobody can browse your post history on your profile — your posts still appear in friends' feeds normally</p>
+            </div>
+            <button onClick={() => toggleHideTimeline.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${(user as any)?.hide_timeline ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${(user as any)?.hide_timeline ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
           <div className="flex items-center justify-between py-2">

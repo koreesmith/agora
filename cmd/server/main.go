@@ -100,6 +100,15 @@ func main() {
 
 	// ── API routes ────────────────────────────────────────────────────────
 	r.Route("/api", func(r chi.Router) {
+		// Prevent browsers from caching API responses — critical for multi-user
+		// scenarios where the same browser switches between accounts
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+				w.Header().Set("Pragma", "no-cache")
+				next.ServeHTTP(w, r)
+			})
+		})
 		// Public (includes /setup, /instance, and /auth/*)
 		auth.RegisterPublicRoutes(r, authSvc)
 		auth.RegisterInstanceRoute(r, authSvc)

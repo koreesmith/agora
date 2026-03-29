@@ -171,10 +171,10 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
 	go s.maybeEmailNotif(userID, actorID, notifType, postID)
-	go s.maybePushNotif(userID, actorID, notifType, postID)
+	go s.maybePushNotif(userID, actorID, notifType, postID, data)
 }
 
-func (s *Service) maybePushNotif(userID, actorID, notifType, postID string) {
+func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData string) {
 	var pushToken string
 	s.db.QueryRow(`SELECT COALESCE(expo_push_token,'') FROM users WHERE id = $1`, userID).Scan(&pushToken)
 	if pushToken == "" { return }
@@ -192,9 +192,10 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID string) {
 	if title == "" { return }
 
 	data := map[string]string{
-		"type":     notifType,
-		"post_id":  postID,
+		"type":           notifType,
+		"post_id":        postID,
 		"actor_username": actorUsername,
+		"data":           extraData,
 	}
 
 	payload := map[string]any{

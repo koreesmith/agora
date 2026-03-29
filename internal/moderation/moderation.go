@@ -89,7 +89,8 @@ func (s *Service) notifyAdmins(reporterID, reportID, violationType string) {
 		var adminID string
 		rows.Scan(&adminID)
 		if adminID == reporterID { continue }
-		s.notif.Create(adminID, reporterID, "new_report", reportID, violationType)
+		// Pass report ID in data field; postID left empty so it doesn't route to /post/:id
+		s.notif.Create(adminID, reporterID, "new_report", "", reportID)
 	}
 }
 

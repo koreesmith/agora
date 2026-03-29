@@ -243,6 +243,8 @@ func pushNotifContent(t, actorName string) (title, body string) {
 		return "Join request", actorName + " wants to join your group"
 	case "group_join_approved":
 		return "Request approved", "Your group join request was approved"
+	case "new_report":
+		return "⚠️ New Report", "A new report has been submitted — tap to review"
 	}
 	return "", ""
 }
@@ -331,6 +333,9 @@ func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseUR
 	case "wall_post_approved":
 		return "Your wall post was approved",
 			fmt.Sprintf("Your post on someone's wall on %s was approved.\n\nSee it: %s", instanceName, postURL)
+	case "new_report":
+		return fmt.Sprintf("⚠️ New report on %s", instanceName),
+			fmt.Sprintf("A new report has been submitted on %s and needs your review.\n\nReview it: %s/admin", instanceName, baseURL)
 	}
 	return "", ""
 }

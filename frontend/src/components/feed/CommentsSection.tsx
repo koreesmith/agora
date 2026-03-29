@@ -4,10 +4,11 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Pencil, Reply, Image, X as XIcon } from 'lucide-react'
+import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
+import ReportModal from './ReportModal'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -356,6 +357,8 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const isOwn = c.author_id === currentUserId
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const [showReport, setShowReport] = useState(false)
   const canDelete = isOwn || currentUserId === postAuthorId || currentUserRole === 'admin'
   const avatarSize = depth === 0 ? 'w-8 h-8' : depth === 1 ? 'w-6 h-6' : 'w-5 h-5'
   const myReaction: string = c.my_reaction || ''
@@ -487,21 +490,37 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             </button>
           )}
 
-          {isOwn && !editing && (
-            <button
-              onClick={() => { setEditing(true); setEditContent(c.content) }}
-              className="text-xs text-agora-300 hover:text-agora-500 transition-colors"
-              title="Edit"
-            >
-              <Pencil size={12} />
+          {/* Three-dots menu */}
+          <div className="relative ml-auto">
+            <button onClick={() => setShowMenu(m => !m)}
+              className="text-xs text-agora-300 hover:text-agora-500 transition-colors p-0.5">
+              <MoreHorizontal size={13} />
             </button>
-          )}
-
-          {canDelete && (
-            <button onClick={onDelete} className="text-xs text-agora-300 hover:text-red-500 transition-colors">
-              <Trash2 size={12} />
-            </button>
-          )}
+            {showMenu && (
+              <div className="absolute right-0 top-5 z-20 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-xl shadow-xl min-w-[150px] py-1"
+                onMouseLeave={() => setShowMenu(false)}>
+                {isOwn && !editing && (
+                  <button onClick={() => { setEditing(true); setEditContent(c.content); setShowMenu(false) }}
+                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
+                    <Pencil size={13} /> Edit
+                  </button>
+                )}
+                {canDelete && (
+                  <button onClick={() => { onDelete(); setShowMenu(false) }}
+                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20">
+                    <Trash2 size={13} /> Delete
+                  </button>
+                )}
+                {!isOwn && (
+                  <button onClick={() => { setShowReport(true); setShowMenu(false) }}
+                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
+                    <Flag size={13} /> Report
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          {showReport && <ReportModal commentId={c.id} onClose={() => setShowReport(false)} />}
         </div>
 
         {showReplyBox && (

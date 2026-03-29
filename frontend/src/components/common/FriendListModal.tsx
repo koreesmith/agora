@@ -16,12 +16,12 @@ export default function FriendListModal({ friend, onClose }: Props) {
 
   const { data: listsData } = useQuery({
     queryKey: ['friend-groups'],
-    queryFn: () => friendsApi.listGroups().then(r => r.data),
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const lists: any[] = listsData?.groups || []
 
   const createList = useMutation({
-    mutationFn: (name: string) => friendsApi.createGroup(name),
+    mutationFn: (name: string) => friendsApi.createFriendList(name),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['friend-groups'] })
       // Auto-select the newly created list
@@ -44,7 +44,7 @@ export default function FriendListModal({ friend, onClose }: Props) {
     setSaving(true)
     try {
       await Promise.all([...selected].map(listID =>
-        friendsApi.addToGroup(listID, friend.id)
+        friendsApi.addToFriendList(listID, friend.id)
       ))
       qc.invalidateQueries({ queryKey: ['friend-groups'] })
     } finally {

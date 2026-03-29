@@ -11,7 +11,7 @@ export default function ListFeedPage() {
   // Get the list name
   const { data: listsData } = useQuery({
     queryKey: ['friend-groups'],
-    queryFn: () => friendsApi.listGroups().then(r => r.data),
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const list = listsData?.groups?.find((g: any) => g.id === id)
 

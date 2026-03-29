@@ -170,6 +170,21 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			    )
 			  )
 			  AND (
+			    -- Friend-list posts: only show if viewer is in that specific friend list
+			    p.visibility != 'group'
+			    OR p.author_id = $1
+			    OR (
+			      p.group_id IS NOT NULL
+			      AND EXISTS (
+			        SELECT 1 FROM friend_group_members fgm
+			        JOIN friend_groups fg ON fg.id = fgm.group_id
+			        WHERE fgm.group_id = p.group_id
+			          AND fgm.friend_id = $1
+			          AND fg.user_id = p.author_id
+			      )
+			    )
+			  )
+			  AND (
 			    p.community_group_id IS NULL
 			    OR EXISTS (
 			      SELECT 1 FROM community_group_members cgm

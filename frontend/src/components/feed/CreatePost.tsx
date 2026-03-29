@@ -25,7 +25,7 @@ export default function CreatePost() {
   const [content, setContent] = useState('')
   const [imageUrl, setImageUrl] = useState('')
   const [visibility, setVisibility] = useState('friends')
-  const [groupId, setGroupId] = useState('')
+  const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [twEnabled, setTwEnabled] = useState(false)
   const [twLabel, setTwLabel] = useState('')
@@ -45,10 +45,10 @@ export default function CreatePost() {
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const { data: groupsData } = useQuery({
-    queryKey: ['friend-groups'],
-    queryFn: () => friendsApi.listGroups().then(r => r.data),
+    queryKey: ['friend-lists'],
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
-  const groups = groupsData?.groups || []
+  const friendLists = groupsData?.groups || []
 
   // Debounced URL detection — fires 800ms after user stops typing
   useEffect(() => {
@@ -113,7 +113,7 @@ export default function CreatePost() {
       content,
       image_url: imageUrl,
       visibility,
-      group_id: visibility === 'group' ? groupId : undefined,
+      group_id: visibility === 'group' ? friendListId : undefined,
       content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
       link_url: preview ? preview.url : '',
       link_title: preview ? preview.title : '',
@@ -126,7 +126,7 @@ export default function CreatePost() {
       poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
     }),
     onSuccess: () => {
-      setContent(''); setImageUrl(''); setGroupId('')
+      setContent(''); setImageUrl(''); setFriendListId('')
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
@@ -376,11 +376,11 @@ export default function CreatePost() {
 
         {/* Friend list picker */}
         {visibility === 'group' && (
-          groups.length > 0
-            ? <select value={groupId} onChange={e => setGroupId(e.target.value)}
+          friendLists.length > 0
+            ? <select value={friendListId} onChange={e => setFriendListId(e.target.value)}
                 className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
                 <option value="">Select list…</option>
-                {groups.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                {friendLists.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
             : <span className="text-xs text-agora-400">No lists yet — <Link to="/friends" className="underline">create one</Link></span>
         )}

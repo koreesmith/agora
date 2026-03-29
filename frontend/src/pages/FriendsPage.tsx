@@ -16,7 +16,7 @@ export default function FriendsPage() {
 
   const { data: friendsData } = useQuery({ queryKey: ['friends'],       queryFn: () => friendsApi.listFriends().then(r => r.data) })
   const { data: reqData }     = useQuery({ queryKey: ['requests'],      queryFn: () => friendsApi.listRequests().then(r => r.data) })
-  const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listGroups().then(r => r.data) })
+  const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listFriendLists().then(r => r.data) })
 
   const accept   = useMutation({
     mutationFn: (friend: any) => friendsApi.acceptRequest(friend.id),
@@ -28,19 +28,19 @@ export default function FriendsPage() {
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: () => inv('requests') })
   const unfriend = useMutation({ mutationFn: (id: string) => friendsApi.unfriend(id),       onSuccess: () => inv('friends') })
   const createList = useMutation({
-    mutationFn: (name: string) => friendsApi.createGroup(name),
+    mutationFn: (name: string) => friendsApi.createFriendList(name),
     onSuccess: () => { inv('friend-groups'); setNewListName('') },
   })
   const deleteList = useMutation({
-    mutationFn: (id: string) => friendsApi.deleteGroup(id),
+    mutationFn: (id: string) => friendsApi.deleteFriendList(id),
     onSuccess: () => { inv('friend-groups'); setExpandedList(null) },
   })
   const addToList = useMutation({
-    mutationFn: ({ listID, friendID }: { listID: string, friendID: string }) => friendsApi.addToGroup(listID, friendID),
+    mutationFn: ({ listID, friendID }: { listID: string, friendID: string }) => friendsApi.addToFriendList(listID, friendID),
     onSuccess: (_,  { listID }) => qc.invalidateQueries({ queryKey: ['list-members', listID] }),
   })
   const removeFromList = useMutation({
-    mutationFn: ({ listID, friendID }: { listID: string, friendID: string }) => friendsApi.removeFromGroup(listID, friendID),
+    mutationFn: ({ listID, friendID }: { listID: string, friendID: string }) => friendsApi.removeFromFriendList(listID, friendID),
     onSuccess: (_, { listID }) => qc.invalidateQueries({ queryKey: ['list-members', listID] }),
   })
 
@@ -194,7 +194,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
 }) {
   const { data } = useQuery({
     queryKey: ['list-members', list.id],
-    queryFn: () => friendsApi.listGroupMembers(list.id).then(r => r.data),
+    queryFn: () => friendsApi.listFriendListMembers(list.id).then(r => r.data),
     enabled: expanded,
   })
   const members: any[] = data?.members || []

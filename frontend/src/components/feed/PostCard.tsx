@@ -308,8 +308,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [editTwLabel, setEditTwLabel] = useState(post.content_warning || '')
 
   const { data: groupsData } = useQuery({
-    queryKey: ['friend-groups'],
-    queryFn: () => friendsApi.listGroups().then(r => r.data),
+    queryKey: ['friend-lists'],
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
     enabled: editing && !post.group_id,
   })
   const friendLists: any[] = groupsData?.groups || []

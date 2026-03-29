@@ -101,14 +101,20 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT r.id, r.violation_type, r.details, r.status, r.created_at, r.review_notes,
 		       reporter.username AS reporter_username,
-		       ru.username AS reported_user_username,
-		       ru.is_suspended, ru.banned_at,
+		       COALESCE(ru.username, pa.username) AS reported_user_username,
+		       COALESCE(ru.id, pa.id)             AS reported_user_id,
+		       COALESCE(ru.is_suspended, pa.is_suspended, false) AS is_suspended,
+		       COALESCE(ru.banned_at, pa.banned_at) AS banned_at,
+		       COALESCE(ru.is_remote, pa.is_remote, false) AS is_remote,
+		       COALESCE(ru.remote_instance, pa.remote_instance, '') AS remote_instance,
 		       r.reported_post_id, r.reported_comment_id,
 		       r.rule_id, ir.text AS rule_text,
 		       r.reviewed_by, reviewer.username AS reviewer_username, r.reviewed_at
 		FROM reports r
 		JOIN users reporter ON reporter.id = r.reporter_id
 		LEFT JOIN users ru  ON ru.id = r.reported_user_id
+		LEFT JOIN posts p   ON p.id = COALESCE(r.reported_post_id, r.reported_comment_id)
+		LEFT JOIN users pa  ON pa.id = p.author_id AND ru.id IS NULL
 		LEFT JOIN instance_rules ir ON ir.id = r.rule_id
 		LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by
 		WHERE r.status = $1
@@ -127,8 +133,11 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		ReviewNotes          string  `json:"review_notes"`
 		ReporterUsername     string  `json:"reporter_username"`
 		ReportedUserUsername *string `json:"reported_user_username"`
+		ReportedUserID       *string `json:"reported_user_id"`
 		IsSuspended          bool    `json:"is_suspended"`
 		IsBanned             bool    `json:"is_banned"`
+		IsRemote             bool    `json:"is_remote"`
+		RemoteInstance       string  `json:"remote_instance"`
 		ReportedPostID       *string `json:"reported_post_id"`
 		ReportedCommentID    *string `json:"reported_comment_id"`
 		RuleID               *string `json:"rule_id"`
@@ -143,7 +152,8 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		var rp Report
 		var bannedAt *string
 		rows.Scan(&rp.ID, &rp.ViolationType, &rp.Details, &rp.Status, &rp.CreatedAt, &rp.ReviewNotes,
-			&rp.ReporterUsername, &rp.ReportedUserUsername, &rp.IsSuspended, &bannedAt,
+			&rp.ReporterUsername, &rp.ReportedUserUsername, &rp.ReportedUserID, &rp.IsSuspended, &bannedAt,
+			&rp.IsRemote, &rp.RemoteInstance,
 			&rp.ReportedPostID, &rp.ReportedCommentID,
 			&rp.RuleID, &rp.RuleText,
 			&rp.ReviewedBy, &rp.ReviewerUsername, &rp.ReviewedAt)

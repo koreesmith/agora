@@ -204,87 +204,115 @@ export default function AdminPage() {
             const bf = banForm[r.reported_user_username] || {reason:'',notes:''}
             return (
               <div key={r.id} className="card p-4 space-y-3">
-                <div className="flex items-start justify-between gap-2 flex-wrap">
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-bold uppercase tracking-wide text-red-500 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">
-                        {r.violation_type?.replace(/_/g,' ') || r.reason}
-                      </span>
-                      {r.rule_text && <span className="text-xs text-agora-400 italic">Rule: {r.rule_text}</span>}
-                    </div>
-                    <p className="text-xs text-agora-400">
-                      by @{r.reporter_username}
-                      {r.reported_user_username && ` against @${r.reported_user_username}`}
-                      {r.reported_post_id && ' (post)'}
-                      {r.reported_comment_id && ' (comment)'}
-                      {' · '}{new Date(r.created_at).toLocaleDateString()}
-                    </p>
-                    {r.details && <p className="text-sm text-agora-600 dark:text-agora-300 mt-1">{r.details}</p>}
-                    {r.is_suspended && <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">⚠️ Suspended</span>}
-                    {r.is_banned && <span className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full ml-1">🚫 Banned</span>}
+                {/* Report header */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold uppercase tracking-wide text-red-500 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">
+                      {r.violation_type?.replace(/_/g,' ') || r.reason}
+                    </span>
+                    {r.rule_text && <span className="text-xs text-agora-400 italic">Rule: {r.rule_text}</span>}
+                    {r.is_suspended && <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">⚠️ Already suspended</span>}
+                    {r.is_banned && <span className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">🚫 Already banned</span>}
                   </div>
-                  {reportStatus === 'pending' && (
-                    <div className="flex gap-2 flex-shrink-0">
-                      <input
-                        className="input text-xs py-1 px-2 w-40"
-                        placeholder="Review notes…"
-                        autoComplete="off"
-                        value={reportNotes[r.id] || ''}
-                        onChange={e => setReportNotes(n => ({...n, [r.id]: e.target.value}))}
-                      />
-                      <button onClick={()=>reviewRep.mutate({id:r.id,action:'actioned',notes:reportNotes[r.id]})} className="btn-primary text-xs py-1 px-2">Action</button>
-                      <button onClick={()=>reviewRep.mutate({id:r.id,action:'dismissed',notes:reportNotes[r.id]})} className="btn-secondary text-xs py-1 px-2">Dismiss</button>
-                    </div>
-                  )}
+                  <p className="text-xs text-agora-400">
+                    by @{r.reporter_username}
+                    {r.reported_user_username && ` against @${r.reported_user_username}`}
+                    {r.reported_post_id && ' (post)'}
+                    {r.reported_comment_id && ' (comment)'}
+                    {' · '}{new Date(r.created_at).toLocaleDateString()}
+                  </p>
+                  {r.details && <p className="text-sm text-agora-600 dark:text-agora-300">{r.details}</p>}
                 </div>
 
-                {/* Suspend / Ban actions on pending reports with a reported user */}
-                {reportStatus === 'pending' && r.reported_user_username && !r.is_banned && (
-                  <div className="border-t border-agora-100 dark:border-agora-700 pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {/* Suspend */}
-                    <div className="space-y-1.5">
-                      <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Suspend @{r.reported_user_username}</p>
-                      <div className="flex gap-1.5">
-                        <input className="input text-xs py-1 px-2 flex-1" autoComplete="off" placeholder="Reason"
-                          value={sf.reason}
-                          onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,reason:e.target.value}}))} />
-                        <input className="input text-xs py-1 px-2 w-16" autoComplete="off" placeholder="Days" type="number" min="0"
-                          value={sf.days}
-                          onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,days:e.target.value}}))} />
-                      </div>
-                      <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private)"
-                        value={sf.notes}
-                        onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,notes:e.target.value}}))} />
-                      <button
-                        onClick={() => suspendUser.mutate({id: r.reported_user_id || '', data: {
-                          reason: sf.reason, notes: sf.notes, days: parseInt(sf.days)||0
-                        }})}
-                        disabled={!sf.reason || suspendUser.isPending}
-                        className="btn-secondary text-xs py-1 px-3 text-amber-600 border-amber-300 hover:bg-amber-50"
-                      >⏸ Suspend {sf.days && sf.days!=='0' ? `for ${sf.days}d` : 'indefinitely'}</button>
-                    </div>
+                {/* Actions — only shown on pending reports */}
+                {reportStatus === 'pending' && (
+                  <div className="border-t border-agora-100 dark:border-agora-700 pt-3 space-y-3">
 
-                    {/* Ban */}
-                    <div className="space-y-1.5">
-                      <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Ban @{r.reported_user_username}</p>
-                      <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Reason"
-                        value={bf.reason}
-                        onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,reason:e.target.value}}))} />
-                      <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private)"
-                        value={bf.notes}
-                        onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,notes:e.target.value}}))} />
-                      {r.is_remote && r.remote_instance && (
-                        <label className="flex items-center gap-2 text-xs text-agora-500 cursor-pointer">
-                          <input type="checkbox" id={`instban-${r.id}`} className="rounded" />
-                          Also ban instance ({r.remote_instance})
-                        </label>
-                      )}
-                      <button
-                        onClick={() => banUser.mutate({id: r.reported_user_id || '', data: {reason: bf.reason, notes: bf.notes}})}
-                        disabled={!bf.reason || banUser.isPending}
-                        className="btn-danger text-xs py-1 px-3"
-                      >🚫 Ban user</button>
+                    {/* No reported user — just dismiss or mark actioned with notes */}
+                    {!r.reported_user_username && (
+                      <div className="flex items-center gap-2">
+                        <input className="input text-xs py-1 px-2 flex-1" autoComplete="off" placeholder="Notes (optional)"
+                          value={reportNotes[r.id] || ''}
+                          onChange={e => setReportNotes(n => ({...n, [r.id]: e.target.value}))} />
+                        <button onClick={() => reviewRep.mutate({id:r.id, action:'actioned', notes:reportNotes[r.id]})}
+                          className="btn-primary text-xs py-1 px-3">Mark actioned</button>
+                        <button onClick={() => reviewRep.mutate({id:r.id, action:'dismissed', notes:reportNotes[r.id]})}
+                          className="btn-secondary text-xs py-1 px-3">Dismiss</button>
+                      </div>
+                    )}
+
+                    {/* Reported user — suspend or ban are the primary actions */}
+                    {r.reported_user_username && !r.is_banned && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Suspend */}
+                        {!r.is_suspended && (
+                          <div className="space-y-1.5 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800">
+                            <p className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">⏸ Suspend @{r.reported_user_username}</p>
+                            <div className="flex gap-1.5">
+                              <input className="input text-xs py-1 px-2 flex-1" autoComplete="off" placeholder="Reason shown to user"
+                                value={sf.reason}
+                                onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,reason:e.target.value}}))} />
+                              <input className="input text-xs py-1 px-2 w-16" autoComplete="off" placeholder="Days" type="number" min="0"
+                                value={sf.days}
+                                onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,days:e.target.value}}))} />
+                            </div>
+                            <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private, not shown to user)"
+                              value={sf.notes}
+                              onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,notes:e.target.value}}))} />
+                            <button disabled={!sf.reason || suspendUser.isPending}
+                              onClick={() => suspendUser.mutate({id: r.reported_user_id, data: {
+                                reason: sf.reason, notes: sf.notes, days: parseInt(sf.days)||0
+                              }})}
+                              className="w-full text-xs py-1.5 px-3 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-semibold disabled:opacity-40 transition-colors">
+                              Suspend {sf.days && sf.days!=='0' ? `for ${sf.days} day${sf.days==='1'?'':'s'}` : 'indefinitely'}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Ban */}
+                        <div className="space-y-1.5 p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800">
+                          <p className="text-xs font-bold text-red-700 dark:text-red-400 uppercase tracking-wide">🚫 Ban @{r.reported_user_username}</p>
+                          <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Reason shown to user"
+                            value={bf.reason}
+                            onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,reason:e.target.value}}))} />
+                          <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private)"
+                            value={bf.notes}
+                            onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,notes:e.target.value}}))} />
+                          {r.is_remote && r.remote_instance && (
+                            <label className="flex items-center gap-2 text-xs text-red-600 cursor-pointer">
+                              <input type="checkbox" className="rounded" />
+                              Also ban instance ({r.remote_instance})
+                            </label>
+                          )}
+                          <button disabled={!bf.reason || banUser.isPending}
+                            onClick={() => { if (confirm(`Permanently ban @${r.reported_user_username}?`)) banUser.mutate({id: r.reported_user_id, data: {reason: bf.reason, notes: bf.notes}}) }}
+                            className="w-full text-xs py-1.5 px-3 rounded-lg bg-red-500 hover:bg-red-600 text-white font-semibold disabled:opacity-40 transition-colors">
+                            Permanently ban
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Dismiss without action */}
+                    <div className="flex items-center gap-2 pt-1 border-t border-agora-100 dark:border-agora-700">
+                      <p className="text-xs text-agora-400 flex-1">No action needed?</p>
+                      <input className="input text-xs py-1 px-2 w-48" autoComplete="off" placeholder="Dismissal notes (optional)"
+                        value={reportNotes[r.id] || ''}
+                        onChange={e => setReportNotes(n => ({...n, [r.id]: e.target.value}))} />
+                      <button onClick={() => reviewRep.mutate({id:r.id, action:'dismissed', notes:reportNotes[r.id]})}
+                        className="btn-secondary text-xs py-1 px-3 flex-shrink-0">Dismiss report</button>
                     </div>
+                  </div>
+                )}
+
+                {/* Reviewed report — show what was done */}
+                {reportStatus !== 'pending' && r.review_notes && (
+                  <div className="border-t border-agora-100 dark:border-agora-700 pt-2">
+                    <p className="text-xs text-agora-400">
+                      {r.reviewer_username && `Reviewed by @${r.reviewer_username}`}
+                      {r.reviewed_at && ` · ${new Date(r.reviewed_at).toLocaleDateString()}`}
+                    </p>
+                    {r.review_notes && <p className="text-xs text-agora-500 mt-0.5">{r.review_notes}</p>}
                   </div>
                 )}
               </div>

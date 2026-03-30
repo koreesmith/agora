@@ -9,7 +9,8 @@ import SetupPage          from './pages/SetupPage'
 import LandingPage        from './pages/LandingPage'
 import LoginPage          from './pages/LoginPage'
 import RegisterPage       from './pages/RegisterPage'
-import VerifyEmailPage    from './pages/VerifyEmailPage'
+import VerifyEmailPage       from './pages/VerifyEmailPage'
+import VerifyEmailChangePage from './pages/VerifyEmailChangePage'
 import ResetPasswordPage  from './pages/ResetPasswordPage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
 import PrivacyPage        from './pages/PrivacyPage'
@@ -76,7 +77,8 @@ function AppRoutes() {
       <Route path="/"               element={<GuestOnly><LandingPage /></GuestOnly>} />
       <Route path="/login"          element={<GuestOnly><LoginPage /></GuestOnly>} />
       <Route path="/register"       element={<GuestOnly><RegisterPage /></GuestOnly>} />
-      <Route path="/verify-email"   element={<VerifyEmailPage />} />
+      <Route path="/verify-email"        element={<VerifyEmailPage />} />
+      <Route path="/verify-email-change" element={<VerifyEmailChangePage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/change-password" element={<RequireAuth><ChangePasswordPage /></RequireAuth>} />
       <Route path="/privacy"        element={<PrivacyPage />} />

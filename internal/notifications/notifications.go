@@ -470,6 +470,33 @@ The %s team
 	s.email.SendHTML(email, subject, plain, html, "") // no unsubscribe — transactional
 }
 
+func (s *Service) SendEmailChangeVerification(_, newEmail, displayName, token string) {
+	if !s.email.enabled() { return }
+	instanceName := s.email.instanceName()
+	domain := s.email.instanceDomain()
+	baseURL := s.email.instanceBaseURL()
+	link := fmt.Sprintf("%s/verify-email-change?token=%s", baseURL, token)
+
+	subject := fmt.Sprintf("Confirm your new email address for %s", instanceName)
+
+	plain := fmt.Sprintf(`Hi %s,
+
+We received a request to change your email address on %s (%s).
+
+Confirm your new email address here:
+%s
+
+This link expires in 24 hours.
+
+If you did not request this change, you can safely ignore this email — your email address will not be changed.
+
+The %s team
+%s
+`, displayName, instanceName, domain, link, instanceName, domain)
+
+	s.email.SendHTML(newEmail, subject, plain, plain, "") // no unsubscribe — transactional
+}
+
 func (s *Service) SendUserInvite(toEmail, inviterName, inviterUsername string) {
 	if !s.email.enabled() { return }
 	instanceName := s.email.instanceName()

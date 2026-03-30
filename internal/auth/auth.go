@@ -520,6 +520,65 @@ func (s *Service) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "password changed"})
 }
 
+// RequestEmailChange initiates an email address change. Sends a verification
+// link to the new address; the change is not applied until the link is clicked.
+func (s *Service) RequestEmailChange(w http.ResponseWriter, r *http.Request) {
+	userID := UserIDFromCtx(r.Context())
+	var req struct {
+		NewEmail        string `json:"new_email"`
+		CurrentPassword string `json:"current_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json"); return
+	}
+	req.NewEmail = strings.ToLower(strings.TrimSpace(req.NewEmail))
+	if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
+		writeError(w, 400, "valid email required"); return
+	}
+
+	var currentHash, displayName, currentEmail string
+	s.db.QueryRow(`SELECT password_hash, display_name, email FROM users WHERE id = $1`, userID).
+		Scan(&currentHash, &displayName, &currentEmail)
+
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
+		writeError(w, 401, "current password is incorrect"); return
+	}
+	if req.NewEmail == currentEmail {
+		writeError(w, 400, "new email is the same as your current email"); return
+	}
+
+	// Ensure the new email isn't already taken
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE LOWER(email) = $1 OR LOWER(pending_email) = $1`, req.NewEmail).Scan(&count)
+	if count > 0 {
+		writeError(w, 409, "that email address is already in use"); return
+	}
+
+	token, _ := randomHex(32)
+	expires := time.Now().Add(24 * time.Hour)
+	s.db.Exec(`UPDATE users SET pending_email = $1, email_change_token = $2, email_change_expires = $3 WHERE id = $4`,
+		req.NewEmail, token, expires, userID)
+
+	go s.notifSvc.SendEmailChangeVerification(userID, req.NewEmail, displayName, token)
+
+	writeJSON(w, 200, map[string]string{"message": "verification email sent to new address"})
+}
+
+// VerifyEmailChange completes the email change when the user clicks the link.
+func (s *Service) VerifyEmailChange(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" { writeError(w, 400, "missing token"); return }
+
+	res, err := s.db.Exec(`
+		UPDATE users SET email = pending_email, pending_email = '', email_change_token = '', email_change_expires = NULL
+		WHERE email_change_token = $1 AND email_change_expires > NOW() AND pending_email != ''
+	`, token)
+	if err != nil { writeError(w, 500, "server error"); return }
+	n, _ := res.RowsAffected()
+	if n == 0 { writeError(w, 400, "invalid or expired email change token"); return }
+	writeJSON(w, 200, map[string]string{"message": "email address updated"})
+}
+
 // ── JWT ───────────────────────────────────────────────────────────────────────
 
 type claims struct {

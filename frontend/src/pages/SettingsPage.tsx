@@ -12,6 +12,7 @@ export default function SettingsPage() {
 
   const [profile, setProfile] = useState({ display_name: user?.display_name||'', pronouns: user?.pronouns||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
   const [passwords, setPasswords] = useState({ current_password:'', new_password:'' })
+  const [emailChange, setEmailChange] = useState({ new_email:'', current_password:'' })
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
 
@@ -46,6 +47,12 @@ export default function SettingsPage() {
   const savePassword = useMutation({
     mutationFn: () => authApi.changePassword(passwords),
     onSuccess: () => { setPasswords({ current_password:'', new_password:'' }); ok('Password changed') },
+    onError: fail,
+  })
+
+  const changeEmail = useMutation({
+    mutationFn: () => authApi.requestEmailChange(emailChange),
+    onSuccess: () => { setEmailChange({ new_email:'', current_password:'' }); ok('Verification email sent — check your new inbox to confirm the change') },
     onError: fail,
   })
 
@@ -205,11 +212,24 @@ export default function SettingsPage() {
       )}
 
       {tab === 'account' && (
+        <div className="space-y-4">
+        <div className="card p-4 space-y-4">
+          <h3 className="font-semibold">Change email address</h3>
+          <div>
+            <label className="label">Current email</label>
+            <input className="input bg-agora-50 dark:bg-agora-800" readOnly value={user?.email || ''} />
+          </div>
+          <div><label className="label">New email address</label><input type="email" className="input" autoComplete="email" value={emailChange.new_email} onChange={e=>setEmailChange(p=>({...p,new_email:e.target.value}))} /></div>
+          <div><label className="label">Current password</label><input type="password" className="input" autoComplete="current-password" value={emailChange.current_password} onChange={e=>setEmailChange(p=>({...p,current_password:e.target.value}))} /></div>
+          <p className="text-xs text-agora-400">A verification link will be sent to your new address. Your email won't change until you click the link.</p>
+          <button onClick={() => changeEmail.mutate()} disabled={changeEmail.isPending || !emailChange.new_email || !emailChange.current_password} className="btn-primary">{changeEmail.isPending?'Sending…':'Send verification email'}</button>
+        </div>
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Change password</h3>
           <div><label className="label">Current password</label><input type="password" className="input" autoComplete="current-password" value={passwords.current_password} onChange={e=>setPasswords(p=>({...p,current_password:e.target.value}))} /></div>
           <div><label className="label">New password</label><input type="password" className="input" autoComplete="new-password" value={passwords.new_password} onChange={e=>setPasswords(p=>({...p,new_password:e.target.value}))} /></div>
           <button onClick={() => savePassword.mutate()} disabled={savePassword.isPending} className="btn-primary">{savePassword.isPending?'Saving…':'Change password'}</button>
+        </div>
         </div>
       )}
 

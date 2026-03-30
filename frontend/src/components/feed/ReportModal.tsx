@@ -141,6 +141,20 @@ export default function ReportModal({ postId, commentId, userId, onClose }: Prop
                   )}
                 </p>
               </div>
+              {/* Optional rule picker for non-rule_violation types */}
+              {violationType !== 'rule_violation' && rules.length > 0 && (
+                <div>
+                  <label className="label">Server rule violated <span className="text-agora-400 font-normal">(optional)</span></label>
+                  <select className="input w-full text-sm"
+                    value={selectedRuleId}
+                    onChange={e => setSelectedRuleId(e.target.value)}>
+                    <option value="">None / not applicable</option>
+                    {rules.map((rule: any, i: number) => (
+                      <option key={rule.id} value={rule.id}>Rule {i + 1}: {rule.text}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div>
                 <label className="label">Additional details <span className="text-agora-400 font-normal">(optional)</span></label>
                 <textarea className="input w-full resize-none text-sm" rows={3} autoComplete="off"

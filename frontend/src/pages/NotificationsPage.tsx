@@ -79,7 +79,7 @@ function notifTarget(n: any): string | null {
     case 'group_invite_accepted':
       return n.data ? `/groups/${n.data}` : '/groups'
     case 'new_report':
-      return '/admin'
+      return '/admin?tab=reports'
     default:
       return null
   }

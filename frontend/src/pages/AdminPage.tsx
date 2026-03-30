@@ -1,10 +1,14 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi } from '../api'
 import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X } from 'lucide-react'
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'>('overview')
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'>(
+    (searchParams.get('tab') as any) || 'overview'
+  )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
   const [reportStatus, setReportStatus] = useState('pending')
@@ -221,7 +225,13 @@ export default function AdminPage() {
                     {r.reported_comment_id && ' (comment)'}
                     {' · '}{new Date(r.created_at).toLocaleDateString()}
                   </p>
-                  {r.details && <p className="text-sm text-agora-600 dark:text-agora-300">{r.details}</p>}
+                  {r.post_content && (
+                    <div className="p-2 bg-agora-50 dark:bg-agora-700/50 rounded border-l-2 border-agora-300 dark:border-agora-500">
+                      <p className="text-xs text-agora-400 font-medium mb-0.5">{r.reported_comment_id ? 'Comment' : 'Post'} content</p>
+                      <p className="text-sm text-agora-700 dark:text-agora-200 line-clamp-3">{r.post_content}</p>
+                    </div>
+                  )}
+                  {r.details && <p className="text-sm text-agora-600 dark:text-agora-300"><span className="text-xs font-medium text-agora-400">Reporter note: </span>{r.details}</p>}
                 </div>
 
                 {/* Actions — only shown on pending reports */}

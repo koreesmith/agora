@@ -108,6 +108,7 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(ru.is_remote, pa.is_remote, false) AS is_remote,
 		       COALESCE(ru.remote_instance, pa.remote_instance, '') AS remote_instance,
 		       r.reported_post_id, r.reported_comment_id,
+		       p.content AS post_content,
 		       r.rule_id, ir.text AS rule_text,
 		       r.reviewed_by, reviewer.username AS reviewer_username, r.reviewed_at
 		FROM reports r
@@ -140,6 +141,7 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		RemoteInstance       string  `json:"remote_instance"`
 		ReportedPostID       *string `json:"reported_post_id"`
 		ReportedCommentID    *string `json:"reported_comment_id"`
+		PostContent          *string `json:"post_content"`
 		RuleID               *string `json:"rule_id"`
 		RuleText             *string `json:"rule_text"`
 		ReviewedBy           *string `json:"reviewed_by"`
@@ -154,7 +156,7 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&rp.ID, &rp.ViolationType, &rp.Details, &rp.Status, &rp.CreatedAt, &rp.ReviewNotes,
 			&rp.ReporterUsername, &rp.ReportedUserUsername, &rp.ReportedUserID, &rp.IsSuspended, &bannedAt,
 			&rp.IsRemote, &rp.RemoteInstance,
-			&rp.ReportedPostID, &rp.ReportedCommentID,
+			&rp.ReportedPostID, &rp.ReportedCommentID, &rp.PostContent,
 			&rp.RuleID, &rp.RuleText,
 			&rp.ReviewedBy, &rp.ReviewerUsername, &rp.ReviewedAt)
 		rp.IsBanned = bannedAt != nil

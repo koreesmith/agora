@@ -476,4 +476,22 @@ var schema = []string{
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_multiple_choice BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_allows_new_options BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS hide_timeline BOOLEAN NOT NULL DEFAULT FALSE`,
+	// AGORA-74: Enhanced moderation
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_expires_at TIMESTAMPTZ`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_notes TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at TIMESTAMPTZ`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_notes TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS violation_type VARCHAR(50) NOT NULL DEFAULT ''`,
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS rule_id UUID REFERENCES instance_rules(id) ON DELETE SET NULL`,
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_comment_id UUID REFERENCES posts(id) ON DELETE CASCADE`,
+	`CREATE TABLE IF NOT EXISTS instance_bans (
+		id           UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		instance     TEXT        NOT NULL UNIQUE,
+		reason       TEXT        NOT NULL DEFAULT '',
+		notes        TEXT        NOT NULL DEFAULT '',
+		banned_by    UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`ALTER TABLE reports ALTER COLUMN reason SET DEFAULT ''`,
 }

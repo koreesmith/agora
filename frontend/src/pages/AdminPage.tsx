@@ -1,31 +1,47 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X } from 'lucide-react'
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'federation'|'invites'|'rules'|'waitlist'>('overview')
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'>(
+    (searchParams.get('tab') as any) || 'overview'
+  )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
+  const [reportStatus, setReportStatus] = useState('pending')
+  const [reportNotes, setReportNotes] = useState<Record<string,string>>({})
+  const [suspendForm, setSuspendForm] = useState<Record<string, {days:string, reason:string, notes:string}>>({})
+  const [banForm, setBanForm] = useState<Record<string, {reason:string, notes:string}>>({})
+  const [instanceBanForm, setInstanceBanForm] = useState({ instance:'', reason:'', notes:'' })
   const qc = useQueryClient()
   const ok = (m:string) => { setMsg(m); setTimeout(()=>setMsg(''), 3000) }
 
   const { data: stats }    = useQuery({ queryKey:['admin-stats'],    queryFn: ()=>adminApi.getStats().then(r=>r.data),    enabled: tab==='overview' })
   const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' })
   const { data: usersData }= useQuery({ queryKey:['admin-users'],    queryFn: ()=>adminApi.listUsers().then(r=>r.data),   enabled: tab==='users' })
-  const { data: repsData } = useQuery({ queryKey:['admin-reports'],  queryFn: ()=>moderationApi.listReports('pending').then(r=>r.data), enabled: tab==='reports' })
+  const { data: repsData } = useQuery({ queryKey:['admin-reports', reportStatus], queryFn: ()=>moderationApi.listReports(reportStatus).then(r=>r.data), enabled: tab==='reports' })
+  const { data: modUsersData } = useQuery({ queryKey:['mod-users'], queryFn: ()=>moderationApi.listModeratedUsers().then(r=>r.data), enabled: tab==='moderation' })
+  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='moderation' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
 
-  // Populate settings form when data loads (RQ v5: no onSuccess in useQuery)
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
 
   const saveSettings = useMutation({ mutationFn: ()=>adminApi.updateSettings(settingsForm), onSuccess:()=>{ ok('Saved'); qc.invalidateQueries({queryKey:['instance-info']}) } })
   const setRole      = useMutation({ mutationFn: ({id,role}:{id:string,role:string})=>adminApi.setRole(id,role), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
   const delUser      = useMutation({ mutationFn: (id:string)=>adminApi.deleteUser(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
-  const reviewRep    = useMutation({ mutationFn: ({id,action}:{id:string,action:string})=>moderationApi.reviewReport(id,{action}), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-reports']}) })
+  const reviewRep    = useMutation({ mutationFn: ({id,action,notes}:{id:string,action:string,notes?:string})=>moderationApi.reviewReport(id,{action,notes}), onSuccess:(_,{action})=>{ ok(`Report ${action}`); qc.invalidateQueries({queryKey:['admin-reports']}) } })
+  const suspendUser  = useMutation({ mutationFn: ({id,data}:{id:string,data:any})=>moderationApi.suspendUser(id,data), onSuccess:()=>{ ok('User suspended'); qc.invalidateQueries({queryKey:['admin-reports']}); qc.invalidateQueries({queryKey:['mod-users']}) } })
+  const unsuspend    = useMutation({ mutationFn: (id:string)=>moderationApi.unsuspendUser(id), onSuccess:()=>{ ok('Unsuspended'); qc.invalidateQueries({queryKey:['mod-users']}) } })
+  const banUser      = useMutation({ mutationFn: ({id,data}:{id:string,data:any})=>moderationApi.banUser(id,data), onSuccess:()=>{ ok('User banned'); qc.invalidateQueries({queryKey:['admin-reports']}); qc.invalidateQueries({queryKey:['mod-users']}) } })
+  const unban        = useMutation({ mutationFn: (id:string)=>moderationApi.unbanUser(id), onSuccess:()=>{ ok('Unbanned'); qc.invalidateQueries({queryKey:['mod-users']}) } })
+  const banInst      = useMutation({ mutationFn: (data:any)=>moderationApi.banInstance(data), onSuccess:()=>{ ok('Instance banned'); setInstanceBanForm({instance:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['instance-bans']}) } })
+  const unbanInst    = useMutation({ mutationFn: (id:string)=>moderationApi.unbanInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['instance-bans']}) })
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
@@ -35,14 +51,15 @@ export default function AdminPage() {
   const rejectWait     = useMutation({ mutationFn: (id:string)=>adminApi.rejectWaitlist(id),  onSuccess:()=>{ ok('Rejected'); qc.invalidateQueries({queryKey:['admin-waitlist']}) } })
 
   const tabs = [
-    { id:'overview',   label:'Overview',    icon: BookOpen },
-    { id:'settings',   label:'Settings',    icon: Settings },
-    { id:'users',      label:'Users',       icon: Users },
-    { id:'waitlist',   label:'Waitlist',    icon: Clock },
-    { id:'reports',    label:'Reports',     icon: Flag },
-    { id:'federation', label:'Federation',  icon: Link2 },
-    { id:'invites',    label:'Invites',     icon: Ticket },
-    { id:'rules',      label:'Rules',       icon: List },
+    { id:'overview',    label:'Overview',    icon: BookOpen },
+    { id:'settings',    label:'Settings',    icon: Settings },
+    { id:'users',       label:'Users',       icon: Users },
+    { id:'waitlist',    label:'Waitlist',    icon: Clock },
+    { id:'reports',     label:'Reports',     icon: Flag },
+    { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
+    { id:'federation',  label:'Federation',  icon: Link2 },
+    { id:'invites',     label:'Invites',     icon: Ticket },
+    { id:'rules',       label:'Rules',       icon: List },
   ]
 
   const sf = (k:string) => (e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>) =>
@@ -176,23 +193,219 @@ export default function AdminPage() {
       )}
 
       {tab==='reports' && (
-        <div className="space-y-2">
-          {(repsData?.reports||[]).length===0 && <div className="card p-8 text-center text-agora-400">No pending reports.</div>}
-          {(repsData?.reports||[]).map((r:any)=>(
-            <div key={r.id} className="card p-3 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">{r.reason}</p>
-                  <p className="text-xs text-agora-400">by @{r.reporter_username}{r.reported_user_username&&` against @${r.reported_user_username}`}</p>
-                  {r.details&&<p className="text-xs text-agora-500 mt-1">{r.details}</p>}
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            {['pending','actioned','dismissed'].map(s => (
+              <button key={s} onClick={() => setReportStatus(s)}
+                className={`text-xs px-3 py-1 rounded-full border transition-colors ${reportStatus===s ? 'bg-agora-700 text-white border-agora-700' : 'border-agora-200 dark:border-agora-600 text-agora-500 hover:border-agora-400'}`}>
+                {s.charAt(0).toUpperCase()+s.slice(1)}
+              </button>
+            ))}
+          </div>
+          {(repsData?.reports||[]).length===0 && <div className="card p-8 text-center text-agora-400">No {reportStatus} reports.</div>}
+          {(repsData?.reports||[]).map((r:any) => {
+            const sf = suspendForm[r.reported_user_username] || {days:'1',reason:'',notes:''}
+            const bf = banForm[r.reported_user_username] || {reason:'',notes:''}
+            return (
+              <div key={r.id} className="card p-4 space-y-3">
+                {/* Report header */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold uppercase tracking-wide text-red-500 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">
+                      {r.violation_type?.replace(/_/g,' ') || r.reason}
+                    </span>
+                    {r.rule_text && <span className="text-xs text-agora-400 italic">Rule: {r.rule_text}</span>}
+                    {r.is_suspended && <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">⚠️ Already suspended</span>}
+                    {r.is_banned && <span className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">🚫 Already banned</span>}
+                  </div>
+                  <p className="text-xs text-agora-400">
+                    by @{r.reporter_username}
+                    {r.reported_user_username && ` against @${r.reported_user_username}`}
+                    {r.reported_post_id && ' (post)'}
+                    {r.reported_comment_id && ' (comment)'}
+                    {' · '}{new Date(r.created_at).toLocaleDateString()}
+                  </p>
+                  {r.post_content && (
+                    <div className="p-2 bg-agora-50 dark:bg-agora-700/50 rounded border-l-2 border-agora-300 dark:border-agora-500">
+                      <p className="text-xs text-agora-400 font-medium mb-0.5">{r.reported_comment_id ? 'Comment' : 'Post'} content</p>
+                      <p className="text-sm text-agora-700 dark:text-agora-200 line-clamp-3">{r.post_content}</p>
+                    </div>
+                  )}
+                  {r.details && <p className="text-sm text-agora-600 dark:text-agora-300"><span className="text-xs font-medium text-agora-400">Reporter note: </span>{r.details}</p>}
+                </div>
+
+                {/* Actions — only shown on pending reports */}
+                {reportStatus === 'pending' && (
+                  <div className="border-t border-agora-100 dark:border-agora-700 pt-3 space-y-3">
+
+                    {/* No reported user — just dismiss or mark actioned with notes */}
+                    {!r.reported_user_username && (
+                      <div className="flex items-center gap-2">
+                        <input className="input text-xs py-1 px-2 flex-1" autoComplete="off" placeholder="Notes (optional)"
+                          value={reportNotes[r.id] || ''}
+                          onChange={e => setReportNotes(n => ({...n, [r.id]: e.target.value}))} />
+                        <button onClick={() => reviewRep.mutate({id:r.id, action:'actioned', notes:reportNotes[r.id]})}
+                          className="btn-primary text-xs py-1 px-3">Mark actioned</button>
+                        <button onClick={() => reviewRep.mutate({id:r.id, action:'dismissed', notes:reportNotes[r.id]})}
+                          className="btn-secondary text-xs py-1 px-3">Dismiss</button>
+                      </div>
+                    )}
+
+                    {/* Reported user — suspend or ban are the primary actions */}
+                    {r.reported_user_username && !r.is_banned && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Suspend */}
+                        {!r.is_suspended && (
+                          <div className="space-y-1.5 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800">
+                            <p className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">⏸ Suspend @{r.reported_user_username}</p>
+                            <div className="flex gap-1.5">
+                              <input className="input text-xs py-1 px-2 flex-1" autoComplete="off" placeholder="Reason shown to user"
+                                value={sf.reason}
+                                onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,reason:e.target.value}}))} />
+                              <input className="input text-xs py-1 px-2 w-16" autoComplete="off" placeholder="Days" type="number" min="0"
+                                value={sf.days}
+                                onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,days:e.target.value}}))} />
+                            </div>
+                            <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private, not shown to user)"
+                              value={sf.notes}
+                              onChange={e => setSuspendForm(f=>({...f,[r.reported_user_username]:{...sf,notes:e.target.value}}))} />
+                            <button disabled={!sf.reason || suspendUser.isPending}
+                              onClick={() => suspendUser.mutate({id: r.reported_user_id, data: {
+                                reason: sf.reason, notes: sf.notes, days: parseInt(sf.days)||0
+                              }})}
+                              className="w-full text-xs py-1.5 px-3 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-semibold disabled:opacity-40 transition-colors">
+                              Suspend {sf.days && sf.days!=='0' ? `for ${sf.days} day${sf.days==='1'?'':'s'}` : 'indefinitely'}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Ban */}
+                        <div className="space-y-1.5 p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800">
+                          <p className="text-xs font-bold text-red-700 dark:text-red-400 uppercase tracking-wide">🚫 Ban @{r.reported_user_username}</p>
+                          <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Reason shown to user"
+                            value={bf.reason}
+                            onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,reason:e.target.value}}))} />
+                          <input className="input text-xs py-1 px-2 w-full" autoComplete="off" placeholder="Admin notes (private)"
+                            value={bf.notes}
+                            onChange={e => setBanForm(f=>({...f,[r.reported_user_username]:{...bf,notes:e.target.value}}))} />
+                          {r.is_remote && r.remote_instance && (
+                            <label className="flex items-center gap-2 text-xs text-red-600 cursor-pointer">
+                              <input type="checkbox" className="rounded" />
+                              Also ban instance ({r.remote_instance})
+                            </label>
+                          )}
+                          <button disabled={!bf.reason || banUser.isPending}
+                            onClick={() => { if (confirm(`Permanently ban @${r.reported_user_username}?`)) banUser.mutate({id: r.reported_user_id, data: {reason: bf.reason, notes: bf.notes}}) }}
+                            className="w-full text-xs py-1.5 px-3 rounded-lg bg-red-500 hover:bg-red-600 text-white font-semibold disabled:opacity-40 transition-colors">
+                            Permanently ban
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Dismiss without action */}
+                    <div className="flex items-center gap-2 pt-1 border-t border-agora-100 dark:border-agora-700">
+                      <p className="text-xs text-agora-400 flex-1">No action needed?</p>
+                      <input className="input text-xs py-1 px-2 w-48" autoComplete="off" placeholder="Dismissal notes (optional)"
+                        value={reportNotes[r.id] || ''}
+                        onChange={e => setReportNotes(n => ({...n, [r.id]: e.target.value}))} />
+                      <button onClick={() => reviewRep.mutate({id:r.id, action:'dismissed', notes:reportNotes[r.id]})}
+                        className="btn-secondary text-xs py-1 px-3 flex-shrink-0">Dismiss report</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Reviewed report — show what was done */}
+                {reportStatus !== 'pending' && r.review_notes && (
+                  <div className="border-t border-agora-100 dark:border-agora-700 pt-2">
+                    <p className="text-xs text-agora-400">
+                      {r.reviewer_username && `Reviewed by @${r.reviewer_username}`}
+                      {r.reviewed_at && ` · ${new Date(r.reviewed_at).toLocaleDateString()}`}
+                    </p>
+                    {r.review_notes && <p className="text-xs text-agora-500 mt-0.5">{r.review_notes}</p>}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {tab==='moderation' && (
+        <div className="space-y-6">
+          {/* Suspended / Banned users */}
+          <div>
+            <h3 className="font-semibold mb-3">Suspended & Banned Users</h3>
+            {(modUsersData?.users||[]).length===0 && (
+              <div className="card p-6 text-center text-agora-400 text-sm">No suspended or banned users.</div>
+            )}
+            {(modUsersData?.users||[]).map((u:any) => (
+              <div key={u.id} className="card p-3 mb-2 flex items-start justify-between gap-3 flex-wrap">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm">@{u.username}</span>
+                    {u.is_suspended && !u.banned_at && (
+                      <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">
+                        Suspended{u.suspension_expires_at ? ` until ${new Date(u.suspension_expires_at).toLocaleDateString()}` : ' (indefinite)'}
+                      </span>
+                    )}
+                    {u.banned_at && (
+                      <span className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-2 py-0.5 rounded-full">Banned</span>
+                    )}
+                    {u.is_remote && <span className="text-xs text-agora-400">{u.remote_instance}</span>}
+                  </div>
+                  {u.suspension_reason && <p className="text-xs text-agora-500">Reason: {u.suspension_reason}</p>}
+                  {u.ban_reason && <p className="text-xs text-agora-500">Ban reason: {u.ban_reason}</p>}
+                  {(u.suspension_notes || u.ban_notes) && (
+                    <p className="text-xs text-agora-400 italic">Notes: {u.suspension_notes || u.ban_notes}</p>
+                  )}
                 </div>
                 <div className="flex gap-2 flex-shrink-0">
-                  <button onClick={()=>reviewRep.mutate({id:r.id,action:'actioned'})} className="btn-primary text-xs py-1 px-2">Action</button>
-                  <button onClick={()=>reviewRep.mutate({id:r.id,action:'dismissed'})} className="btn-secondary text-xs py-1 px-2">Dismiss</button>
+                  {u.is_suspended && !u.banned_at && (
+                    <button onClick={()=>unsuspend.mutate(u.id)} className="btn-secondary text-xs py-1 px-2">Unsuspend</button>
+                  )}
+                  {u.banned_at && (
+                    <button onClick={()=>unban.mutate(u.id)} className="btn-secondary text-xs py-1 px-2">Unban</button>
+                  )}
+                  {!u.banned_at && (
+                    <button onClick={()=>banUser.mutate({id:u.id,data:{reason:'Admin action',notes:''}})}
+                      className="btn-danger text-xs py-1 px-2">Ban</button>
+                  )}
                 </div>
               </div>
+            ))}
+          </div>
+
+          {/* Instance bans */}
+          <div>
+            <h3 className="font-semibold mb-3">Instance Bans</h3>
+            <div className="card p-4 space-y-3 mb-3">
+              <p className="text-sm font-medium">Ban an instance</p>
+              <div className="flex gap-2 flex-wrap">
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Instance domain (e.g. bad.example.com)"
+                  value={instanceBanForm.instance} onChange={e=>setInstanceBanForm(f=>({...f,instance:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Reason"
+                  value={instanceBanForm.reason} onChange={e=>setInstanceBanForm(f=>({...f,reason:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Admin notes (private)"
+                  value={instanceBanForm.notes} onChange={e=>setInstanceBanForm(f=>({...f,notes:e.target.value}))} />
+                <button onClick={()=>banInst.mutate(instanceBanForm)} disabled={!instanceBanForm.instance||!instanceBanForm.reason||banInst.isPending}
+                  className="btn-danger text-sm">Ban instance</button>
+              </div>
             </div>
-          ))}
+            {(instBansData?.bans||[]).length===0 && (
+              <div className="card p-4 text-center text-agora-400 text-sm">No instance bans.</div>
+            )}
+            {(instBansData?.bans||[]).map((b:any) => (
+              <div key={b.id} className="card p-3 mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">{b.instance}</p>
+                  <p className="text-xs text-agora-400">{b.reason}{b.banned_by&&` · by @${b.banned_by}`}</p>
+                  {b.notes && <p className="text-xs text-agora-400 italic">{b.notes}</p>}
+                </div>
+                <button onClick={()=>unbanInst.mutate(b.id)} className="btn-secondary text-xs py-1 px-2 flex-shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

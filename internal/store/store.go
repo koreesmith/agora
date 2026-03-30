@@ -494,4 +494,9 @@ var schema = []string{
 		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`ALTER TABLE reports ALTER COLUMN reason SET DEFAULT ''`,
+
+	// ── Email change (AGORA-81) ────────────────────────────────────────────
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_email TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_change_token TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_change_expires TIMESTAMPTZ`,
 }

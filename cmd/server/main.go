@@ -111,6 +111,7 @@ func main() {
 		})
 		// Public (includes /setup, /instance, and /auth/*)
 		auth.RegisterPublicRoutes(r, authSvc)
+		r.Get("/auth/verify-email-change", authSvc.VerifyEmailChange)
 		auth.RegisterInstanceRoute(r, authSvc)
 		// Public one-click unsubscribe (no auth required — linked from emails)
 		r.Post("/notifications/unsubscribe", notifSvc.OneClickUnsubscribe)
@@ -119,8 +120,9 @@ func main() {
 		// Authenticated
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)
-			r.Post("/auth/change-password", authSvc.ChangePassword)
-			r.Post("/invites/send",         authSvc.SendUserInvite)
+			r.Post("/auth/change-password",       authSvc.ChangePassword)
+			r.Post("/auth/request-email-change",  authSvc.RequestEmailChange)
+			r.Post("/invites/send",               authSvc.SendUserInvite)
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)

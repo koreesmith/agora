@@ -26,6 +26,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   group_join_rejected:   <XCircle size={16} className="text-red-400" />,
   group_invite_accepted: <UserCheck size={16} className="text-green-500" />,
   new_report:            <ShieldAlert size={16} className="text-red-500" />,
+  waitlist_join:         <UserPlus size={16} className="text-blue-500" />,
 }
 
 const REACTION_EMOJIS: Record<string, string> = {
@@ -53,6 +54,7 @@ const notifText: Record<string, string> = {
   group_join_rejected:   'declined your request to join a group',
   group_invite_accepted: 'added you to a group',
   new_report:            'submitted a new report — tap to review',
+  waitlist_join:         'joined the waitlist — tap to review',
 }
 
 function notifTarget(n: any): string | null {
@@ -80,6 +82,8 @@ function notifTarget(n: any): string | null {
       return n.data ? `/groups/${n.data}` : '/groups'
     case 'new_report':
       return '/admin?tab=reports'
+    case 'waitlist_join':
+      return '/admin?tab=waitlist'
     default:
       return null
   }

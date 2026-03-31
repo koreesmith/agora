@@ -259,6 +259,8 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if regMode == "waitlist" {
 		// Also send waitlist confirmation email
 		go s.notifSvc.SendWaitlistConfirmation(userID, req.Email, displayName)
+		// Notify all admins that a new user joined the waitlist
+		go s.notifyAdminsWaitlistJoin(userID)
 		writeJSON(w, 201, map[string]string{
 			"message": "waitlist",
 			"detail":  "You've been added to the waitlist. Check your email — you'll receive an invite once approved.",
@@ -550,6 +552,17 @@ func (s *Service) parseToken(tokenStr string) (*claims, error) {
 	c, ok := t.Claims.(*claims)
 	if !ok { return nil, errors.New("invalid claims") }
 	return c, nil
+}
+
+func (s *Service) notifyAdminsWaitlistJoin(newUserID string) {
+	rows, err := s.db.Query(`SELECT id FROM users WHERE role IN ('admin','moderator') AND deletion_scheduled_at IS NULL`)
+	if err != nil { return }
+	defer rows.Close()
+	for rows.Next() {
+		var adminID string
+		rows.Scan(&adminID)
+		s.notifSvc.Create(adminID, newUserID, "waitlist_join", "", "")
+	}
 }
 
 func (s *Service) getSetting(key string) string {

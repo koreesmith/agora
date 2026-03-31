@@ -246,6 +246,8 @@ func pushNotifContent(t, actorName string) (title, body string) {
 		return "Request approved", "Your group join request was approved"
 	case "new_report":
 		return "⚠️ New Report", "A new report has been submitted — tap to review"
+	case "waitlist_join":
+		return "👤 New Waitlist Signup", "A new user has joined the waitlist — tap to review"
 	}
 	return "", ""
 }

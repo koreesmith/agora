@@ -9,7 +9,7 @@ frontend/dist/
 Thumbs.db
 .vscode/
 .idea/
-.claude/
+.dev/
 
 # Generated at runtime by the nginx entrypoint ??? never commit
 nginx/nginx.conf

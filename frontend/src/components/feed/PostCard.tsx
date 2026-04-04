@@ -77,17 +77,19 @@ const visIcons: Record<string, React.ReactNode> = {
 
 // ── Reaction Picker ───────────────────────────────────────────────────────────
 
-function ReactionPicker({ onPick, activeReaction }: { onPick: (type: string) => void; activeReaction?: string }) {
+function ReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
-      onMouseLeave={e => e.stopPropagation()}
-    >
+    <div className="absolute bottom-9 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
-          title={r.type === activeReaction ? `Remove ${r.label}` : r.label}
-          onClick={e => { e.stopPropagation(); onPick(r.type) }}
-          className={`text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
+          data-reaction-type={r.type}
+          title={r.label}
+          className={`text-2xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+            r.type === highlightedReaction ? 'scale-150' :
+            r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
+            'hover:scale-125'
+          }`}
           style={{ lineHeight: 1 }}
         >
           {r.emoji}
@@ -114,11 +116,11 @@ function ReactionBar({ counts, total, myReaction, onOpenModal }: {
     >
       <span className="flex -space-x-0.5">
         {sorted.slice(0,3).map(([type]) => (
-          <span key={type} className="text-sm leading-none">{REACTION_MAP[type]?.emoji}</span>
+          <span key={type} className="text-base leading-none">{REACTION_MAP[type]?.emoji}</span>
         ))}
       </span>
       {total > 0 && (
-        <span className="text-xs text-agora-500 dark:text-agora-400 ml-0.5">{total}</span>
+        <span className="text-sm text-agora-500 dark:text-agora-400 ml-0.5">{total}</span>
       )}
     </button>
   )
@@ -300,6 +302,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [shareContent, setShareContent] = useState('')
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
+  const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inLongPressRef = useRef(false)
+  const hoveredReactionRef = useRef<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [editContent, setEditContent] = useState(post.content)
   const [editVisibility, setEditVisibility] = useState(post.visibility)
@@ -344,6 +350,38 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
       react.mutate(type)
     }
   }
+
+  // Keep a stable ref so document listeners avoid stale closures
+  const handleReactionPickRef = useRef(handleReactionPick)
+  useEffect(() => { handleReactionPickRef.current = handleReactionPick })
+
+  // Document-level pointer listeners active only while the long-press picker is open
+  useEffect(() => {
+    if (!showReactionPicker) return
+    const handleMove = (e: PointerEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY)
+      const rt = (el?.closest('[data-reaction-type]') as HTMLElement | null)?.dataset.reactionType ?? null
+      hoveredReactionRef.current = rt
+      setHighlightedReaction(rt)
+    }
+    const handleUp = () => {
+      inLongPressRef.current = false
+      const selected = hoveredReactionRef.current
+      hoveredReactionRef.current = null
+      setHighlightedReaction(null)
+      if (selected) {
+        handleReactionPickRef.current(selected)
+      } else {
+        setShowReactionPicker(false)
+      }
+    }
+    document.addEventListener('pointermove', handleMove)
+    document.addEventListener('pointerup', handleUp)
+    return () => {
+      document.removeEventListener('pointermove', handleMove)
+      document.removeEventListener('pointerup', handleUp)
+    }
+  }, [showReactionPicker])
 
   const del = useMutation({
     mutationFn: () => feedApi.deletePost(post.id),
@@ -740,10 +778,33 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Reaction button + picker */}
               <div className="relative">
                 <button
-                  onClick={() => myReaction ? handleReactionPick(myReaction) : setShowReactionPicker(p => !p)}
-                  onContextMenu={e => { e.preventDefault(); setShowReactionPicker(p => !p) }}
+                  onPointerDown={() => {
+                    inLongPressRef.current = false
+                    hoveredReactionRef.current = null
+                    longPressTimerRef.current = setTimeout(() => {
+                      inLongPressRef.current = true
+                      setShowReactionPicker(true)
+                    }, 400)
+                  }}
+                  onPointerUp={() => {
+                    if (longPressTimerRef.current) {
+                      clearTimeout(longPressTimerRef.current)
+                      longPressTimerRef.current = null
+                    }
+                    if (!inLongPressRef.current) {
+                      handleReactionPick('like')
+                    }
+                    // long-press release is handled by the document pointerup listener
+                  }}
+                  onPointerCancel={() => {
+                    if (longPressTimerRef.current) {
+                      clearTimeout(longPressTimerRef.current)
+                      longPressTimerRef.current = null
+                    }
+                  }}
+                  onContextMenu={e => e.preventDefault()}
                   className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
-                  title={myReaction ? 'Click to remove · Right-click to change' : 'React'}
+                  title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
                 >
                   <span className="text-base leading-none" style={{lineHeight:1}}>
                     {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
@@ -751,7 +812,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   <span className="text-sm">{post.reaction_count || ''}</span>
                 </button>
                 {showReactionPicker && (
-                  <ReactionPicker onPick={handleReactionPick} activeReaction={myReaction || undefined} />
+                  <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
                 )}
               </div>
 

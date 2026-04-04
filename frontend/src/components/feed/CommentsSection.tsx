@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
@@ -14,15 +14,19 @@ import ReportModal from './ReportModal'
 
 import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
-function CommentReactionPicker({ onPick, activeReaction }: { onPick: (type: string) => void; activeReaction?: string }) {
+function CommentReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-6 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1 shadow-xl">
+    <div className="absolute bottom-7 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
-          title={r.type === activeReaction ? `Remove ${r.label}` : r.label}
-          onClick={e => { e.stopPropagation(); onPick(r.type) }}
-          className={`text-base leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
+          data-reaction-type={r.type}
+          title={r.label}
+          className={`text-xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+            r.type === highlightedReaction ? 'scale-150' :
+            r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
+            'hover:scale-125'
+          }`}
           style={{ lineHeight: 1 }}
         >
           {r.emoji}
@@ -313,6 +317,10 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const [replyImageUrl, setReplyImageUrl] = useState('')
   const [replyUploading, setReplyUploading] = useState(false)
   const [showReactionPicker, setShowReactionPicker] = useState(false)
+  const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inLongPressRef = useRef(false)
+  const hoveredReactionRef = useRef<string | null>(null)
   const replyFileRef = useRef<HTMLInputElement>(null)
   const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
@@ -353,6 +361,36 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
     setShowReactionPicker(false)
     onReact(type)
   }
+
+  const handlePickReactionRef = useRef(handlePickReaction)
+  useEffect(() => { handlePickReactionRef.current = handlePickReaction })
+
+  useEffect(() => {
+    if (!showReactionPicker) return
+    const handleMove = (e: PointerEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY)
+      const rt = (el?.closest('[data-reaction-type]') as HTMLElement | null)?.dataset.reactionType ?? null
+      hoveredReactionRef.current = rt
+      setHighlightedReaction(rt)
+    }
+    const handleUp = () => {
+      inLongPressRef.current = false
+      const selected = hoveredReactionRef.current
+      hoveredReactionRef.current = null
+      setHighlightedReaction(null)
+      if (selected) {
+        handlePickReactionRef.current(selected)
+      } else {
+        setShowReactionPicker(false)
+      }
+    }
+    document.addEventListener('pointermove', handleMove)
+    document.addEventListener('pointerup', handleUp)
+    return () => {
+      document.removeEventListener('pointermove', handleMove)
+      document.removeEventListener('pointerup', handleUp)
+    }
+  }, [showReactionPicker])
 
   const isOwn = c.author_id === currentUserId
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
@@ -456,17 +494,39 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           {/* Reaction button + picker */}
           <div className="relative">
             <button
-              onClick={() => myReaction ? (onReact(myReaction)) : setShowReactionPicker(p => !p)}
-              onContextMenu={e => { e.preventDefault(); setShowReactionPicker(p => !p) }}
+              onPointerDown={() => {
+                inLongPressRef.current = false
+                hoveredReactionRef.current = null
+                longPressTimerRef.current = setTimeout(() => {
+                  inLongPressRef.current = true
+                  setShowReactionPicker(true)
+                }, 400)
+              }}
+              onPointerUp={() => {
+                if (longPressTimerRef.current) {
+                  clearTimeout(longPressTimerRef.current)
+                  longPressTimerRef.current = null
+                }
+                if (!inLongPressRef.current) {
+                  handlePickReaction('like')
+                }
+              }}
+              onPointerCancel={() => {
+                if (longPressTimerRef.current) {
+                  clearTimeout(longPressTimerRef.current)
+                  longPressTimerRef.current = null
+                }
+              }}
+              onContextMenu={e => e.preventDefault()}
               className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
-              title={myReaction ? 'Click to remove · Right-click to change' : 'React'}
+              title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
             >
               <span style={{ lineHeight: 1 }}>
                 {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
               </span>
             </button>
             {showReactionPicker && (
-              <CommentReactionPicker onPick={handlePickReaction} activeReaction={myReaction || undefined} />
+              <CommentReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
             )}
           </div>
           {reactionCount > 0 && (

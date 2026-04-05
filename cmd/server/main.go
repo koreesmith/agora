@@ -98,6 +98,10 @@ func main() {
 	// Static uploads
 	r.Mount("/uploads", mediaSvc.FileServer())
 
+	// Developer documentation
+	docsDir := http.Dir("./docs")
+	r.Mount("/docs", http.StripPrefix("/docs", http.FileServer(docsDir)))
+
 	// ── API routes ────────────────────────────────────────────────────────
 	r.Route("/api", func(r chi.Router) {
 		// Prevent browsers from caching API responses — critical for multi-user

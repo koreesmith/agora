@@ -11,8 +11,20 @@ cp .env.example .env          # edit JWT_SECRET and INSTANCE_DOMAIN
 docker compose up -d --build
 ```
 
-Visit http://localhost and sign in as **admin / admin**.  
+Visit http://localhost and sign in as **admin / admin**.
 ⚠️ You must change the admin password before other users can register.
+
+## Developer Documentation
+
+Full developer documentation is available at **/docs** when running the server, and in the [`docs/`](docs/) directory.
+
+- [Quick Start & Local Dev](docs/getting-started.md)
+- [System Architecture](docs/architecture.md)
+- [Database Schema](docs/database.md)
+- [Backend Services](docs/backend/)
+- [API Reference](docs/api/)
+- [Frontend](docs/frontend/)
+- [Deployment](docs/deployment.md)
 
 ## Development
 
@@ -37,13 +49,17 @@ agora/
 │   ├── auth/                   # JWT auth, register, login, email verify
 │   ├── users/                  # Profiles, GDPR export/deletion
 │   ├── friends/                # Mutual friend requests + friend groups
-│   ├── feed/                   # Posts, comments, likes, reposts
+│   ├── feed/                   # Posts, comments, likes, reactions, reposts
 │   ├── notifications/          # In-app + SMTP email notifications
 │   ├── search/                 # User search (local)
 │   ├── moderation/             # Reports, suspension
 │   ├── admin/                  # Settings, user mgmt, invites, audit log
 │   ├── federation/             # Ed25519 cross-instance protocol
-│   └── media/                  # File uploads
+│   ├── media/                  # File uploads
+│   ├── groups/                 # Community groups
+│   ├── albums/                 # Photo albums
+│   ├── dm/                     # Direct messages + WebSocket
+│   └── blocks/                 # User blocking
 ├── frontend/
 │   ├── src/
 │   │   ├── api/                # Typed API client
@@ -52,6 +68,7 @@ agora/
 │   │   └── pages/              # All route pages
 │   ├── Dockerfile.frontend
 │   └── nginx.conf              # Reverse proxy to backend
+├── docs/                       # Developer documentation (served at /docs)
 ├── Dockerfile                  # Go binary builder
 ├── docker-compose.yml
 ├── Makefile
@@ -86,8 +103,8 @@ Only `public` visibility posts are federated.
 
 ## Default admin
 
-Username: `admin`  
-Password: `admin`  
+Username: `admin`
+Password: `admin`
 Registration is locked until this password is changed.
 
 ---
@@ -133,6 +150,7 @@ Internet
 nginx (ports 80/443)          ← SSL termination, rate limiting
    │
    ├── /uploads/*             ← served directly from disk
+   ├── /docs/*                ← developer documentation
    │
    └── everything else ──────→ frontend container (port 80)
                                       │

@@ -98,8 +98,13 @@ func main() {
 	// Static uploads
 	r.Mount("/uploads", mediaSvc.FileServer())
 
-	// Developer documentation
-	r.Mount("/docs", http.FileServer(http.Dir("./docs")))
+	// Developer documentation — use explicit routes instead of Mount to avoid
+	// chi's trailing-slash redirect quirk returning 404 for /docs
+	docsHandler := http.StripPrefix("/docs", http.FileServer(http.Dir("./docs")))
+	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs/", http.StatusMovedPermanently)
+	})
+	r.Handle("/docs/*", docsHandler)
 
 	// ── API routes ────────────────────────────────────────────────────────
 	r.Route("/api", func(r chi.Router) {

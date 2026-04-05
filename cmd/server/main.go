@@ -99,8 +99,7 @@ func main() {
 	r.Mount("/uploads", mediaSvc.FileServer())
 
 	// Developer documentation
-	docsDir := http.Dir("./docs")
-	r.Mount("/docs", http.StripPrefix("/docs", http.FileServer(docsDir)))
+	r.Mount("/docs", http.FileServer(http.Dir("./docs")))
 
 	// ── API routes ────────────────────────────────────────────────────────
 	r.Route("/api", func(r chi.Router) {

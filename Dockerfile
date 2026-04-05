@@ -13,6 +13,7 @@ WORKDIR /app
 
 COPY --from=builder /app/agora .
 COPY --from=builder /app/.env.example .env
+COPY --from=builder /app/docs ./docs
 
 RUN mkdir -p /data/uploads/avatars /data/uploads/posts /data/uploads/instance
 

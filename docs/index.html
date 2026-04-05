@@ -131,12 +131,39 @@ function render(text, name) {
   window.scrollTo(0, 0);
 }
 
+function navigate(docName) {
+  loadDoc(docName);
+  history.pushState({doc: docName}, '', '#' + docName);
+}
+
 document.getElementById('sidebar').addEventListener('click', e => {
   const a = e.target.closest('a[data-doc]');
   if (!a) return;
   e.preventDefault();
-  loadDoc(a.dataset.doc);
-  history.pushState({doc: a.dataset.doc}, '', '#' + a.dataset.doc);
+  navigate(a.dataset.doc);
+});
+
+// Intercept clicks on links rendered inside doc content
+document.getElementById('doc').addEventListener('click', e => {
+  const a = e.target.closest('a[href]');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('#')) return;
+  e.preventDefault();
+  // Strip .md extension, then resolve any relative ../ segments against the current doc path
+  let target = href.replace(/\.md$/, '');
+  if (target.startsWith('.') || target.includes('/../') || target.startsWith('../')) {
+    const currentDoc = (location.hash.slice(1) || 'overview');
+    const base = currentDoc.includes('/') ? currentDoc.substring(0, currentDoc.lastIndexOf('/')) : '';
+    const parts = (base ? base + '/' + target : target).split('/');
+    const resolved = [];
+    for (const p of parts) {
+      if (p === '..') resolved.pop();
+      else if (p && p !== '.') resolved.push(p);
+    }
+    target = resolved.join('/');
+  }
+  navigate(target);
 });
 
 window.addEventListener('popstate', e => {

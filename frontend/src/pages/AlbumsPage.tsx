@@ -1,19 +1,21 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { albumsApi } from '../api'
+import { albumsApi, friendsApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { Image as ImageIcon, Plus, Globe, Users, Lock, X } from 'lucide-react'
+import { Image as ImageIcon, Plus, Globe, Users, Lock, List, X } from 'lucide-react'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={11} />,
   friends: <Users size={11} />,
+  group:   <List  size={11} />,
   private: <Lock  size={11} />,
 }
 
 const visLabel: Record<string, string> = {
   public:  'Public',
   friends: 'Friends',
+  group:   'List',
   private: 'Only me',
 }
 
@@ -21,7 +23,7 @@ export default function AlbumsPage() {
   const qc = useQueryClient()
   const { user } = useAuthStore()
   const [showCreate, setShowCreate] = useState(false)
-  const [form, setForm] = useState({ title: '', description: '', visibility: 'friends' })
+  const [form, setForm] = useState({ title: '', description: '', visibility: 'friends', friend_group_id: '' })
   const [err, setErr] = useState('')
 
   const { data, isLoading } = useQuery({
@@ -30,12 +32,22 @@ export default function AlbumsPage() {
   })
   const albums: any[] = data?.albums ?? []
 
+  const { data: listsData } = useQuery({
+    queryKey: ['friend-lists'],
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
+  })
+  const friendLists: any[] = listsData?.groups ?? []
+
   const create = useMutation({
-    mutationFn: () => albumsApi.create(form),
+    mutationFn: () => {
+      const payload: any = { title: form.title, description: form.description, visibility: form.visibility }
+      if (form.visibility === 'group') payload.friend_group_id = form.friend_group_id
+      return albumsApi.create(payload)
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['albums'] })
       setShowCreate(false)
-      setForm({ title: '', description: '', visibility: 'friends' })
+      setForm({ title: '', description: '', visibility: 'friends', friend_group_id: '' })
       setErr('')
     },
     onError: (e: any) => setErr(e.response?.data?.error || 'Could not create album'),
@@ -76,13 +88,14 @@ export default function AlbumsPage() {
             </div>
             <div>
               <label className="label">Who can see this?</label>
-              <div className="grid grid-cols-3 gap-2 mt-1">
+              <div className="grid grid-cols-2 gap-2 mt-1">
                 {([
                   ['public',  Globe,  'Public',  'Anyone'],
                   ['friends', Users,  'Friends', 'Friends only'],
+                  ['group',   List,   'Friend List', 'Specific list'],
                   ['private', Lock,   'Private', 'Just me'],
-                ] as const).map(([val, Icon, label, desc]) => (
-                  <button key={val} onClick={() => setForm(f => ({ ...f, visibility: val }))}
+                ] as [string, any, string, string][]).map(([val, Icon, label, desc]) => (
+                  <button key={val} onClick={() => setForm(f => ({ ...f, visibility: val, friend_group_id: '' }))}
                     className={`flex flex-col items-center p-3 rounded-lg border-2 transition-colors text-center ${form.visibility === val ? 'border-agora-600 bg-agora-50 dark:bg-agora-700' : 'border-agora-200 dark:border-agora-600 hover:border-agora-300'}`}>
                     <Icon size={16} className="mb-1" />
                     <span className="text-xs font-medium">{label}</span>
@@ -90,10 +103,23 @@ export default function AlbumsPage() {
                   </button>
                 ))}
               </div>
+              {form.visibility === 'group' && (
+                <div className="mt-2">
+                  <select
+                    className="input"
+                    value={form.friend_group_id}
+                    onChange={e => setForm(f => ({ ...f, friend_group_id: e.target.value }))}>
+                    <option value="">Select a friend list…</option>
+                    {friendLists.map((g: any) => (
+                      <option key={g.id} value={g.id}>{g.name} ({g.member_count} members)</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 justify-end pt-1">
               <button onClick={() => setShowCreate(false)} className="btn-secondary">Cancel</button>
-              <button onClick={() => create.mutate()} disabled={!form.title.trim() || create.isPending} className="btn-primary">
+              <button onClick={() => create.mutate()} disabled={!form.title.trim() || create.isPending || (form.visibility === 'group' && !form.friend_group_id)} className="btn-primary">
                 {create.isPending ? 'Creating…' : 'Create Album'}
               </button>
             </div>
@@ -131,7 +157,7 @@ function AlbumCard({ album: a }: { album: any }) {
         {/* Visibility badge */}
         <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/40 text-white text-[10px] px-1.5 py-0.5 rounded-full backdrop-blur-sm">
           {visIcon[a.visibility]}
-          <span>{visLabel[a.visibility]}</span>
+          <span>{a.visibility === 'group' && a.friend_group_name ? a.friend_group_name : visLabel[a.visibility]}</span>
         </div>
       </div>
       <div className="p-3">

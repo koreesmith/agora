@@ -215,7 +215,7 @@ export const albumsApi = {
   list:         (page = 0)                     => api.get('/albums', { params: { page } }),
   listForUser:  (username: string)             => api.get(`/users/${username}/albums`),
   get:          (id: string)                   => api.get(`/albums/${id}`),
-  create:       (data: { title: string, description?: string, visibility?: string }) => api.post('/albums', data),
+  create:       (data: { title: string, description?: string, visibility?: string, friend_group_id?: string }) => api.post('/albums', data),
   update:       (id: string, data: any)        => api.patch(`/albums/${id}`, data),
   delete:       (id: string)                   => api.delete(`/albums/${id}`),
   addPhoto:     (id: string, data: { url: string, caption?: string }) => api.post(`/albums/${id}/photos`, data),

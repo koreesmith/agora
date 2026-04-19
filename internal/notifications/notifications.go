@@ -29,18 +29,54 @@ func NewService(db *store.DB, email *EmailService) *Service {
 	return &Service{db: db, email: email}
 }
 
-type Notification struct {
-	ID               string  `json:"id"`
-	Type             string  `json:"type"`
-	ActorID          *string `json:"actor_id"`
-	ActorUsername    *string `json:"actor_username"`
-	ActorDisplayName *string `json:"actor_display_name"`
-	ActorAvatarURL   *string `json:"actor_avatar_url"`
-	PostID           *string `json:"post_id"`
-	Data             string  `json:"data"`
-	Read             bool    `json:"read"`
+// rawNotification is the internal flat row fetched from the DB.
+type rawNotification struct {
+	ID               string
+	Type             string
+	ActorID          *string
+	ActorUsername    *string
+	ActorDisplayName *string
+	ActorAvatarURL   *string
+	PostID           *string
+	Data             string
+	Read             bool
+	CreatedAt        string
+}
+
+// NotifActor is a single actor within a grouped notification.
+type NotifActor struct {
+	ID          string  `json:"id"`
+	Username    string  `json:"username"`
+	DisplayName string  `json:"display_name"`
+	AvatarURL   *string `json:"avatar_url"`
+}
+
+// NotificationItem is the unified response shape for both grouped and ungrouped notifications.
+type NotificationItem struct {
+	ID        string   `json:"id"`
+	IDs       []string `json:"ids"`
+	Type      string   `json:"type"`
+	PostID    *string  `json:"post_id"`
+	Data      string   `json:"data,omitempty"`
+	Read      bool     `json:"read"`
+	CreatedAt string   `json:"created_at"`
+	Grouped   bool     `json:"grouped"`
+	// Grouped-only fields
+	Actors []NotifActor `json:"actors,omitempty"`
+	Count  int          `json:"count,omitempty"`
+	// Ungrouped-only fields
+	ActorID          *string `json:"actor_id,omitempty"`
+	ActorUsername    *string `json:"actor_username,omitempty"`
+	ActorDisplayName *string `json:"actor_display_name,omitempty"`
+	ActorAvatarURL   *string `json:"actor_avatar_url,omitempty"`
 	FriendStatus     string  `json:"friend_status,omitempty"`
-	CreatedAt        string  `json:"created_at"`
+}
+
+// groupableTypes are notification types collapsed by (type, post_id).
+var groupableTypes = map[string]bool{
+	"post_like": true, "comment_like": true,
+	"post_reaction": true, "comment_reaction": true,
+	"post_comment": true, "comment_reply": true,
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
@@ -48,6 +84,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/notifications/unread-count",       s.UnreadCount)
 	r.Post("/notifications/read-all",          s.MarkAllRead)
 	r.Post("/notifications/{id}/read",         s.MarkRead)
+	r.Post("/notifications/read-many",         s.MarkManyRead)
 	r.Get("/notifications/email-preferences",  s.GetEmailPrefs)
 	r.Put("/notifications/email-preferences",  s.UpdateEmailPrefs)
 }
@@ -60,6 +97,11 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
+	rawLimit := limit * 4
+	if rawLimit > 200 {
+		rawLimit = 200
+	}
+
 	rows, err := s.db.Query(`
 		SELECT n.id, n.type,
 		       n.actor_id, u.username, u.display_name, u.avatar_url,
@@ -69,55 +111,133 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 		WHERE n.user_id = $1
 		ORDER BY n.created_at DESC
 		LIMIT $2
-	`, userID, limit)
+	`, userID, rawLimit)
 	if err != nil {
 		writeError(w, 500, "db error"); return
 	}
 	defer rows.Close()
-	var notifs []Notification
+
+	var raw []rawNotification
 	for rows.Next() {
-		var n Notification
+		var n rawNotification
 		rows.Scan(&n.ID, &n.Type, &n.ActorID, &n.ActorUsername, &n.ActorDisplayName,
 			&n.ActorAvatarURL, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
-		notifs = append(notifs, n)
+		raw = append(raw, n)
 	}
-	for i, n := range notifs {
-		if n.Type == "friend_request" && n.ActorID != nil {
-			var status, requesterID string
-			s.db.QueryRow(`
-				SELECT status, requester_id FROM friendships
-				WHERE (requester_id = $1 AND addressee_id = $2)
-				   OR (requester_id = $2 AND addressee_id = $1)
-			`, *n.ActorID, userID).Scan(&status, &requesterID)
-			if status == "accepted" {
-				notifs[i].FriendStatus = "accepted"
-			} else if status == "pending" && requesterID == *n.ActorID {
-				notifs[i].FriendStatus = "pending_incoming"
-			} else if status == "pending" {
-				notifs[i].FriendStatus = "pending_outgoing"
-			}
-		}
-		// For comment_reaction and comment_reply, post_id may point to a comment
-		// rather than the root post. Resolve upward so the client navigates correctly.
+
+	// Resolve post_id upward for comment-type notifications so the client
+	// navigates to the root post rather than the comment itself.
+	for i, n := range raw {
 		if n.PostID != nil && (n.Type == "comment_reaction" || n.Type == "comment_reply" || n.Type == "comment_like") {
 			var parentID *string
 			s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, *n.PostID).Scan(&parentID)
 			if parentID != nil {
-				// It's a comment — walk up one more level in case it's a depth-2 reply
 				rootID := *parentID
 				var grandParentID *string
 				s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, rootID).Scan(&grandParentID)
 				if grandParentID != nil {
 					rootID = *grandParentID
 				}
-				notifs[i].PostID = &rootID
+				raw[i].PostID = &rootID
 			}
 		}
 	}
-	if notifs == nil {
-		notifs = []Notification{}
+
+	type groupKey struct{ typ, postID string }
+	groupMap := map[groupKey]*NotificationItem{}
+	var items []*NotificationItem
+
+	for i := range raw {
+		n := &raw[i]
+		if groupableTypes[n.Type] && n.PostID != nil {
+			key := groupKey{n.Type, *n.PostID}
+			if g, exists := groupMap[key]; exists {
+				g.IDs = append(g.IDs, n.ID)
+				g.Count++
+				if !n.Read {
+					g.Read = false
+				}
+				// Add up to 3 distinct actors (raw is DESC so these are most recent first)
+				if n.ActorID != nil && len(g.Actors) < 3 {
+					seen := false
+					for _, a := range g.Actors {
+						if a.ID == *n.ActorID {
+							seen = true; break
+						}
+					}
+					if !seen {
+						g.Actors = append(g.Actors, NotifActor{
+							ID:          *n.ActorID,
+							Username:    derefStr(n.ActorUsername),
+							DisplayName: derefStr(n.ActorDisplayName),
+							AvatarURL:   n.ActorAvatarURL,
+						})
+					}
+				}
+			} else {
+				item := &NotificationItem{
+					ID:        n.ID,
+					IDs:       []string{n.ID},
+					Type:      n.Type,
+					PostID:    n.PostID,
+					Data:      n.Data,
+					Read:      n.Read,
+					CreatedAt: n.CreatedAt,
+					Grouped:   true,
+					Count:     1,
+				}
+				if n.ActorID != nil {
+					item.Actors = []NotifActor{{
+						ID:          *n.ActorID,
+						Username:    derefStr(n.ActorUsername),
+						DisplayName: derefStr(n.ActorDisplayName),
+						AvatarURL:   n.ActorAvatarURL,
+					}}
+				}
+				groupMap[key] = item
+				items = append(items, item)
+			}
+		} else {
+			item := &NotificationItem{
+				ID:               n.ID,
+				IDs:              []string{n.ID},
+				Type:             n.Type,
+				PostID:           n.PostID,
+				Data:             n.Data,
+				Read:             n.Read,
+				CreatedAt:        n.CreatedAt,
+				Grouped:          false,
+				ActorID:          n.ActorID,
+				ActorUsername:    n.ActorUsername,
+				ActorDisplayName: n.ActorDisplayName,
+				ActorAvatarURL:   n.ActorAvatarURL,
+			}
+			if n.Type == "friend_request" && n.ActorID != nil {
+				var status, requesterID string
+				s.db.QueryRow(`
+					SELECT status, requester_id FROM friendships
+					WHERE (requester_id = $1 AND addressee_id = $2)
+					   OR (requester_id = $2 AND addressee_id = $1)
+				`, *n.ActorID, userID).Scan(&status, &requesterID)
+				if status == "accepted" {
+					item.FriendStatus = "accepted"
+				} else if status == "pending" && requesterID == *n.ActorID {
+					item.FriendStatus = "pending_incoming"
+				} else if status == "pending" {
+					item.FriendStatus = "pending_outgoing"
+				}
+			}
+			items = append(items, item)
+		}
 	}
-	writeJSON(w, 200, map[string]any{"notifications": notifs})
+
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	if items == nil {
+		items = []*NotificationItem{}
+	}
+	writeJSON(w, 200, map[string]any{"notifications": items})
 }
 
 func (s *Service) UnreadCount(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +258,34 @@ func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	s.db.Exec(`UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2`, id, userID)
 	writeJSON(w, 200, map[string]string{"message": "ok"})
+}
+
+func (s *Service) MarkManyRead(w http.ResponseWriter, r *http.Request) {
+	userID := ctxkeys.GetUserID(r.Context())
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		writeError(w, 400, "invalid request"); return
+	}
+	placeholders := make([]string, len(req.IDs))
+	args := make([]interface{}, len(req.IDs)+1)
+	args[0] = userID
+	for i, id := range req.IDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = id
+	}
+	query := fmt.Sprintf(
+		`UPDATE notifications SET read = true WHERE user_id = $1 AND id IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	s.db.Exec(query, args...)
+	writeJSON(w, 200, map[string]string{"message": "ok"})
+}
+
+func derefStr(s *string) string {
+	if s == nil { return "" }
+	return *s
 }
 
 // ── User Invites (AGORA-75) ───────────────────────────────────────────────────

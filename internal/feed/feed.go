@@ -75,6 +75,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	limit, offset := pageParams(r)
+	customFeedID := r.URL.Query().Get("custom_feed_id")
+	if customFeedID != "" {
+		s.execCustomFeed(w, userID, limit, offset, customFeedID)
+		return
+	}
 	listID := r.URL.Query().Get("list_id")
 
 	var rows *sql.Rows
@@ -195,6 +200,207 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			LIMIT $2 OFFSET $3
 		`, userID, limit, offset)
 	}
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	s.enrichReactions(posts, userID)
+	s.enrichPolls(posts, userID)
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, offset int, customFeedID string) {
+	var feedExists bool
+	s.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM custom_feeds WHERE id = $1 AND owner_id = $2)`,
+		customFeedID, userID,
+	).Scan(&feedExists)
+	if !feedExists {
+		writeError(w, 404, "feed not found")
+		return
+	}
+
+	filterRows, err := s.db.Query(
+		`SELECT filter_type, value FROM custom_feed_filters WHERE feed_id = $1`,
+		customFeedID,
+	)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer filterRows.Close()
+
+	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
+	for filterRows.Next() {
+		var ft, val string
+		filterRows.Scan(&ft, &val)
+		switch ft {
+		case "friend_group":
+			friendGroupIDs = append(friendGroupIDs, val)
+		case "community_group":
+			communityGroupIDs = append(communityGroupIDs, val)
+		case "exclude_friend":
+			excludeFriendIDs = append(excludeFriendIDs, val)
+		case "exclude_group":
+			excludeGroupIDs = append(excludeGroupIDs, val)
+		case "post_type":
+			postTypes = append(postTypes, val)
+		}
+	}
+	filterRows.Close()
+
+	// args[0]=userID ($1), args[1]=limit ($2), args[2]=offset ($3); extra filter values appended after
+	args := []any{userID, limit, offset}
+	paramIdx := 3
+
+	nextP := func(val any) string {
+		paramIdx++
+		args = append(args, val)
+		return fmt.Sprintf("$%d", paramIdx)
+	}
+
+	var extraClauses []string
+
+	// Inclusion: posts must come from at least one included source (OR across groups/communities)
+	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 {
+		var inclParts []string
+		if len(friendGroupIDs) > 0 {
+			phs := make([]string, len(friendGroupIDs))
+			for i, id := range friendGroupIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`p.author_id IN (
+				  SELECT fgm.friend_id FROM friend_group_members fgm
+				  JOIN friend_groups fg ON fg.id = fgm.group_id
+				  WHERE fgm.group_id IN (%s) AND fg.user_id = $1
+				)`, strings.Join(phs, ",")))
+		}
+		if len(communityGroupIDs) > 0 {
+			phs := make([]string, len(communityGroupIDs))
+			for i, id := range communityGroupIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`p.community_group_id IN (%s)`, strings.Join(phs, ",")))
+		}
+		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
+	}
+
+	// Exclusions
+	if len(excludeFriendIDs) > 0 {
+		phs := make([]string, len(excludeFriendIDs))
+		for i, id := range excludeFriendIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`p.author_id NOT IN (%s)`, strings.Join(phs, ",")))
+	}
+	if len(excludeGroupIDs) > 0 {
+		phs := make([]string, len(excludeGroupIDs))
+		for i, id := range excludeGroupIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`(p.community_group_id IS NULL OR p.community_group_id NOT IN (%s))`,
+			strings.Join(phs, ",")))
+	}
+
+	// Post type filter
+	if len(postTypes) > 0 {
+		var typeParts []string
+		for _, pt := range postTypes {
+			switch pt {
+			case "repost":
+				typeParts = append(typeParts, `p.repost_of_id IS NOT NULL`)
+			case "media":
+				typeParts = append(typeParts, `p.image_url != ''`)
+			case "text":
+				typeParts = append(typeParts, `(p.repost_of_id IS NULL AND p.image_url = '')`)
+			}
+		}
+		if len(typeParts) > 0 {
+			extraClauses = append(extraClauses, "("+strings.Join(typeParts, " OR ")+")")
+		}
+	}
+
+	extra := ""
+	if len(extraClauses) > 0 {
+		extra = "AND " + strings.Join(extraClauses, "\n  AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
+		       cg.name, cg.slug,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		WHERE p.parent_id IS NULL
+		  AND p.deleted_at IS NULL
+		  AND p.visibility != 'private'
+		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
+		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+		  AND (
+		    p.author_id = $1
+		    OR p.wall_user_id = $1
+		    OR EXISTS(
+		      SELECT 1 FROM friendships f
+		      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+		          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+		      AND f.status = 'accepted'
+		    )
+		    OR EXISTS(
+		      SELECT 1 FROM friendships f
+		      WHERE p.wall_user_id IS NOT NULL
+		        AND ((f.requester_id = $1 AND f.addressee_id = p.wall_user_id)
+		          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
+		      AND f.status = 'accepted'
+		    )
+		  )
+		  AND (
+		    p.visibility != 'group'
+		    OR p.author_id = $1
+		    OR (
+		      p.group_id IS NOT NULL
+		      AND EXISTS (
+		        SELECT 1 FROM friend_group_members fgm
+		        JOIN friend_groups fg ON fg.id = fgm.group_id
+		        WHERE fgm.group_id = p.group_id
+		          AND fgm.friend_id = $1
+		          AND fg.user_id = p.author_id
+		      )
+		    )
+		  )
+		  AND (
+		    p.community_group_id IS NULL
+		    OR EXISTS (
+		      SELECT 1 FROM community_group_members cgm
+		      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
+		    )
+		  )
+		  %s
+		ORDER BY p.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, extra)
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return

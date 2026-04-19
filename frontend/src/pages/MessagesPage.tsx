@@ -17,6 +17,8 @@ interface Participant {
   avatar_url: string
   last_read_at?: string
   read_receipts: boolean
+  last_active_at?: string
+  is_online?: boolean
 }
 
 interface Message {
@@ -49,16 +51,21 @@ function otherParticipant(conv: Conversation, myId: string): Participant | undef
   return conv.participants?.find(p => p.user_id !== myId)
 }
 
-function Avatar({ user, size = 10 }: { user?: Participant | null; size?: number }) {
+function Avatar({ user, size = 10, showPresence = false }: { user?: Participant | null; size?: number; showPresence?: boolean }) {
   if (!user) return null
   const cls = `w-${size} h-${size} rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0`
   return (
-    <div className={cls}>
-      {user.avatar_url
-        ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
-        : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">
-            {(user.display_name || user.username)[0].toUpperCase()}
-          </span>}
+    <div className="relative flex-shrink-0" style={{ width: `${size * 4}px`, height: `${size * 4}px` }}>
+      <div className={cls} style={{ width: '100%', height: '100%' }}>
+        {user.avatar_url
+          ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+          : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">
+              {(user.display_name || user.username)[0].toUpperCase()}
+            </span>}
+      </div>
+      {showPresence && user.is_online && (
+        <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-white dark:border-agora-900 rounded-full" />
+      )}
     </div>
   )
 }
@@ -235,9 +242,9 @@ function ConvRow({ conv, myId, active, onClick }: { conv: Conversation; myId: st
     <button onClick={onClick}
       className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors ${active ? 'bg-agora-50 dark:bg-agora-700/50 border-r-2 border-agora-600' : ''}`}>
       <div className="relative flex-shrink-0">
-        <Avatar user={other} size={10} />
+        <Avatar user={other} size={10} showPresence />
         {conv.unread_count > 0 && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 bg-agora-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+          <span className="absolute -top-1 -right-1 w-4 h-4 bg-agora-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center z-10">
             {conv.unread_count > 9 ? '9+' : conv.unread_count}
           </span>
         )}
@@ -462,12 +469,18 @@ function ThreadView({ convId, onBack }: { convId: string; onBack?: () => void })
             <ArrowLeft size={18} />
           </button>
         )}
-        <Avatar user={other} size={9} />
+        <Avatar user={other} size={9} showPresence />
         <div className="flex-1 min-w-0">
           <Link to={`/profile/${other.username}`} className="font-semibold text-sm hover:underline">
             {other.display_name || other.username}
           </Link>
-          <p className="text-xs text-agora-400">@{other.username}</p>
+          <p className="text-xs text-agora-400">
+            {other.is_online
+              ? <span className="text-green-500 font-medium">Online</span>
+              : other.last_active_at
+                ? <>Last seen {formatDistanceToNow(new Date(other.last_active_at), { addSuffix: true })}</>
+                : <>@{other.username}</>}
+          </p>
         </div>
       </div>
 

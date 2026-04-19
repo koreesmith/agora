@@ -40,7 +40,7 @@ export const authApi = {
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
 export const feedApi = {
-  getFeed:       (params?: { page?: number, offset?: number, limit?: number, list_id?: string }) => api.get('/feed', { params }),
+  getFeed:       (params?: { page?: number, offset?: number, limit?: number, list_id?: string, custom_feed_id?: string }) => api.get('/feed', { params }),
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
@@ -267,4 +267,13 @@ export const dmApi = {
 
 export const inviteApi = {
   send: (email: string) => api.post('/invites/send', { email }),
+}
+
+// ── Custom Feeds ──────────────────────────────────────────────────────────────
+export const customFeedsApi = {
+  list:   ()                                                                      => api.get('/feeds'),
+  get:    (id: string)                                                            => api.get(`/feeds/${id}`),
+  create: (data: { name: string, filters: { filter_type: string, value: string }[] }) => api.post('/feeds', data),
+  update: (id: string, data: { name: string, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
+  delete: (id: string)                                                            => api.delete(`/feeds/${id}`),
 }

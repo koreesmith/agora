@@ -48,7 +48,7 @@ export default function Layout() {
     { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
     { to: '/friends',                   icon: Users,          label: 'Friends' },
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
-    { to: '/albums',                    icon: Images,         label: 'Albums' },
+    { to: '/albums',                    icon: Images,         label: 'Photo Albums' },
     { to: '/discover',                  icon: Compass,        label: 'Find Friends' },
     { to: '/search',                    icon: Search,         label: 'Search' },
     { to: `/profile/${user?.username}`, icon: User,           label: 'Profile' },

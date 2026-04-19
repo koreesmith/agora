@@ -37,16 +37,18 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Album struct {
-	ID          string  `json:"id"`
-	OwnerID     string  `json:"owner_id"`
-	OwnerName   string  `json:"owner_username"`
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	CoverURL    string  `json:"cover_url"`
-	Visibility  string  `json:"visibility"`
-	PhotoCount  int     `json:"photo_count"`
-	CreatedAt   string  `json:"created_at"`
-	Photos      []Photo `json:"photos,omitempty"`
+	ID              string  `json:"id"`
+	OwnerID         string  `json:"owner_id"`
+	OwnerName       string  `json:"owner_username"`
+	Title           string  `json:"title"`
+	Description     string  `json:"description"`
+	CoverURL        string  `json:"cover_url"`
+	Visibility      string  `json:"visibility"`
+	FriendGroupID   *string `json:"friend_group_id,omitempty"`
+	FriendGroupName *string `json:"friend_group_name,omitempty"`
+	PhotoCount      int     `json:"photo_count"`
+	CreatedAt       string  `json:"created_at"`
+	Photos          []Photo `json:"photos,omitempty"`
 }
 
 type Photo struct {
@@ -65,12 +67,15 @@ func (s *Service) canView(albumID, viewerID string) (bool, Album) {
 	var a Album
 	err := s.db.QueryRow(`
 		SELECT a.id, a.owner_id, u.username, a.title, a.description,
-		       a.cover_url, a.visibility, a.photo_count, a.created_at
+		       a.cover_url, a.visibility, a.photo_count, a.created_at,
+		       a.friend_group_id, fg.name
 		FROM albums a
 		JOIN users u ON u.id = a.owner_id
+		LEFT JOIN friend_groups fg ON fg.id = a.friend_group_id
 		WHERE a.id = $1
 	`, albumID).Scan(&a.ID, &a.OwnerID, &a.OwnerName, &a.Title, &a.Description,
-		&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt)
+		&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt,
+		&a.FriendGroupID, &a.FriendGroupName)
 	if err != nil {
 		return false, a
 	}
@@ -90,6 +95,18 @@ func (s *Service) canView(albumID, viewerID string) (bool, Album) {
 			)
 		`, viewerID, a.OwnerID).Scan(&isFriend)
 		return isFriend, a
+	case "group":
+		if a.FriendGroupID == nil {
+			return false, a
+		}
+		var isMember bool
+		s.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM friend_group_members
+				WHERE group_id = $1 AND friend_id = $2
+			)
+		`, *a.FriendGroupID, viewerID).Scan(&isMember)
+		return isMember, a
 	default:
 		return false, a
 	}
@@ -107,9 +124,11 @@ func (s *Service) ListAlbums(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT a.id, a.owner_id, u.username, a.title, a.description,
-		       a.cover_url, a.visibility, a.photo_count, a.created_at
+		       a.cover_url, a.visibility, a.photo_count, a.created_at,
+		       a.friend_group_id, fg.name
 		FROM albums a
 		JOIN users u ON u.id = a.owner_id
+		LEFT JOIN friend_groups fg ON fg.id = a.friend_group_id
 		WHERE a.owner_id = $1
 		ORDER BY a.created_at DESC
 		LIMIT $2 OFFSET $3
@@ -123,7 +142,8 @@ func (s *Service) ListAlbums(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a Album
 		rows.Scan(&a.ID, &a.OwnerID, &a.OwnerName, &a.Title, &a.Description,
-			&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt)
+			&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt,
+			&a.FriendGroupID, &a.FriendGroupName)
 		albums = append(albums, a)
 	}
 	if albums == nil { albums = []Album{} }
@@ -152,24 +172,34 @@ func (s *Service) ListUserAlbums(w http.ResponseWriter, r *http.Request) {
 		`, viewerID, ownerID).Scan(&isFriend)
 	}
 
-	var visFilter string
+	var (
+		visFilter string
+		queryArgs []any
+	)
 	if isSelf {
 		visFilter = ""
+		queryArgs = []any{ownerID}
 	} else if isFriend {
-		visFilter = "AND a.visibility IN ('public','friends')"
+		visFilter = `AND (a.visibility IN ('public','friends') OR (a.visibility = 'group' AND EXISTS(
+			SELECT 1 FROM friend_group_members WHERE group_id = a.friend_group_id AND friend_id = $2
+		)))`
+		queryArgs = []any{ownerID, viewerID}
 	} else {
 		visFilter = "AND a.visibility = 'public'"
+		queryArgs = []any{ownerID}
 	}
 
 	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT a.id, a.owner_id, u.username, a.title, a.description,
-		       a.cover_url, a.visibility, a.photo_count, a.created_at
+		       a.cover_url, a.visibility, a.photo_count, a.created_at,
+		       a.friend_group_id, fg.name
 		FROM albums a
 		JOIN users u ON u.id = a.owner_id
+		LEFT JOIN friend_groups fg ON fg.id = a.friend_group_id
 		WHERE a.owner_id = $1 %s
 		ORDER BY a.created_at DESC
 		LIMIT 50
-	`, visFilter), ownerID)
+	`, visFilter), queryArgs...)
 	if err != nil {
 		writeError(w, 500, "db error"); return
 	}
@@ -179,7 +209,8 @@ func (s *Service) ListUserAlbums(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a Album
 		rows.Scan(&a.ID, &a.OwnerID, &a.OwnerName, &a.Title, &a.Description,
-			&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt)
+			&a.CoverURL, &a.Visibility, &a.PhotoCount, &a.CreatedAt,
+			&a.FriendGroupID, &a.FriendGroupName)
 		albums = append(albums, a)
 	}
 	if albums == nil { albums = []Album{} }
@@ -221,22 +252,33 @@ func (s *Service) GetAlbum(w http.ResponseWriter, r *http.Request) {
 func (s *Service) CreateAlbum(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.UserIDFromCtx(r.Context())
 	var req struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Visibility  string `json:"visibility"`
+		Title         string  `json:"title"`
+		Description   string  `json:"description"`
+		Visibility    string  `json:"visibility"`
+		FriendGroupID *string `json:"friend_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" {
 		writeError(w, 400, "title required"); return
 	}
-	if req.Visibility != "public" && req.Visibility != "private" {
+	if req.Visibility != "public" && req.Visibility != "private" && req.Visibility != "group" {
 		req.Visibility = "friends"
+	}
+	if req.Visibility == "group" {
+		if req.FriendGroupID == nil {
+			writeError(w, 400, "friend_group_id required for group visibility"); return
+		}
+		var groupOwner string
+		s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, *req.FriendGroupID).Scan(&groupOwner)
+		if groupOwner != ownerID {
+			writeError(w, 400, "invalid friend_group_id"); return
+		}
 	}
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO albums (owner_id, title, description, visibility)
-		VALUES ($1, $2, $3, $4) RETURNING id
-	`, ownerID, strings.TrimSpace(req.Title), req.Description, req.Visibility).Scan(&id)
+		INSERT INTO albums (owner_id, title, description, visibility, friend_group_id)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, ownerID, strings.TrimSpace(req.Title), req.Description, req.Visibility, req.FriendGroupID).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create album"); return
 	}
@@ -253,10 +295,11 @@ func (s *Service) UpdateAlbum(w http.ResponseWriter, r *http.Request) {
 	if currentOwner != ownerID { writeError(w, 403, "forbidden"); return }
 
 	var req struct {
-		Title       *string `json:"title"`
-		Description *string `json:"description"`
-		Visibility  *string `json:"visibility"`
-		CoverURL    *string `json:"cover_url"`
+		Title         *string `json:"title"`
+		Description   *string `json:"description"`
+		Visibility    *string `json:"visibility"`
+		CoverURL      *string `json:"cover_url"`
+		FriendGroupID *string `json:"friend_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
@@ -271,7 +314,20 @@ func (s *Service) UpdateAlbum(w http.ResponseWriter, r *http.Request) {
 	if req.CoverURL != nil    { add("cover_url", *req.CoverURL) }
 	if req.Visibility != nil {
 		v := *req.Visibility
-		if v != "public" && v != "private" { v = "friends" }
+		if v != "public" && v != "private" && v != "group" { v = "friends" }
+		if v == "group" {
+			if req.FriendGroupID == nil {
+				writeError(w, 400, "friend_group_id required for group visibility"); return
+			}
+			var groupOwner string
+			s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, *req.FriendGroupID).Scan(&groupOwner)
+			if groupOwner != ownerID {
+				writeError(w, 400, "invalid friend_group_id"); return
+			}
+			add("friend_group_id", *req.FriendGroupID)
+		} else {
+			add("friend_group_id", nil)
+		}
 		add("visibility", v)
 	}
 	if len(sets) == 0 { writeJSON(w, 200, map[string]string{"message": "nothing to update"}); return }

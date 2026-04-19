@@ -502,4 +502,9 @@ var schema = []string{
 
 	// ── Online presence (AGORA-91) ─────────────────────────────────────────
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`,
+
+	// ── Album friend-list privacy (AGORA-64) ──────────────────────────────
+	`ALTER TABLE albums DROP CONSTRAINT IF EXISTS albums_visibility_check`,
+	`ALTER TABLE albums ADD CONSTRAINT albums_visibility_check CHECK (visibility IN ('public','friends','group','private'))`,
+	`ALTER TABLE albums ADD COLUMN IF NOT EXISTS friend_group_id UUID REFERENCES friend_groups(id) ON DELETE SET NULL`,
 }

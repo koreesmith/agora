@@ -507,4 +507,21 @@ var schema = []string{
 	`ALTER TABLE albums DROP CONSTRAINT IF EXISTS albums_visibility_check`,
 	`ALTER TABLE albums ADD CONSTRAINT albums_visibility_check CHECK (visibility IN ('public','friends','group','private'))`,
 	`ALTER TABLE albums ADD COLUMN IF NOT EXISTS friend_group_id UUID REFERENCES friend_groups(id) ON DELETE SET NULL`,
+
+	// ── Custom feeds (AGORA-99) ────────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS custom_feeds (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		owner_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		name       VARCHAR(100) NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_custom_feeds_owner ON custom_feeds(owner_id, created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS custom_feed_filters (
+		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		feed_id     UUID        NOT NULL REFERENCES custom_feeds(id) ON DELETE CASCADE,
+		filter_type VARCHAR(30) NOT NULL CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type')),
+		value       TEXT        NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
 }

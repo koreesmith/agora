@@ -89,6 +89,15 @@ function notifTarget(n: any): string | null {
   }
 }
 
+function groupedActorText(actors: any[], count: number): string {
+  const names = actors.map(a => a.display_name || a.username || 'Someone')
+  if (count === 1) return names[0]
+  if (count === 2) return `${names[0]} and ${names[1]}`
+  if (count === 3 && actors.length >= 3) return `${names[0]}, ${names[1]}, and ${names[2]}`
+  const others = count - 2
+  return `${names[0]}, ${names[1]}, and ${others} other${others !== 1 ? 's' : ''}`
+}
+
 export default function NotificationsPage() {
   const qc = useQueryClient()
   const [localState, setLocalState] = useState<Record<string, 'accepted' | 'declined'>>({})
@@ -105,13 +114,19 @@ export default function NotificationsPage() {
   }
 
   const markAll  = useMutation({ mutationFn: () => notificationsApi.markAllRead(), onSuccess: invalidate })
-  const markRead = useMutation({ mutationFn: (id: string) => notificationsApi.markRead(id), onSuccess: invalidate })
+  const markRead = useMutation({
+    mutationFn: (n: any) => n.grouped
+      ? notificationsApi.markManyRead(n.ids)
+      : notificationsApi.markRead(n.id),
+    onSuccess: invalidate,
+  })
   const accept   = useMutation({
-    mutationFn: ({ actorId }: { actorId: string; actor: any }) => friendsApi.acceptRequest(actorId),
-    onSuccess: (_, { actor }) => {
+    mutationFn: ({ actorId }: { actorId: string; actor: any; notif: any }) => friendsApi.acceptRequest(actorId),
+    onSuccess: (_, { actor, notif }) => {
       qc.invalidateQueries({ queryKey: ['friends'] })
       invalidate()
       if (actor) setListModalFriend(actor)
+      markRead.mutate(notif)
     },
   })
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: invalidate })
@@ -155,7 +170,7 @@ export default function NotificationsPage() {
               {target && !isFriendReq ? (
                 <Link
                   to={target}
-                  onClick={() => { if (!n.read) markRead.mutate(n.id) }}
+                  onClick={() => { if (!n.read) markRead.mutate(n) }}
                   className="flex items-start gap-3 hover:opacity-80 transition-opacity"
                 >
                   <NotifAvatar n={n} />
@@ -184,22 +199,21 @@ export default function NotificationsPage() {
                       <button
                         onClick={() => {
                           setLocalState(s => ({ ...s, [n.id]: 'accepted' }))
-                          accept.mutate({ actorId: n.actor_id, actor: { id: n.actor_id, username: n.actor_username, display_name: n.actor_display_name, avatar_url: n.actor_avatar_url } })
-                          markRead.mutate(n.id)
+                          accept.mutate({ actorId: n.actor_id, actor: { id: n.actor_id, username: n.actor_username, display_name: n.actor_display_name, avatar_url: n.actor_avatar_url }, notif: n })
                         }}
                         className="btn-primary text-xs py-1 px-3 flex items-center gap-1"
                       >
                         <UserCheck size={13} /> Accept
                       </button>
                       <button
-                        onClick={() => { setLocalState(s => ({ ...s, [n.id]: 'declined' })); decline.mutate(n.actor_id); markRead.mutate(n.id) }}
+                        onClick={() => { setLocalState(s => ({ ...s, [n.id]: 'declined' })); decline.mutate(n.actor_id); markRead.mutate(n) }}
                         className="btn-secondary text-xs py-1 px-3 flex items-center gap-1"
                       >
                         <UserX size={13} /> Decline
                       </button>
                       <Link
                         to={`/profile/${n.actor_username}`}
-                        onClick={() => { if (!n.read) markRead.mutate(n.id) }}
+                        onClick={() => { if (!n.read) markRead.mutate(n) }}
                         className="btn-ghost text-xs py-1 px-2 text-agora-500"
                       >
                         View profile
@@ -217,10 +231,11 @@ export default function NotificationsPage() {
 }
 
 function NotifAvatar({ n }: { n: any }) {
+  const avatarUrl = n.grouped ? n.actors?.[0]?.avatar_url : n.actor_avatar_url
   return (
     <div className="w-9 h-9 rounded-full bg-agora-100 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 overflow-hidden">
-      {n.actor_avatar_url
-        ? <img src={n.actor_avatar_url} alt="" className="w-full h-full object-cover" />
+      {avatarUrl
+        ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
         : (typeIcon[n.type] || <Bell size={16} />)
       }
     </div>
@@ -230,10 +245,13 @@ function NotifAvatar({ n }: { n: any }) {
 function NotifBody({ n }: { n: any }) {
   const reactionEmoji = (n.type === 'post_reaction' || n.type === 'comment_reaction') && n.data
     ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
+  const actorText = n.grouped
+    ? groupedActorText(n.actors ?? [], n.count ?? 1)
+    : (n.actor_display_name || n.actor_username)
   return (
     <div className="flex-1 min-w-0">
       <p className="text-sm">
-        <span className="font-semibold">{n.actor_display_name || n.actor_username}</span>
+        <span className="font-semibold">{actorText}</span>
         {' '}{notifText[n.type] || ''}{reactionEmoji}
       </p>
       <p className="text-xs text-agora-400 mt-0.5">

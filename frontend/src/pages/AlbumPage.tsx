@@ -1,18 +1,19 @@
 import { useState, useRef } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { albumsApi } from '../api'
+import { albumsApi, friendsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import {
-  ArrowLeft, Plus, Trash2, Pencil, X, Globe, Users, Lock,
+  ArrowLeft, Plus, Trash2, Pencil, X, Globe, Users, Lock, List,
   ChevronLeft, ChevronRight, Image as ImageIcon, Check
 } from 'lucide-react'
 
-const visIcons: Record<string, React.ReactNode> = {
-  public:  <><Globe size={13} /> Public</>,
-  friends: <><Users size={13} /> Friends</>,
-  private: <><Lock  size={13} /> Private</>,
+const visIcons: Record<string, (name?: string) => React.ReactNode> = {
+  public:  () => <><Globe size={13} /> Public</>,
+  friends: () => <><Users size={13} /> Friends</>,
+  group:   (name) => <><List  size={13} /> {name || 'List'}</>,
+  private: () => <><Lock  size={13} /> Private</>,
 }
 
 export default function AlbumPage() {
@@ -26,7 +27,7 @@ export default function AlbumPage() {
   const [editingCaption, setEditingCaption] = useState<string | null>(null)
   const [captionText, setCaptionText] = useState('')
   const [editingAlbum, setEditingAlbum] = useState(false)
-  const [albumForm, setAlbumForm] = useState({ title: '', description: '', visibility: 'friends' })
+  const [albumForm, setAlbumForm] = useState({ title: '', description: '', visibility: 'friends', friend_group_id: '' })
   const [uploading, setUploading] = useState(false)
 
   const { data, isLoading, error } = useQuery({
@@ -42,8 +43,19 @@ export default function AlbumPage() {
     mutationFn: () => albumsApi.delete(id!),
     onSuccess: () => navigate(-1),
   })
+  const { data: listsData } = useQuery({
+    queryKey: ['friend-lists'],
+    queryFn: () => friendsApi.listFriendLists().then(r => r.data),
+    enabled: isOwner,
+  })
+  const friendLists: any[] = listsData?.groups ?? []
+
   const updateAlbum = useMutation({
-    mutationFn: () => albumsApi.update(id!, albumForm),
+    mutationFn: () => {
+      const payload: any = { title: albumForm.title, description: albumForm.description, visibility: albumForm.visibility }
+      if (albumForm.visibility === 'group') payload.friend_group_id = albumForm.friend_group_id
+      return albumsApi.update(id!, payload)
+    },
     onSuccess: () => { setEditingAlbum(false); qc.invalidateQueries({ queryKey: ['album', id] }) },
   })
   const deletePhoto = useMutation({
@@ -76,7 +88,7 @@ export default function AlbumPage() {
   }
 
   const openEdit = () => {
-    setAlbumForm({ title: album.title, description: album.description, visibility: album.visibility })
+    setAlbumForm({ title: album.title, description: album.description, visibility: album.visibility, friend_group_id: album.friend_group_id || '' })
     setEditingAlbum(true)
   }
 
@@ -109,7 +121,7 @@ export default function AlbumPage() {
           <div className="flex items-center gap-2 text-xs text-agora-400 mt-0.5">
             <Link to={`/profile/${album.owner_username}`} className="hover:underline font-medium">{album.owner_username}</Link>
             <span>·</span>
-            <span className="flex items-center gap-1">{visIcons[album.visibility]}</span>
+            <span className="flex items-center gap-1">{(visIcons[album.visibility] || visIcons['private'])(album.friend_group_name)}</span>
             <span>·</span>
             <span>{album.photo_count} photo{album.photo_count !== 1 ? 's' : ''}</span>
           </div>
@@ -143,19 +155,37 @@ export default function AlbumPage() {
                 onChange={e => setAlbumForm(f => ({ ...f, description: e.target.value }))} /></div>
             <div>
               <label className="label">Visibility</label>
-              <div className="grid grid-cols-3 gap-2 mt-1">
-                {(['public', 'friends', 'private'] as const).map(v => (
-                  <button key={v} onClick={() => setAlbumForm(f => ({ ...f, visibility: v }))}
+              <div className="grid grid-cols-2 gap-2 mt-1">
+                {([
+                  ['public',  Globe,  'Public'],
+                  ['friends', Users,  'Friends'],
+                  ['group',   List,   'Friend List'],
+                  ['private', Lock,   'Private'],
+                ] as [string, any, string][]).map(([v, Icon, label]) => (
+                  <button key={v} onClick={() => setAlbumForm(f => ({ ...f, visibility: v, friend_group_id: '' }))}
                     className={`p-2 rounded-lg border-2 text-sm font-medium flex items-center justify-center gap-1 ${albumForm.visibility === v ? 'border-agora-600 bg-agora-50 dark:bg-agora-700' : 'border-agora-200 dark:border-agora-600'}`}>
-                    {v === 'public' ? <Globe size={13}/> : v === 'friends' ? <Users size={13}/> : <Lock size={13}/>}
-                    <span className="capitalize">{v}</span>
+                    <Icon size={13}/>
+                    <span>{label}</span>
                   </button>
                 ))}
               </div>
+              {albumForm.visibility === 'group' && (
+                <div className="mt-2">
+                  <select
+                    className="input"
+                    value={albumForm.friend_group_id}
+                    onChange={e => setAlbumForm(f => ({ ...f, friend_group_id: e.target.value }))}>
+                    <option value="">Select a friend list…</option>
+                    {friendLists.map((g: any) => (
+                      <option key={g.id} value={g.id}>{g.name} ({g.member_count} members)</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 justify-end">
               <button onClick={() => setEditingAlbum(false)} className="btn-secondary">Cancel</button>
-              <button onClick={() => updateAlbum.mutate()} disabled={!albumForm.title.trim() || updateAlbum.isPending} className="btn-primary">
+              <button onClick={() => updateAlbum.mutate()} disabled={!albumForm.title.trim() || updateAlbum.isPending || (albumForm.visibility === 'group' && !albumForm.friend_group_id)} className="btn-primary">
                 {updateAlbum.isPending ? 'Saving…' : 'Save'}
               </button>
             </div>

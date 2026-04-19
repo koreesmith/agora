@@ -57,12 +57,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Participant struct {
-	UserID       string  `json:"user_id"`
-	Username     string  `json:"username"`
-	DisplayName  string  `json:"display_name"`
-	AvatarURL    string  `json:"avatar_url"`
-	LastReadAt   *string `json:"last_read_at,omitempty"`
-	ReadReceipts bool    `json:"read_receipts"`
+	UserID        string  `json:"user_id"`
+	Username      string  `json:"username"`
+	DisplayName   string  `json:"display_name"`
+	AvatarURL     string  `json:"avatar_url"`
+	LastReadAt    *string `json:"last_read_at,omitempty"`
+	ReadReceipts  bool    `json:"read_receipts"`
+	LastActiveAt  *string `json:"last_active_at,omitempty"`
+	IsOnline      bool    `json:"is_online"`
 }
 
 type Conversation struct {
@@ -113,7 +115,9 @@ func (s *Service) isFriend(a, b string) bool {
 
 func (s *Service) loadParticipants(convID, viewerID string) []Participant {
 	rows, err := s.db.Query(`
-		SELECT cp.user_id, u.username, u.display_name, u.avatar_url, cp.last_read_at, cp.read_receipts
+		SELECT cp.user_id, u.username, u.display_name, u.avatar_url, cp.last_read_at, cp.read_receipts,
+		       u.last_active_at,
+		       (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '5 minutes') AS is_online
 		FROM conversation_participants cp
 		JOIN users u ON u.id = cp.user_id
 		WHERE cp.conversation_id = $1
@@ -123,7 +127,8 @@ func (s *Service) loadParticipants(convID, viewerID string) []Participant {
 	var ps []Participant
 	for rows.Next() {
 		var p Participant
-		rows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.LastReadAt, &p.ReadReceipts)
+		rows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.LastReadAt, &p.ReadReceipts,
+			&p.LastActiveAt, &p.IsOnline)
 		if p.UserID != viewerID && !p.ReadReceipts {
 			p.LastReadAt = nil
 		}
@@ -593,6 +598,7 @@ func (s *Service) WebSocket(w http.ResponseWriter, r *http.Request) {
 
 	c := &Client{userID: userID, conn: conn, send: make(chan WSEvent, 32)}
 	s.hub.reg <- c
+	s.db.Exec(`UPDATE users SET last_active_at=NOW() WHERE id=$1`, userID)
 
 	// Writer goroutine
 	go func() {
@@ -609,6 +615,7 @@ func (s *Service) WebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		s.db.Exec(`UPDATE users SET last_active_at=NOW() WHERE id=$1`, userID)
 		return nil
 	})
 

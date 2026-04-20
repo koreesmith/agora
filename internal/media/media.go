@@ -140,6 +140,9 @@ func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error
 		return s.saveBytes(data, category, filename)
 	}
 
+	// Read EXIF orientation before decoding — Go's image decoder discards it.
+	orientation := exifOrientation(data)
+
 	// Decode, resize, re-encode as JPEG
 	img, _, decErr := image.Decode(bytes.NewReader(data))
 	if decErr != nil {
@@ -149,6 +152,7 @@ func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error
 		return s.saveBytes(data, category, filename)
 	}
 
+	img = applyOrientation(img, orientation)
 	resized := resizeToFit(img, maxW, maxH)
 	var buf bytes.Buffer
 	if encErr := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: jpegQuality}); encErr != nil {

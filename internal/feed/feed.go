@@ -209,6 +209,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
 	s.enrichPolls(posts, userID)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -317,7 +318,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			case "repost":
 				typeParts = append(typeParts, `p.repost_of_id IS NOT NULL`)
 			case "media":
-				typeParts = append(typeParts, `p.image_url != ''`)
+				typeParts = append(typeParts, `(p.image_url != '' OR EXISTS(SELECT 1 FROM post_photos WHERE post_id = p.id))`)
 			case "text":
 				typeParts = append(typeParts, `(p.repost_of_id IS NULL AND p.image_url = '')`)
 			}
@@ -410,6 +411,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
 	s.enrichPolls(posts, userID)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -522,6 +524,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
 	s.enrichPolls(posts, viewerID)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -532,6 +535,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content         string   `json:"content"`
 		ImageURL        string   `json:"image_url"`
+		ImageURLs       []string `json:"image_urls"`
 		Visibility      string   `json:"visibility"`
 		GroupID         string   `json:"group_id"`
 		ContentWarning  string   `json:"content_warning"`
@@ -563,6 +567,17 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize: if image_urls provided, use those; fall back to image_url
+	if len(req.ImageURLs) > 0 {
+		// Cap at 4 photos
+		if len(req.ImageURLs) > 4 {
+			req.ImageURLs = req.ImageURLs[:4]
+		}
+		req.ImageURL = req.ImageURLs[0]
+	} else if req.ImageURL != "" {
+		req.ImageURLs = []string{req.ImageURL}
+	}
+
 	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
 		writeError(w, 400, "post must have content or image")
 		return
@@ -575,6 +590,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	if req.ImageURL != "" {
 		if resolved := resolveGifURL(req.ImageURL); resolved != "" {
 			req.ImageURL = resolved
+			req.ImageURLs[0] = req.ImageURL
 		}
 	}
 
@@ -647,6 +663,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		s.db.Exec(`INSERT INTO poll_options (post_id, text, position) VALUES ($1, $2, $3)`, id, opt, i)
 	}
 
+	// Insert photos if multiple
+	if len(req.ImageURLs) > 1 {
+		for i, u := range req.ImageURLs {
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, i)
+		}
+	}
+
 	go s.notifyMentions(req.Content, userID, id)
 	if wallUserID == nil {
 		go s.notifyPostFollowers(userID, id)
@@ -658,9 +681,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		s.notif.Create(*wallUserID, userID, "wall_post_pending", id, "")
 	}
 
-	// Add image to user's Timeline Photos album
-	if req.ImageURL != "" && s.albums != nil {
-		go s.albums.AddToTimelineAlbum(userID, req.ImageURL)
+	// Add images to user's Timeline Photos album
+	if len(req.ImageURLs) > 0 && s.albums != nil {
+		for _, u := range req.ImageURLs {
+			u := u
+			go s.albums.AddToTimelineAlbum(userID, u)
+		}
 	}
 
 	// Broadcast public posts to federated friend instances
@@ -790,6 +816,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enrichReactions(posts, viewerID)
 	s.enrichPolls(posts, viewerID)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -1086,6 +1113,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
 	s.enrichPolls(posts, viewerID)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -1119,6 +1147,7 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	posts := scanPosts(rows)
+	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -1259,6 +1288,54 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// enrichPhotos batch-loads post_photos rows for a slice of posts (AGORA-93).
+// Posts with only one photo use image_url directly; photos are only stored in
+// post_photos when a post has ≥2 images.
+func (s *Service) enrichPhotos(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]string, len(posts))
+	idxMap := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxMap[p.ID] = i
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	rows, err := s.db.Query(
+		fmt.Sprintf(`SELECT post_id, url FROM post_photos WHERE post_id IN (%s) ORDER BY post_id, position ASC`,
+			strings.Join(placeholders, ",")),
+		args...,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var postID, url string
+		rows.Scan(&postID, &url)
+		if idx, ok := idxMap[postID]; ok {
+			posts[idx].PhotoURLs = append(posts[idx].PhotoURLs, url)
+		}
+	}
+	// For posts with photos in the table, the image_url holds the first photo
+	// (set on insert). Ensure photo_urls always includes it as the first entry
+	// when the table has entries.
+	for i := range posts {
+		if len(posts[i].PhotoURLs) > 0 && posts[i].ImageURL != "" {
+			// photo_urls from the table already has position 0 = ImageURL
+		} else if posts[i].ImageURL != "" {
+			// single-image post: expose via photo_urls for uniform frontend access
+			posts[i].PhotoURLs = []string{posts[i].ImageURL}
 		}
 	}
 }
@@ -1629,17 +1706,26 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Content        *string `json:"content"`
-		ImageURL       *string `json:"image_url"`
-		Visibility     *string `json:"visibility"`
-		FriendListID   *string `json:"friend_list_id"`
-		ContentWarning *string `json:"content_warning"`
+		Content        *string  `json:"content"`
+		ImageURL       *string  `json:"image_url"`
+		ImageURLs      []string `json:"image_urls"`
+		Visibility     *string  `json:"visibility"`
+		FriendListID   *string  `json:"friend_list_id"`
+		ContentWarning *string  `json:"content_warning"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
-	if req.Content == nil && req.ImageURL == nil && req.Visibility == nil && req.ContentWarning == nil {
+	if req.Content == nil && req.ImageURL == nil && len(req.ImageURLs) == 0 && req.Visibility == nil && req.ContentWarning == nil {
 		writeError(w, 400, "nothing to update"); return
+	}
+	// Normalize image_urls → image_url
+	if len(req.ImageURLs) > 0 {
+		if len(req.ImageURLs) > 4 {
+			req.ImageURLs = req.ImageURLs[:4]
+		}
+		first := req.ImageURLs[0]
+		req.ImageURL = &first
 	}
 
 	// Validate visibility value if provided
@@ -1685,6 +1771,17 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	sets = append(sets, "edited_at = NOW()")
 	args = append(args, id)
 	s.db.Exec(fmt.Sprintf("UPDATE posts SET %s WHERE id = $%d", strings.Join(sets, ", "), i), args...)
+
+	// Replace photos if image_urls was provided
+	if len(req.ImageURLs) > 0 {
+		s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, id)
+		if len(req.ImageURLs) > 1 {
+			for pos, u := range req.ImageURLs {
+				s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, pos)
+			}
+		}
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "updated"})
 }
 
@@ -1764,6 +1861,8 @@ type Post struct {
 	WallUsername     *string `json:"wall_username,omitempty"`
 	WallDisplayName  *string `json:"wall_display_name,omitempty"`
 	WallStatus       string  `json:"wall_status,omitempty"`
+	// Multi-photo (AGORA-93)
+	PhotoURLs []string `json:"photo_urls,omitempty"`
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`

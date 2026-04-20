@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -64,6 +64,8 @@ interface Post {
   wall_username?: string
   wall_display_name?: string
   wall_status?: string
+  // Multi-photo (AGORA-93)
+  photo_urls?: string[]
   created_at: string
   edited_at?: string
 }
@@ -291,7 +293,8 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
 // ── PostCard ──────────────────────────────────────────────────────────────────
 
 export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
-  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+  const [lightboxPhotos, setLightboxPhotos] = useState<string[] | null>(null)
+  const [lightboxIdx, setLightboxIdx] = useState(0)
   const [twExpanded, setTwExpanded] = useState(false)
   const { user } = useAuthStore()
   const qc = useQueryClient()
@@ -635,7 +638,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <button onClick={() => setEditing(false)} className="btn-secondary text-xs py-1 px-3">Cancel</button>
                 <button
                   onClick={() => edit.mutate()}
-                  disabled={edit.isPending || (!editContent.trim() && !post.image_url) || (editVisibility === 'group' && !editFriendListId)}
+                  disabled={edit.isPending || (!editContent.trim() && !post.image_url && !post.photo_urls?.length) || (editVisibility === 'group' && !editFriendListId)}
                   className="btn-primary text-xs py-1 px-3"
                 >
                   {edit.isPending ? 'Saving…' : 'Save'}
@@ -701,67 +704,117 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 </a>
               )}
 
-              {/* Image */}
-              {(post.repost_of_id ? post.repost_image_url : post.image_url) && (() => {
-                const url = post.repost_of_id ? post.repost_image_url : post.image_url
-                const isDirectGif = isDirectGifUrl(url!)
-                const isGif = isDirectGif || isGifUrl(url!)
-                // If it's a GIF share page URL (not direct media), show as a link instead
-                if (isGif && !isDirectGif) {
-                  return (
-                    <a href={url} target="_blank" rel="noopener noreferrer"
-                      className="mt-2 flex items-center gap-2 border border-agora-200 dark:border-agora-700 rounded-xl px-3 py-2 hover:bg-agora-50 dark:hover:bg-agora-900/40 transition-colors">
-                      <span className="text-lg">🎞️</span>
-                      <div>
-                        <p className="text-xs text-agora-500">GIF</p>
-                        <p className="text-sm text-agora-700 dark:text-agora-300 truncate">{url}</p>
+              {/* Image(s) */}
+              {(() => {
+                const photos: string[] = post.repost_of_id
+                  ? (post.repost_image_url ? [post.repost_image_url] : [])
+                  : (post.photo_urls && post.photo_urls.length > 0 ? post.photo_urls : post.image_url ? [post.image_url] : [])
+                if (photos.length === 0) return null
+
+                // Single GIF share-page link
+                if (photos.length === 1) {
+                  const url = photos[0]
+                  const isDirectGif = isDirectGifUrl(url)
+                  const isGif = isDirectGif || isGifUrl(url)
+                  if (isGif && !isDirectGif) {
+                    return (
+                      <a href={url} target="_blank" rel="noopener noreferrer"
+                        className="mt-2 flex items-center gap-2 border border-agora-200 dark:border-agora-700 rounded-xl px-3 py-2 hover:bg-agora-50 dark:hover:bg-agora-900/40 transition-colors">
+                        <span className="text-lg">🎞️</span>
+                        <div>
+                          <p className="text-xs text-agora-500">GIF</p>
+                          <p className="text-sm text-agora-700 dark:text-agora-300 truncate">{url}</p>
+                        </div>
+                      </a>
+                    )
+                  }
+                  if (isDirectGif) {
+                    return (
+                      <div className="mt-2 rounded-lg overflow-hidden">
+                        <img src={url} alt="" className="w-full max-h-[32rem] object-contain rounded-lg" />
                       </div>
-                    </a>
-                  )
+                    )
+                  }
                 }
-                return isDirectGif ? (
-                  // GIFs: display inline, no lightbox (animation would pause in lightbox)
-                  <div className="mt-2 rounded-lg overflow-hidden">
-                    <img
-                      src={url}
-                      alt=""
-                      className="w-full max-h-[32rem] object-contain rounded-lg"
-                    />
-                  </div>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => setLightboxUrl(url!)}
-                      className="mt-2 block w-full rounded-lg overflow-hidden focus:outline-none"
-                    >
-                      <img
-                        src={url}
-                        alt=""
-                        className="w-full max-h-[32rem] object-contain rounded-lg hover:opacity-95 transition-opacity cursor-zoom-in bg-agora-50 dark:bg-agora-900"
-                      />
-                    </button>
-                    {lightboxUrl === url && (
-                      <div
-                        className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
-                        onClick={() => setLightboxUrl(null)}
+
+                // Photo grid
+                const gridClass = photos.length === 1
+                  ? 'grid-cols-1'
+                  : photos.length === 2
+                  ? 'grid-cols-2'
+                  : 'grid-cols-2'
+
+                return (
+                  <div className={`mt-2 grid gap-1 ${gridClass}`}>
+                    {photos.map((url, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => { setLightboxPhotos(photos); setLightboxIdx(idx) }}
+                        className={`relative overflow-hidden rounded-lg focus:outline-none ${photos.length === 3 && idx === 2 ? 'col-span-2' : ''}`}
                       >
-                        <button
-                          className="absolute top-4 right-4 text-white bg-black/40 rounded-full p-1.5 hover:bg-black/70"
-                          onClick={() => setLightboxUrl(null)}
-                        >
-                          <X size={20} />
-                        </button>
                         <img
                           src={url}
                           alt=""
-                          className="max-w-[90vw] max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
-                          onClick={e => e.stopPropagation()}
+                          className={`w-full object-cover hover:opacity-95 transition-opacity cursor-zoom-in bg-agora-50 dark:bg-agora-900 ${
+                            photos.length === 1 ? 'max-h-[32rem] object-contain' : 'h-48'
+                          }`}
                         />
-                      </div>
-                    )}
-                  </>
+                        {photos.length > 1 && photos.length === 4 && idx === 3 && (
+                          <span className="sr-only">Photo {idx + 1} of {photos.length}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 )
               })()}
+
+              {/* Lightbox */}
+              {lightboxPhotos && (
+                <div
+                  className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
+                  onClick={() => setLightboxPhotos(null)}
+                >
+                  <button
+                    className="absolute top-4 right-4 text-white bg-black/40 rounded-full p-1.5 hover:bg-black/70 z-10"
+                    onClick={() => setLightboxPhotos(null)}
+                  >
+                    <X size={20} />
+                  </button>
+                  {lightboxPhotos.length > 1 && (
+                    <>
+                      <button
+                        className="absolute left-4 text-white bg-black/40 rounded-full p-2 hover:bg-black/70 z-10 disabled:opacity-30"
+                        onClick={e => { e.stopPropagation(); setLightboxIdx(i => Math.max(0, i - 1)) }}
+                        disabled={lightboxIdx === 0}
+                      >
+                        <ChevronLeft size={24} />
+                      </button>
+                      <button
+                        className="absolute right-4 text-white bg-black/40 rounded-full p-2 hover:bg-black/70 z-10 disabled:opacity-30"
+                        onClick={e => { e.stopPropagation(); setLightboxIdx(i => Math.min(lightboxPhotos.length - 1, i + 1)) }}
+                        disabled={lightboxIdx === lightboxPhotos.length - 1}
+                      >
+                        <ChevronRight size={24} />
+                      </button>
+                      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-1.5 z-10">
+                        {lightboxPhotos.map((_, i) => (
+                          <button
+                            key={i}
+                            onClick={e => { e.stopPropagation(); setLightboxIdx(i) }}
+                            className={`w-2 h-2 rounded-full transition-colors ${i === lightboxIdx ? 'bg-white' : 'bg-white/40'}`}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <img
+                    src={lightboxPhotos[lightboxIdx]}
+                    alt=""
+                    className="max-w-[90vw] max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
+                    onClick={e => e.stopPropagation()}
+                  />
+                </div>
+              )}
                 </>
               )}
             </>

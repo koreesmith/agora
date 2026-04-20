@@ -23,7 +23,7 @@ export default function CreatePost() {
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [content, setContent] = useState('')
-  const [imageUrl, setImageUrl] = useState('')
+  const [imageUrls, setImageUrls] = useState<string[]>([])
   const [visibility, setVisibility] = useState('friends')
   const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -68,8 +68,8 @@ export default function CreatePost() {
 
     // GIF URLs: set as image directly, skip link preview entirely
     if (isGifUrl(url)) {
-      if (!imageUrl) {
-        setImageUrl(url)
+      if (imageUrls.length === 0) {
+        setImageUrls([url])
         // Strip the URL from the content so it doesn't show as text
         setContent(c => c.replace(url, '').trim())
       }
@@ -111,7 +111,7 @@ export default function CreatePost() {
   const create = useMutation({
     mutationFn: () => feedApi.createPost({
       content,
-      image_url: imageUrl,
+      image_urls: imageUrls,
       visibility,
       group_id: visibility === 'group' ? friendListId : undefined,
       content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
@@ -126,7 +126,7 @@ export default function CreatePost() {
       poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
     }),
     onSuccess: () => {
-      setContent(''); setImageUrl(''); setFriendListId('')
+      setContent(''); setImageUrls([]); setFriendListId('')
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
@@ -136,14 +136,21 @@ export default function CreatePost() {
   })
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if (!file) return
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    const remaining = 4 - imageUrls.length
+    const toUpload = files.slice(0, remaining)
     setUploading(true)
-    try { const res = await feedApi.uploadMedia(file, 'posts'); setImageUrl(res.data.url) }
-    catch (err: any) {
+    try {
+      const results = await Promise.all(toUpload.map(f => feedApi.uploadMedia(f, 'posts')))
+      setImageUrls(prev => [...prev, ...results.map(r => r.data.url)])
+    } catch (err: any) {
       const msg = err?.response?.data?.error || 'Image upload failed. Please try a JPEG or PNG file.'
       alert(msg)
+    } finally {
+      setUploading(false)
+      e.target.value = ''
     }
-    finally { setUploading(false) }
   }
 
   const visOptions = [
@@ -153,7 +160,7 @@ export default function CreatePost() {
   ]
 
   const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
-  const canPost = (content.trim() || imageUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
+  const canPost = (content.trim() || imageUrls.length > 0 || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
     && !create.isPending && !uploading && (!twEnabled || twLabel.trim()) && validPoll
 
   return (
@@ -182,21 +189,25 @@ export default function CreatePost() {
         </div>
       </div>
 
-      {/* Uploaded image / GIF preview */}
-      {imageUrl && (
-        <div className="relative ml-13">
-          {isGifUrl(imageUrl) && (
-            <span className="absolute top-2 left-2 bg-black/60 text-white text-xs font-bold px-1.5 py-0.5 rounded z-10">GIF</span>
-          )}
-          <img src={imageUrl} alt="" className={`rounded-lg w-full max-h-48 object-contain ${isGifUrl(imageUrl) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
-          <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80">
-            <X size={12} />
-          </button>
+      {/* Uploaded images preview */}
+      {imageUrls.length > 0 && (
+        <div className={`ml-13 grid gap-1.5 ${imageUrls.length === 1 ? 'grid-cols-1' : imageUrls.length === 2 ? 'grid-cols-2' : imageUrls.length === 3 ? 'grid-cols-2' : 'grid-cols-2'}`}>
+          {imageUrls.map((url, idx) => (
+            <div key={idx} className={`relative ${imageUrls.length === 3 && idx === 2 ? 'col-span-2' : ''}`}>
+              {isGifUrl(url) && (
+                <span className="absolute top-1 left-1 bg-black/60 text-white text-xs font-bold px-1 py-0.5 rounded z-10">GIF</span>
+              )}
+              <img src={url} alt="" className={`rounded-lg w-full object-cover ${imageUrls.length === 1 ? 'max-h-48' : 'h-32'} ${isGifUrl(url) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
+              <button onClick={() => setImageUrls(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
+                <X size={10} />
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
       {/* Link preview loading */}
-      {previewLoading && !imageUrl && (
+      {previewLoading && imageUrls.length === 0 && (
         <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 flex items-center gap-2 text-xs text-agora-400">
           <div className="w-3 h-3 border-2 border-agora-400 border-t-transparent rounded-full animate-spin" />
           Fetching link preview…
@@ -204,7 +215,7 @@ export default function CreatePost() {
       )}
 
       {/* Link preview error (only shown when backend returns a specific message) */}
-      {previewError && !previewLoading && !imageUrl && (
+      {previewError && !previewLoading && imageUrls.length === 0 && (
         <div className="border border-agora-200 dark:border-agora-600 rounded-xl px-3 py-2 flex items-center justify-between text-xs text-agora-400">
           <span>Could not load preview: {previewError}</span>
           <button onClick={dismissPreview} className="text-agora-300 hover:text-agora-500"><X size={12} /></button>
@@ -212,7 +223,7 @@ export default function CreatePost() {
       )}
 
       {/* Link preview card */}
-      {preview && !previewLoading && !imageUrl && (
+      {preview && !previewLoading && imageUrls.length === 0 && (
         <div className="relative border border-agora-200 dark:border-agora-600 rounded-xl overflow-hidden group">
           <button
             onClick={dismissPreview}
@@ -337,9 +348,10 @@ export default function CreatePost() {
 
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
         {/* Image upload */}
-        <label className="btn-ghost p-2 cursor-pointer" title="Add image">
+        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${imageUrls.length >= 4 ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length >= 4 ? 'Maximum 4 photos' : 'Add photos'}>
           <Image size={18} />
-          <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading || !!imageUrl} />
+          {imageUrls.length > 0 && <span className="text-xs font-medium text-agora-500">{imageUrls.length}/4</span>}
+          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 4} />
         </label>
 
         {/* Trigger warning toggle */}

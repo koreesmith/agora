@@ -524,4 +524,14 @@ var schema = []string{
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
+
+	// ── Multi-photo posts (AGORA-93) ───────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS post_photos (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		url        TEXT        NOT NULL,
+		position   INT         NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_photos_post ON post_photos(post_id, position ASC)`,
 }

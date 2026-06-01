@@ -150,20 +150,40 @@ export default function PrivacyPage() {
             <p style={p}>The Service is not directed to children under the age of 13 (or 16 in the EEA). We do not knowingly collect personal information from children. If you believe we have inadvertently collected information from a child, please contact us immediately at <a href={`mailto:${CONTACT_EMAIL}`} style={link}>{CONTACT_EMAIL}</a> and we will delete it promptly.</p>
           </Section>
 
-          <Section title="9. International Data Transfers">
+          <Section title="9. Child Safety and Protection Against Exploitation">
+            <p style={p}>{APP_NAME} has a zero-tolerance policy for child sexual abuse and exploitation (CSAE). We are committed to protecting minors from all forms of sexual exploitation and abuse, and we actively work to prevent, detect, and remove any such content or behavior from our platform.</p>
+            <p style={p}><strong>Prohibited content and conduct:</strong> The following are strictly prohibited on {APP_NAME} and will result in immediate account termination and reporting to the appropriate authorities:</p>
+            <ul style={ul}>
+              <li style={li}>Child sexual abuse material (CSAM) of any kind</li>
+              <li style={li}>Grooming, solicitation, or any sexual communication directed at minors</li>
+              <li style={li}>Sharing, distributing, or linking to CSAE content on or off the platform</li>
+              <li style={li}>Any attempt to exploit, abuse, or endanger children</li>
+            </ul>
+            <p style={p}><strong>Reporting:</strong> If you encounter content or behavior on {APP_NAME} that you believe constitutes child sexual abuse or exploitation, please report it immediately using the in-app reporting tools or by contacting us directly at <a href={`mailto:${CONTACT_EMAIL}`} style={link}>{CONTACT_EMAIL}</a>. All reports are treated with the highest priority and reviewed promptly.</p>
+            <p style={p}><strong>Our response:</strong> Upon identifying or receiving a credible report of CSAE content or conduct, we will:</p>
+            <ul style={ul}>
+              <li style={li}>Remove the content and suspend or permanently ban the responsible account immediately</li>
+              <li style={li}>Preserve relevant evidence in accordance with applicable law</li>
+              <li style={li}>Report the incident to the National Center for Missing &amp; Exploited Children (NCMEC) via the CyberTipline, as required by U.S. federal law (18 U.S.C. § 2258A)</li>
+              <li style={li}>Cooperate fully with law enforcement agencies in any resulting investigation</li>
+            </ul>
+            <p style={p}><strong>External resources:</strong> If you or someone you know is in immediate danger, contact local emergency services (911 in the U.S.). To report online child sexual exploitation directly to NCMEC, visit <strong>www.missingkids.org/gethelpnow/cybertipline</strong> or call 1-800-THE-LOST (1-800-843-5678). The Internet Crimes Against Children (ICAC) Task Force can also be reached through <strong>www.icactaskforce.org</strong>.</p>
+          </Section>
+
+          <Section title="11. International Data Transfers">
             <p style={p}>The Service is operated from the United States. If you are accessing the Service from outside the United States, please be aware that your information may be transferred to, stored, and processed in the United States. By using the Service, you consent to the transfer of your information to the United States.</p>
             <p style={p}>For users in the EEA, we ensure that any such transfers are subject to appropriate safeguards in accordance with GDPR requirements.</p>
           </Section>
 
-          <Section title="10. Cookies">
+          <Section title="12. Cookies">
             <p style={p}>The Service uses only a single session authentication token stored in your browser's local storage. We do not use third-party cookies, advertising cookies, or tracking cookies of any kind. You can clear your local storage at any time through your browser settings, which will log you out of the Service.</p>
           </Section>
 
-          <Section title="11. Changes to This Policy">
+          <Section title="13. Changes to This Policy">
             <p style={p}>We may update this Privacy Policy from time to time. We will notify you of material changes by posting a notice on the Service and, where required by law, by sending you an email. The date at the top of this policy indicates when it was last updated. Your continued use of the Service after any changes constitutes your acceptance of the new policy.</p>
           </Section>
 
-          <Section title="12. Contact Us">
+          <Section title="14. Contact Us">
             <p style={p}>If you have questions, concerns, or requests regarding this Privacy Policy or our data practices, please contact:</p>
             <div style={{ backgroundColor: '#f0f4f8', borderRadius: 10, padding: '16px 20px', marginTop: 8 }}>
               <p style={{ margin: '0 0 4px', fontWeight: 600, color: '#102a43' }}>{OPERATOR}</p>

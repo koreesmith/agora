@@ -113,7 +113,7 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
 }
 
 // Render text with @mentions as profile links and URLs as clickable links
-export function renderContent(text: string) {
+export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all") {
   const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+)/g)
   return parts.map((part, i) => {
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
@@ -124,7 +124,7 @@ export function renderContent(text: string) {
       const trailing = part.slice(url.length)
       return (
         <span key={i}>
-          <a href={url} target="_blank" rel="noreferrer noopener" className="text-agora-600 dark:text-agora-400 hover:underline break-all">{url}</a>
+          <a href={url} target="_blank" rel="noreferrer noopener" className={linkClassName}>{url}</a>
           {trailing}
         </span>
       )

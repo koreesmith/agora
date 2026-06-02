@@ -7,6 +7,7 @@ import { useAuthStore } from '../../store/auth'
 import { useChatStore } from '../../store/chat'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { isGifUrl } from '../../utils/gif'
+import { renderContent } from '../feed/CommentsSection'
 import { formatDistanceToNow } from 'date-fns'
 
 interface Participant {
@@ -248,7 +249,7 @@ function ChatWindow({ convId, minimized, index }: { convId: string; minimized: b
                     <div className={`rounded-2xl px-3 py-2 text-sm ${isOwn
                       ? 'bg-agora-600 text-white rounded-br-sm'
                       : 'bg-agora-100 dark:bg-agora-700 text-agora-900 dark:text-agora-100 rounded-bl-sm'}`}>
-                      {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
+                      {msg.content && <p className="whitespace-pre-wrap break-words">{renderContent(msg.content, isOwn ? "text-white/80 hover:underline break-all" : undefined)}</p>}
                       {msg.image_url && (
                         isGifUrl(msg.image_url)
                           ? <img src={msg.image_url} alt="" className="rounded-lg max-w-[180px] mt-1" />

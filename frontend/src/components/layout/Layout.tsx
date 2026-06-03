@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen } from 'lucide-react'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
@@ -48,6 +48,7 @@ export default function Layout() {
     { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
     { to: '/friends',                   icon: Users,          label: 'Friends' },
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
+    { to: '/pages',                     icon: BookOpen,       label: 'Pages' },
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
     { to: '/albums',                    icon: Images,         label: 'Photo Albums' },
     { to: '/discover',                  icon: Compass,        label: 'Find Friends' },

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus } from 'lucide-react'
-import { feedApi, friendsApi, previewApi } from '../../api'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown } from 'lucide-react'
+import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
@@ -25,6 +25,9 @@ export default function CreatePost() {
   const [content, setContent] = useState('')
   const [imageUrls, setImageUrls] = useState<string[]>([])
   const [visibility, setVisibility] = useState('friends')
+  // Post-as-page identity selector
+  const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
+  const [showPagePicker, setShowPagePicker] = useState(false)
   const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [twEnabled, setTwEnabled] = useState(false)
@@ -49,6 +52,15 @@ export default function CreatePost() {
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const friendLists = groupsData?.groups || []
+
+  // Load pages owned by current user (for post-as-page)
+  const { data: myPagesData } = useQuery({
+    queryKey: ['pages-mine'],
+    queryFn: () => pagesApi.mine().then(r => r.data),
+    staleTime: 60_000,
+  })
+  const myPages: any[] = myPagesData?.pages ?? []
+  const selectedPage = myPages.find(p => p.slug === selectedPageSlug)
 
   // Debounced URL detection — fires 800ms after user stops typing
   useEffect(() => {
@@ -109,22 +121,31 @@ export default function CreatePost() {
   }
 
   const create = useMutation({
-    mutationFn: () => feedApi.createPost({
-      content,
-      image_urls: imageUrls,
-      visibility,
-      group_id: visibility === 'group' ? friendListId : undefined,
-      content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
-      link_url: preview ? preview.url : '',
-      link_title: preview ? preview.title : '',
-      link_description: preview ? preview.description : '',
-      link_image: preview ? preview.image : '',
-      link_domain: preview ? preview.domain : '',
-      poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
-      poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
-      poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
-      poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
-    }),
+    mutationFn: () => {
+      // If a page is selected, post as that page instead
+      if (selectedPageSlug) {
+        return pagesApi.createPost(selectedPageSlug, {
+          content,
+          image_urls: imageUrls,
+        })
+      }
+      return feedApi.createPost({
+        content,
+        image_urls: imageUrls,
+        visibility,
+        group_id: visibility === 'group' ? friendListId : undefined,
+        content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
+        link_url: preview ? preview.url : '',
+        link_title: preview ? preview.title : '',
+        link_description: preview ? preview.description : '',
+        link_image: preview ? preview.image : '',
+        link_domain: preview ? preview.domain : '',
+        poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
+        poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
+        poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
+        poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
+      })
+    },
     onSuccess: () => {
       setContent(''); setImageUrls([]); setFriendListId('')
       setTwEnabled(false); setTwLabel('')
@@ -166,12 +187,60 @@ export default function CreatePost() {
   return (
     <div className="card p-4 space-y-3">
       <div className="flex gap-3">
+        {/* Avatar — shows selected page avatar when posting as a page */}
         <div className="w-10 h-10 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-          {user?.avatar_url
-            ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
-            : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300">{user?.username?.[0]?.toUpperCase()}</span>}
+          {selectedPage?.avatar_url
+            ? <img src={selectedPage.avatar_url} alt="" className="w-full h-full object-cover" />
+            : selectedPage
+              ? <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300 rounded-full">{selectedPage.display_name[0]}</span>
+              : user?.avatar_url
+              ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+              : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300">{user?.username?.[0]?.toUpperCase()}</span>}
         </div>
         <div className="flex-1 relative">
+          {/* Identity picker — only shown when user owns ≥1 page */}
+          {myPages.length > 0 && (
+            <div className="relative mb-2">
+              <button
+                type="button"
+                onClick={() => setShowPagePicker(v => !v)}
+                className="flex items-center gap-1.5 text-xs font-medium text-agora-600 dark:text-agora-300 bg-agora-50 dark:bg-agora-700/50 border border-agora-200 dark:border-agora-600 rounded-lg px-2.5 py-1 hover:border-agora-400 transition-colors">
+                {selectedPage ? (
+                  <><span className="truncate max-w-32">{selectedPage.display_name}</span> <ChevronDown size={11} /></>
+                ) : (
+                  <><span>{user?.username}</span> <ChevronDown size={11} /></>
+                )}
+              </button>
+              {showPagePicker && (
+                <div className="absolute left-0 top-full mt-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-xl shadow-lg py-1 min-w-44 z-30"
+                  onMouseLeave={() => setShowPagePicker(false)}>
+                  <button
+                    onClick={() => { setSelectedPageSlug(''); setShowPagePicker(false) }}
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700 flex items-center gap-2 ${!selectedPageSlug ? 'font-semibold' : ''}`}>
+                    <div className="w-5 h-5 rounded-full bg-agora-200 dark:bg-agora-600 overflow-hidden flex-shrink-0">
+                      {user?.avatar_url
+                        ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <span className="w-full h-full flex items-center justify-center text-xs font-bold">{user?.username?.[0]?.toUpperCase()}</span>}
+                    </div>
+                    <span className="truncate">{user?.username}</span>
+                  </button>
+                  <div className="border-t border-agora-100 dark:border-agora-700 my-1" />
+                  {myPages.map((p: any) => (
+                    <button key={p.slug}
+                      onClick={() => { setSelectedPageSlug(p.slug); setShowPagePicker(false) }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700 flex items-center gap-2 ${selectedPageSlug === p.slug ? 'font-semibold' : ''}`}>
+                      <div className="w-5 h-5 rounded-lg bg-agora-200 dark:bg-agora-600 overflow-hidden flex-shrink-0">
+                        {p.avatar_url
+                          ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-xs font-bold">{p.display_name[0]}</span>}
+                      </div>
+                      <span className="truncate">{p.display_name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <textarea
             ref={inputRef as React.RefObject<HTMLTextAreaElement>}
             value={content}

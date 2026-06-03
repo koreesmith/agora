@@ -45,32 +45,39 @@ func (s *Service) CreateReport(w http.ResponseWriter, r *http.Request) {
 		ReportedUserID    string `json:"reported_user_id"`
 		ReportedPostID    string `json:"reported_post_id"`
 		ReportedCommentID string `json:"reported_comment_id"`
+		ReportedPageID    string `json:"reported_page_id"`
 		ViolationType     string `json:"violation_type"`
 		RuleID            string `json:"rule_id"`
+		Reason            string `json:"reason"`
 		Details           string `json:"details"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
+	// Allow either violation_type or reason as the report category (pages use reason)
+	if req.ViolationType == "" && req.Reason != "" {
+		req.ViolationType = req.Reason
+	}
 	if req.ViolationType == "" {
 		writeError(w, 400, "violation_type required"); return
 	}
-	if req.ReportedUserID == "" && req.ReportedPostID == "" && req.ReportedCommentID == "" {
-		writeError(w, 400, "must report a user, post, or comment"); return
+	if req.ReportedUserID == "" && req.ReportedPostID == "" && req.ReportedCommentID == "" && req.ReportedPageID == "" {
+		writeError(w, 400, "must report a user, post, comment, or page"); return
 	}
 
-	var userID, postID, commentID, ruleID *string
+	var userID, postID, commentID, pageID, ruleID *string
 	if req.ReportedUserID != ""    { userID    = &req.ReportedUserID }
 	if req.ReportedPostID != ""    { postID    = &req.ReportedPostID }
 	if req.ReportedCommentID != "" { commentID = &req.ReportedCommentID }
+	if req.ReportedPageID != ""    { pageID    = &req.ReportedPageID }
 	if req.RuleID != ""            { ruleID    = &req.RuleID }
 
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO reports (reporter_id, reported_user_id, reported_post_id, reported_comment_id,
-		                     violation_type, rule_id, details, reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $5) RETURNING id
-	`, reporterID, userID, postID, commentID, req.ViolationType, ruleID, req.Details).Scan(&id)
+		                     reported_page_id, violation_type, rule_id, details, reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $6) RETURNING id
+	`, reporterID, userID, postID, commentID, pageID, req.ViolationType, ruleID, req.Details).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not submit report"); return
 	}

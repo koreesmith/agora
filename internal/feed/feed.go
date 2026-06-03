@@ -235,6 +235,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
+	var includePageIDs, excludePageIDs []string
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -249,6 +250,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			excludeGroupIDs = append(excludeGroupIDs, val)
 		case "post_type":
 			postTypes = append(postTypes, val)
+		case "include_page":
+			includePageIDs = append(includePageIDs, val)
+		case "exclude_page":
+			excludePageIDs = append(excludePageIDs, val)
 		}
 	}
 	filterRows.Close()
@@ -265,8 +270,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	var extraClauses []string
 
-	// Inclusion: posts must come from at least one included source (OR across groups/communities)
-	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 {
+	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
+	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -288,6 +293,15 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			inclParts = append(inclParts, fmt.Sprintf(
 				`p.community_group_id IN (%s)`, strings.Join(phs, ",")))
 		}
+		// AGORA-111: include posts from specific pages
+		if len(includePageIDs) > 0 {
+			phs := make([]string, len(includePageIDs))
+			for i, id := range includePageIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`p.page_id IN (%s)`, strings.Join(phs, ",")))
+		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
 
@@ -307,6 +321,16 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		}
 		extraClauses = append(extraClauses, fmt.Sprintf(
 			`(p.community_group_id IS NULL OR p.community_group_id NOT IN (%s))`,
+			strings.Join(phs, ",")))
+	}
+	// AGORA-111: exclude posts from specific pages
+	if len(excludePageIDs) > 0 {
+		phs := make([]string, len(excludePageIDs))
+		for i, id := range excludePageIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`(p.page_id IS NULL OR p.page_id NOT IN (%s))`,
 			strings.Join(phs, ",")))
 	}
 

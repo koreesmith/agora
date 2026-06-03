@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const typeIcon: Record<string, React.ReactNode> = {
@@ -27,6 +27,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   group_invite_accepted: <UserCheck size={16} className="text-green-500" />,
   new_report:            <ShieldAlert size={16} className="text-red-500" />,
   waitlist_join:         <UserPlus size={16} className="text-blue-500" />,
+  page_post:             <BookOpen size={16} className="text-purple-500" />,
 }
 
 const REACTION_EMOJIS: Record<string, string> = {
@@ -55,6 +56,7 @@ const notifText: Record<string, string> = {
   group_invite_accepted: 'added you to a group',
   new_report:            'submitted a new report — tap to review',
   waitlist_join:         'joined the waitlist — tap to review',
+  page_post:             'published a new post on a page you follow',
 }
 
 function notifTarget(n: any): string | null {
@@ -80,6 +82,8 @@ function notifTarget(n: any): string | null {
     case 'group_join_rejected':
     case 'group_invite_accepted':
       return n.data ? `/groups/${n.data}` : '/groups'
+    case 'page_post':
+      return n.post_id ? `/post/${n.post_id}` : null
     case 'new_report':
       return '/admin?tab=reports'
     case 'waitlist_join':

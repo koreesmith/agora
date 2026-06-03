@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Plus, Trash2 } from 'lucide-react'
-import { customFeedsApi, friendsApi, groupsApi } from '../../api'
+import { customFeedsApi, friendsApi, groupsApi, pagesApi } from '../../api'
 
 interface Filter {
   filter_type: string
@@ -22,8 +22,10 @@ interface Props {
 const FILTER_TYPES = [
   { value: 'friend_group',    label: 'Include Friend Group' },
   { value: 'community_group', label: 'Include Community Group' },
+  { value: 'include_page',    label: 'Include Page' },
   { value: 'exclude_friend',  label: 'Exclude Friend' },
   { value: 'exclude_group',   label: 'Exclude Community Group' },
+  { value: 'exclude_page',    label: 'Exclude Page' },
 ]
 
 export default function FeedBuilderModal({ feed, onClose }: Props) {
@@ -46,10 +48,16 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
     queryKey: ['groups', 'all'],
     queryFn: () => groupsApi.list({ page: 0 }).then(r => r.data),
   })
+  const { data: myPagesData } = useQuery({
+    queryKey: ['pages-mine'],
+    queryFn: () => pagesApi.mine().then(r => r.data),
+    staleTime: 60_000,
+  })
 
   const friendGroups = listsData?.groups ?? []
   const friends = friendsData?.friends ?? []
   const myGroups = (groupsData?.groups ?? []).filter((g: any) => g.is_member)
+  const myPages: any[] = myPagesData?.pages ?? []
 
   const save = useMutation({
     mutationFn: (data: { name: string, filters: Filter[] }) =>
@@ -85,6 +93,9 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
         return myGroups.map((g: any) => ({ id: g.id, label: g.name }))
       case 'exclude_friend':
         return friends.map((f: any) => ({ id: f.id, label: f.display_name || f.username }))
+      case 'include_page':
+      case 'exclude_page':
+        return myPages.map((p: any) => ({ id: p.id, label: p.display_name }))
       default:
         return []
     }

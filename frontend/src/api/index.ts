@@ -149,10 +149,25 @@ export const groupsApi = {
   rejectRequest:  (slug: string, requestID: string)          => api.post(`/groups/${slug}/requests/${requestID}/reject`),
 }
 
+// ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
+export const pagesApi = {
+  list:        (params?: { q?: string, page?: number }) => api.get('/pages', { params }),
+  mine:        ()                                        => api.get('/pages/mine'),
+  get:         (slug: string)                            => api.get(`/pages/${slug}`),
+  create:      (data: { display_name: string, bio?: string, page_type?: string, privacy?: string, avatar_url?: string, cover_url?: string }) => api.post('/pages', data),
+  update:      (slug: string, data: any)                 => api.patch(`/pages/${slug}`, data),
+  delete:      (slug: string)                            => api.delete(`/pages/${slug}`),
+  subscribe:   (slug: string)                            => api.post(`/pages/${slug}/subscribe`),
+  unsubscribe: (slug: string)                            => api.delete(`/pages/${slug}/subscribe`),
+  getFeed:     (slug: string, page = 0)                  => api.get(`/pages/${slug}/feed`, { params: { page } }),
+  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[] }) => api.post(`/pages/${slug}/posts`, data),
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 export const searchApi = {
   searchUsers: (q: string, scope = 'local') => api.get('/search/users', { params: { q, scope } }),
   searchPosts: (q: string, page = 0)        => api.get('/search/posts', { params: { q, page } }),
+  searchPages: (q: string, page = 0)        => api.get('/search/pages', { params: { q, page } }),
 }
 
 // ── Moderation ────────────────────────────────────────────────────────────────

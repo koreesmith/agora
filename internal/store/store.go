@@ -495,9 +495,6 @@ var schema = []string{
 	)`,
 	`ALTER TABLE reports ALTER COLUMN reason SET DEFAULT ''`,
 
-	// AGORA-128: add reported_page_id to allow reporting a page
-	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
-
 	// ── Email change (AGORA-81) ────────────────────────────────────────────
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_email TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_change_token TEXT NOT NULL DEFAULT ''`,
@@ -592,4 +589,7 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_feed_int_user    ON feed_interactions(user_id, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_feed_int_target  ON feed_interactions(target_user_id, created_at DESC)`,
+
+	// ── AGORA-128: page reporting (must come after pages table is created) ────
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
 }

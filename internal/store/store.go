@@ -523,6 +523,10 @@ var schema = []string{
 		value       TEXT        NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+	// AGORA-111: add page filter types
+	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
+	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page'))`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
 
 	// ── Multi-photo posts (AGORA-93) ───────────────────────────────────────

@@ -35,6 +35,7 @@ import MessagesPage        from './pages/MessagesPage'
 import InviteFriendPage   from './pages/InviteFriendPage'
 import CustomFeedsPage    from './pages/CustomFeedsPage'
 import CustomFeedViewPage from './pages/CustomFeedViewPage'
+import PageProfilePage    from './pages/PageProfilePage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -108,6 +109,7 @@ function AppRoutes() {
         <Route path="/invite-friend"           element={<InviteFriendPage />} />
         <Route path="/my-feeds"               element={<CustomFeedsPage />} />
         <Route path="/my-feeds/:id"           element={<CustomFeedViewPage />} />
+        <Route path="/pages/:slug"            element={<PageProfilePage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

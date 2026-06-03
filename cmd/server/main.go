@@ -25,6 +25,7 @@ import (
 	"github.com/agora-social/agora/internal/friends"
 	"github.com/agora-social/agora/internal/groups"
 	"github.com/agora-social/agora/internal/media"
+	"github.com/agora-social/agora/internal/interactions"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/search"
@@ -64,7 +65,8 @@ func main() {
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)
-	customFeedsSvc := customfeeds.NewService(db)
+	customFeedsSvc  := customfeeds.NewService(db)
+	interactionsSvc := interactions.NewService(db)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
@@ -145,6 +147,7 @@ func main() {
 			dm.RegisterRoutes(r, dmSvc)
 			blocks.RegisterRoutes(r, blocksSvc)
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
+			interactions.RegisterRoutes(r, interactionsSvc)
 		})
 
 		// Admin only
@@ -167,6 +170,7 @@ func main() {
 	// ── Background jobs ───────────────────────────────────────────────────
 	go fedSvc.StartBackgroundSync(context.Background())
 	go userSvc.StartDeletionCleanup(context.Background())
+	go interactionsSvc.StartPruner(context.Background())
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{

@@ -495,6 +495,9 @@ var schema = []string{
 	)`,
 	`ALTER TABLE reports ALTER COLUMN reason SET DEFAULT ''`,
 
+	// AGORA-128: add reported_page_id to allow reporting a page
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
+
 	// ── Email change (AGORA-81) ────────────────────────────────────────────
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_email TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_change_token TEXT NOT NULL DEFAULT ''`,

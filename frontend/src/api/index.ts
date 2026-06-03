@@ -155,6 +155,7 @@ export const interactionsApi = {
     api.post('/feed/interactions', data).catch(() => {}), // fire-and-forget
 }
 
+
 // ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
 export const pagesApi = {
   list:        (params?: { q?: string, page?: number }) => api.get('/pages', { params }),

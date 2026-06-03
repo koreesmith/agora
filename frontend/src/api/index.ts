@@ -149,7 +149,13 @@ export const groupsApi = {
   rejectRequest:  (slug: string, requestID: string)          => api.post(`/groups/${slug}/requests/${requestID}/reject`),
 }
 
-// ── Pages ─────────────────────────────────────────────────────────────────────
+// ── Interactions (AGORA-102) ──────────────────────────────────────────────────
+export const interactionsApi = {
+  record: (data: { target_user_id?: string, post_id?: string, interaction_type: string }) =>
+    api.post('/feed/interactions', data).catch(() => {}), // fire-and-forget
+}
+
+// ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
 export const pagesApi = {
   list:        (params?: { q?: string, page?: number }) => api.get('/pages', { params }),
   mine:        ()                                        => api.get('/pages/mine'),

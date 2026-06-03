@@ -100,13 +100,15 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
-			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			LEFT JOIN users wu ON wu.id = p.wall_user_id
+			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -145,13 +147,15 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
-			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			LEFT JOIN users wu ON wu.id = p.wall_user_id
+			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -173,6 +177,11 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
 			      AND f.status = 'accepted'
 			    )
+			    OR (
+			      -- AGORA-109: include posts from pages the user subscribes to
+			      p.page_id IS NOT NULL
+			      AND EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.page_id AND ps.user_id = $1)
+			    )
 			  )
 			  AND (
 			    -- Friend-list posts: only show if viewer is in that specific friend list
@@ -188,6 +197,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			          AND fg.user_id = p.author_id
 			      )
 			    )
+			    OR p.page_id IS NOT NULL
 			  )
 			  AND (
 			    p.community_group_id IS NULL
@@ -346,13 +356,15 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
-		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
 		  AND p.visibility != 'private'
@@ -1863,6 +1875,11 @@ type Post struct {
 	WallStatus       string  `json:"wall_status,omitempty"`
 	// Multi-photo (AGORA-93)
 	PhotoURLs []string `json:"photo_urls,omitempty"`
+	// Page attribution (AGORA-109)
+	PageID     *string `json:"page_id,omitempty"`
+	PageSlug   *string `json:"page_slug,omitempty"`
+	PageName   *string `json:"page_name,omitempty"`
+	PageAvatar *string `json:"page_avatar_url,omitempty"`
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
@@ -1891,6 +1908,7 @@ func scanPosts(rows interface {
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
+			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 		)
 		p.ReactionCounts = map[string]int{}
 		posts = append(posts, p)

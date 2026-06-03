@@ -66,6 +66,11 @@ interface Post {
   wall_status?: string
   // Multi-photo (AGORA-93)
   photo_urls?: string[]
+  // Page attribution (AGORA-109)
+  page_id?: string
+  page_slug?: string
+  page_name?: string
+  page_avatar_url?: string
   created_at: string
   edited_at?: string
 }
@@ -460,12 +465,15 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
       {/* Author row */}
       <div className="flex items-start gap-3">
-        <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`} className="flex-shrink-0">
-          <div className="w-10 h-10 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
-            {post.author_avatar_url && !post.repost_of_id
+        {/* Avatar — shows page avatar for page posts */}
+        <Link to={post.page_id && post.page_slug ? `/pages/${post.page_slug}` : `/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`} className="flex-shrink-0">
+          <div className={`w-10 h-10 ${post.page_id ? 'rounded-xl' : 'rounded-full'} bg-agora-200 dark:bg-agora-700 overflow-hidden`}>
+            {post.page_id && post.page_avatar_url
+              ? <img src={post.page_avatar_url} alt="" className="w-full h-full object-cover" />
+              : post.author_avatar_url && !post.repost_of_id
               ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
               : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300">
-                  {(post.repost_of_id ? post.repost_author_display_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
+                  {(post.page_id ? post.page_name : post.repost_of_id ? post.repost_author_display_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
                 </span>
             }
           </div>
@@ -474,20 +482,33 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`}
-                className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
-                {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
-              </Link>
-              {(() => {
+              {/* Name — page name for page posts */}
+              {post.page_id && post.page_slug ? (
+                <>
+                  <Link to={`/pages/${post.page_slug}`}
+                    className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
+                    {post.page_name}
+                  </Link>
+                  <span className="text-agora-400 text-xs">@{post.page_slug}</span>
+                </>
+              ) : (
+                <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`}
+                  className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
+                  {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
+                </Link>
+              )}
+              {!post.page_id && (() => {
                 const pronouns = post.repost_of_id ? post.repost_author_pronouns : post.author_pronouns
                 return pronouns ? (
                   <span className="text-agora-400 dark:text-agora-500 text-xs">({pronouns})</span>
                 ) : null
               })()}
-              <span className="text-agora-400 text-xs">
-                {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
-                  !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
-              </span>
+              {!post.page_id && (
+                <span className="text-agora-400 text-xs">
+                  {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
+                    !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
+                </span>
+              )}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               <Link to={`/post/${post.repost_of_id ? post.repost_of_id : post.id}`}
                 className="text-agora-400 text-xs hover:underline">

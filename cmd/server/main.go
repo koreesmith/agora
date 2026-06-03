@@ -27,6 +27,7 @@ import (
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
+	"github.com/agora-social/agora/internal/pages"
 	"github.com/agora-social/agora/internal/search"
 	"github.com/agora-social/agora/internal/store"
 	"github.com/agora-social/agora/internal/users"
@@ -65,6 +66,7 @@ func main() {
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)
 	customFeedsSvc := customfeeds.NewService(db)
+	pagesSvc       := pages.NewService(db, notifSvc)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
@@ -145,6 +147,7 @@ func main() {
 			dm.RegisterRoutes(r, dmSvc)
 			blocks.RegisterRoutes(r, blocksSvc)
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
+				pages.RegisterRoutes(r, pagesSvc)
 		})
 
 		// Admin only

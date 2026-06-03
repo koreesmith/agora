@@ -1,17 +1,18 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { searchApi, friendsApi, federationApi } from '../api'
+import { searchApi, friendsApi, federationApi, pagesApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { handle } from '../utils/handle'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
-import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2 } from 'lucide-react'
+import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2, BookOpen } from 'lucide-react'
+import { useMutation as useSubscribeMutation } from '@tanstack/react-query'
 
 export default function SearchPage() {
   const [input, setInput] = useState('')
   const [q, setQ] = useState('')
-  const [tab, setTab] = useState<'users'|'posts'>('users')
+  const [tab, setTab] = useState<'users'|'posts'|'pages'>('users')
   const debounceTimer = useRef<ReturnType<typeof setTimeout>>()
   const { user } = useAuthStore()
   const qc = useQueryClient()
@@ -36,6 +37,20 @@ export default function SearchPage() {
     queryFn: () => searchApi.searchPosts(q).then(r => r.data),
     enabled: enabled && tab === 'posts' && !isHandleLookup,
   })
+  const { data: pagesData, isFetching: pagesFetching } = useQuery({
+    queryKey: ['search-pages', q],
+    queryFn: () => searchApi.searchPages(q).then(r => r.data),
+    enabled: enabled && tab === 'pages' && !isHandleLookup,
+  })
+
+  const subscribeToPage = useSubscribeMutation({
+    mutationFn: (slug: string) => pagesApi.subscribe(slug),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['search-pages', q] }),
+  })
+  const unsubscribeFromPage = useSubscribeMutation({
+    mutationFn: (slug: string) => pagesApi.unsubscribe(slug),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['search-pages', q] }),
+  })
 
   // Cross-instance handle lookup: user@instance.com
   const { data: lookupData, isFetching: lookupFetching, error: lookupError } = useQuery({
@@ -52,7 +67,11 @@ export default function SearchPage() {
 
   const users = usersData?.users || []
   const posts = postsData?.posts || []
-  const isFetching = isHandleLookup ? lookupFetching : (tab === 'users' ? usersFetching : postsFetching)
+  const pages = pagesData?.pages || []
+  const isFetching = isHandleLookup ? lookupFetching
+    : tab === 'users' ? usersFetching
+    : tab === 'posts' ? postsFetching
+    : pagesFetching
 
   return (
     <div className="space-y-4">
@@ -108,6 +127,10 @@ export default function SearchPage() {
               className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'posts' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
               <FileText size={13} /> Posts
             </button>
+            <button onClick={() => setTab('pages')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium rounded-md transition-colors ${tab === 'pages' ? 'bg-white dark:bg-agora-700 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              <BookOpen size={13} /> Pages
+            </button>
           </div>
 
           {/* Empty state */}
@@ -139,6 +162,37 @@ export default function SearchPage() {
               )}
               {posts.map((p: any) => (
                 <PostResult key={p.id} post={p} query={q} />
+              ))}
+            </div>
+          )}
+
+          {/* Pages tab */}
+          {tab === 'pages' && enabled && (
+            <div className="space-y-2">
+              {pages.length === 0 && !pagesFetching && (
+                <div className="card p-8 text-center text-agora-400">No pages found for "{q}".</div>
+              )}
+              {pages.map((p: any) => (
+                <div key={p.id} className="card p-3 flex items-center gap-3">
+                  <Link to={`/pages/${p.slug}`} className="w-10 h-10 rounded-xl bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {p.avatar_url
+                      ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center font-bold text-agora-500 text-sm">{p.display_name[0]}</span>}
+                  </Link>
+                  <div className="flex-1 min-w-0">
+                    <Link to={`/pages/${p.slug}`} className="font-semibold text-sm hover:underline flex items-center gap-1">
+                      {p.display_name}
+                      {p.is_verified && <span className="text-blue-500 text-xs">✓</span>}
+                    </Link>
+                    <p className="text-xs text-agora-400">@{p.slug} · {p.subscriber_count} subscribers</p>
+                    {p.bio && <p className="text-xs text-agora-500 mt-0.5 line-clamp-1">{p.bio}</p>}
+                  </div>
+                  <button
+                    onClick={() => p.is_subscribed ? unsubscribeFromPage.mutate(p.slug) : subscribeToPage.mutate(p.slug)}
+                    className={p.is_subscribed ? 'btn-secondary text-xs' : 'btn-primary text-xs'}>
+                    {p.is_subscribed ? 'Subscribed' : 'Subscribe'}
+                  </button>
+                </div>
               ))}
             </div>
           )}

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video } from 'lucide-react'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown } from 'lucide-react'
 import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
@@ -28,10 +28,6 @@ export default function CreatePost() {
   // Post-as-page identity selector
   const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
   const [showPagePicker, setShowPagePicker] = useState(false)
-  // Video state (AGORA-119)
-  const [videoUrl, setVideoUrl] = useState('')
-  const [videoThumbUrl, setVideoThumbUrl] = useState('')
-  const [uploadingVideo, setUploadingVideo] = useState(false)
   const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [twEnabled, setTwEnabled] = useState(false)
@@ -136,8 +132,6 @@ export default function CreatePost() {
       return feedApi.createPost({
         content,
         image_urls: imageUrls,
-        video_url: videoUrl || undefined,
-        video_thumb_url: videoThumbUrl || undefined,
         visibility,
         group_id: visibility === 'group' ? friendListId : undefined,
         content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
@@ -154,7 +148,6 @@ export default function CreatePost() {
     },
     onSuccess: () => {
       setContent(''); setImageUrls([]); setFriendListId('')
-      setVideoUrl(''); setVideoThumbUrl('')
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
@@ -166,7 +159,7 @@ export default function CreatePost() {
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    const remaining = 4 - imageUrls.length
+    const remaining = 10 - imageUrls.length
     const toUpload = files.slice(0, remaining)
     setUploading(true)
     try {
@@ -181,24 +174,6 @@ export default function CreatePost() {
     }
   }
 
-  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploadingVideo(true)
-    try {
-      const res = await feedApi.uploadMedia(file, 'videos')
-      setVideoUrl((res as any).data.url)
-      setVideoThumbUrl((res as any).data.thumb_url || '')
-      // Clear photos if a video is selected
-      setImageUrls([])
-    } catch (err: any) {
-      alert(err?.response?.data?.error || 'Video upload failed. Make sure it is under 2 minutes and 200 MB.')
-    } finally {
-      setUploadingVideo(false)
-      e.target.value = ''
-    }
-  }
-
   const visOptions = [
     { value: 'public',  icon: Globe,  label: 'Public' },
     { value: 'friends', icon: Users,  label: 'Friends' },
@@ -206,7 +181,7 @@ export default function CreatePost() {
   ]
 
   const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
-  const canPost = (content.trim() || imageUrls.length > 0 || videoUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
+  const canPost = (content.trim() || imageUrls.length > 0 || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
     && !create.isPending && !uploading && (!twEnabled || twLabel.trim()) && validPoll
 
   return (
@@ -282,24 +257,6 @@ export default function CreatePost() {
           {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}
         </div>
       </div>
-
-      {/* Video preview (AGORA-119) */}
-      {videoUrl && (
-        <div className="ml-13 relative rounded-xl overflow-hidden bg-black">
-          <video
-            src={videoUrl}
-            poster={videoThumbUrl || undefined}
-            controls
-            className="w-full max-h-72 rounded-xl"
-          />
-          <button
-            onClick={() => { setVideoUrl(''); setVideoThumbUrl('') }}
-            className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80"
-          >
-            <X size={12} />
-          </button>
-        </div>
-      )}
 
       {/* Uploaded images preview */}
       {imageUrls.length > 0 && (
@@ -460,18 +417,10 @@ export default function CreatePost() {
 
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
         {/* Image upload */}
-        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length >= 10 || !!videoUrl) ? 'opacity-40 pointer-events-none' : ''}`} title={videoUrl ? 'Remove video to add photos' : imageUrls.length >= 10 ? 'Maximum 10 photos' : 'Add photos'}>
+        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${imageUrls.length >= 10 ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length >= 10 ? 'Maximum 10 photos' : 'Add photos'}>
           <Image size={18} />
           {imageUrls.length > 0 && <span className="text-xs font-medium text-agora-500">{imageUrls.length}/10</span>}
-          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 10 || !!videoUrl} />
-        </label>
-
-        {/* Video upload (AGORA-119) */}
-        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length > 0 || !!videoUrl || uploadingVideo) ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length > 0 ? 'Remove photos to add a video' : videoUrl ? 'Video already attached' : 'Add video (max 2 min)'}>
-          {uploadingVideo
-            ? <span className="text-xs text-agora-400 animate-pulse">Processing…</span>
-            : <Video size={18} />}
-          <input type="file" accept="video/*" className="hidden" onChange={handleVideoUpload} disabled={imageUrls.length > 0 || !!videoUrl || uploadingVideo} />
+          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 10} />
         </label>
 
         {/* Trigger warning toggle */}

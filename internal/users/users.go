@@ -672,9 +672,19 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 	if q != "" {
 		gRows, gerr := s.db.Query(`
 			SELECT slug, name, avatar_url FROM community_groups
-			WHERE privacy = 'public' AND (slug ILIKE $1 OR name ILIKE $1)
-			ORDER BY member_count DESC LIMIT 3
-		`, q+"%")
+			WHERE (slug ILIKE $1 OR name ILIKE $1)
+			  AND (
+			    privacy = 'public'
+			    OR EXISTS(
+			        SELECT 1 FROM community_group_members
+			        WHERE group_id = community_groups.id AND user_id = $2
+			    )
+			  )
+			ORDER BY
+			  EXISTS(SELECT 1 FROM community_group_members WHERE group_id = community_groups.id AND user_id = $2) DESC,
+			  member_count DESC
+			LIMIT 5
+		`, q+"%", userID)
 		if gerr == nil {
 			defer gRows.Close()
 			for gRows.Next() {

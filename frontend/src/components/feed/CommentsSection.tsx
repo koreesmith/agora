@@ -424,11 +424,15 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           {editing ? (
             <div className="mt-1 space-y-1.5">
               <textarea
-                className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400"
-                rows={2}
+                className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400 min-h-[36px]"
+                rows={1}
                 autoComplete="off"
                 value={editContent}
-                onChange={e => setEditContent(e.target.value)}
+                onChange={e => {
+                  setEditContent(e.target.value)
+                  e.target.style.height = 'auto'
+                  e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'
+                }}
                 autoFocus
               />
               <div className="flex gap-1.5 justify-end">

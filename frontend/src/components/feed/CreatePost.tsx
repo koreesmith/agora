@@ -57,7 +57,7 @@ export default function CreatePost() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFetchedUrl = useRef('')
 
-  const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+  const { mentionUsers, mentionGroups, mentionPages, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const { data: groupsData } = useQuery({
     queryKey: ['friend-lists'],
@@ -351,7 +351,7 @@ export default function CreatePost() {
             data-form-type="other"
             className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
           />
-          {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}
+          {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(content, setContent, tag)} />}
           {/* AGORA-89: group tag suggestions */}
           {showGroupSuggestions && groupSuggestions.length > 0 && (
             <div className="absolute left-0 top-full mt-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-xl shadow-lg py-1 z-40 w-56">

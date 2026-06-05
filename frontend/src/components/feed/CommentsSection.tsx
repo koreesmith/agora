@@ -145,7 +145,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
   const [imageUrl, setImageUrl] = useState('')
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
-  const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+  const { mentionUsers, mentionGroups, mentionPages, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
@@ -289,7 +289,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
                 }
               }}
             />
-            {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(text, setText, u)} />}
+            {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(text, setText, tag)} /}
             <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5 self-end">
               {uploading ? <span className="text-xs">…</span> : <Send size={14} />}
             </button>
@@ -327,7 +327,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const inLongPressRef = useRef(false)
   const hoveredReactionRef = useRef<string | null>(null)
   const replyFileRef = useRef<HTMLInputElement>(null)
-  const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+  const { mentionUsers, mentionGroups, mentionPages, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const handleReplyImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
@@ -629,7 +629,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                     if (e.key === 'Enter' && !e.shiftKey && (replyText.trim() || replyImageUrl) && !showMentions) replyMutation.mutate()
                   }}
                 />
-                {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(replyText, setReplyText, u)} />}
+                {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(replyText, setReplyText, tag)} /}
                 <button
                   onClick={() => { setShowReplyBox(false); setReplyText(''); setReplyImageUrl('') }}
                   className="btn-secondary text-xs px-2 py-1"

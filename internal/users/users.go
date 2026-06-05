@@ -47,6 +47,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
 	r.Get("/users/discover",              s.Discover)
 	r.Get("/users/mention-search",        s.MentionSearch)
+	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
 	r.Post("/users/{username}/notify",    s.EnablePostNotify)
 	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
 }
@@ -602,6 +603,108 @@ func (s *Service) MentionSearch(w http.ResponseWriter, r *http.Request) {
 		users = []MentionUser{}
 	}
 	writeJSON(w, 200, map[string]any{"users": users})
+}
+
+// UnifiedMentionSearch returns users, groups, and pages matching q.
+// Used by the @-mention dropdown in the compose box.
+func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	q := strings.TrimPrefix(r.URL.Query().Get("q"), "@")
+
+	type UserHit struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+		IsFriend    bool   `json:"is_friend"`
+	}
+	type GroupHit struct {
+		Slug      string `json:"slug"`
+		Name      string `json:"name"`
+		AvatarURL string `json:"avatar_url"`
+	}
+	type PageHit struct {
+		Slug        string `json:"slug"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+	}
+
+	var users []UserHit
+	var groups []GroupHit
+	var pages  []PageHit
+
+	// ── Users ──────────────────────────────────────────────────────────────
+	var uRows *sql.Rows
+	var err   error
+	if q == "" {
+		uRows, err = s.db.Query(`
+			SELECT u.id, u.username, u.display_name, u.avatar_url, true
+			FROM users u
+			JOIN friendships f ON (
+				(f.requester_id = $1 AND f.addressee_id = u.id)
+				OR (f.addressee_id = $1 AND f.requester_id = u.id)
+			)
+			WHERE f.status = 'accepted' AND u.deletion_scheduled_at IS NULL AND u.is_remote = false
+			ORDER BY u.username LIMIT 5
+		`, userID)
+	} else {
+		uRows, err = s.db.Query(`
+			SELECT u.id, u.username, u.display_name, u.avatar_url,
+			       EXISTS(SELECT 1 FROM friendships f WHERE ((f.requester_id=$1 AND f.addressee_id=u.id) OR (f.addressee_id=$1 AND f.requester_id=u.id)) AND f.status='accepted') AS is_friend
+			FROM users u
+			WHERE u.deletion_scheduled_at IS NULL AND u.is_suspended = false AND u.is_remote = false
+			  AND NOT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=u.id) OR (blocker_id=u.id AND blocked_id=$1))
+			  AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
+			ORDER BY (u.id=$1) DESC, is_friend DESC, u.username LIMIT 5
+		`, userID, q+"%")
+	}
+	if err == nil {
+		defer uRows.Close()
+		for uRows.Next() {
+			var u UserHit
+			uRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.IsFriend)
+			users = append(users, u)
+		}
+	}
+	if users == nil { users = []UserHit{} }
+
+	// ── Groups ─────────────────────────────────────────────────────────────
+	if q != "" {
+		gRows, gerr := s.db.Query(`
+			SELECT slug, name, avatar_url FROM community_groups
+			WHERE privacy = 'public' AND (slug ILIKE $1 OR name ILIKE $1)
+			ORDER BY member_count DESC LIMIT 3
+		`, q+"%")
+		if gerr == nil {
+			defer gRows.Close()
+			for gRows.Next() {
+				var g GroupHit
+				gRows.Scan(&g.Slug, &g.Name, &g.AvatarURL)
+				groups = append(groups, g)
+			}
+		}
+	}
+	if groups == nil { groups = []GroupHit{} }
+
+	// ── Pages ──────────────────────────────────────────────────────────────
+	if q != "" {
+		pRows, perr := s.db.Query(`
+			SELECT slug, display_name, avatar_url FROM pages
+			WHERE privacy = 'public' AND (slug ILIKE $1 OR display_name ILIKE $1)
+			ORDER BY subscriber_count DESC LIMIT 3
+		`, q+"%")
+		if perr == nil {
+			defer pRows.Close()
+			for pRows.Next() {
+				var p PageHit
+				pRows.Scan(&p.Slug, &p.DisplayName, &p.AvatarURL)
+				pages = append(pages, p)
+			}
+		}
+	}
+	if pages == nil { pages = []PageHit{} }
+
+	writeJSON(w, 200, map[string]any{"users": users, "groups": groups, "pages": pages})
 }
 
 // ── Post Notifications (AGORA-33) ─────────────────────────────────────────────

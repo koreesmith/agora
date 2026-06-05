@@ -21,7 +21,7 @@ export function useMentions() {
   const { data } = useQuery({
     queryKey: ['mention-search', mentionQuery],
     queryFn: () => usersApi.mentionSearch(mentionQuery).then(r => r.data),
-    enabled: showMentions && mentionQuery.length > 0,
+    enabled: showMentions,   // empty query returns friends as suggestions
     staleTime: 10_000,
   })
   const mentionUsers: MentionUser[] = data?.users || []
@@ -33,7 +33,8 @@ export function useMentions() {
     const wordStart = i + 1
     const word = val.slice(wordStart, cursorPos)
 
-    if (word.startsWith('@') && word.length > 1) {
+    // Show on '@' alone (empty query → friend suggestions) or '@word' (filtered)
+    if (word.startsWith('@')) {
       setMentionQuery(word.slice(1))
       setMentionStart(wordStart)
       setShowMentions(true)

@@ -28,6 +28,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   new_report:            <ShieldAlert size={16} className="text-red-500" />,
   waitlist_join:         <UserPlus size={16} className="text-blue-500" />,
   page_post:             <BookOpen size={16} className="text-purple-500" />,
+  page_member_invite:    <UserPlus size={16} className="text-agora-500" />,
 }
 
 const REACTION_EMOJIS: Record<string, string> = {
@@ -57,6 +58,7 @@ const notifText: Record<string, string> = {
   new_report:            'submitted a new report — tap to review',
   waitlist_join:         'joined the waitlist — tap to review',
   page_post:             'published a new post on a page you follow',
+  page_member_invite:    'invited you to join a page as a team member',
 }
 
 function notifTarget(n: any): string | null {
@@ -84,6 +86,8 @@ function notifTarget(n: any): string | null {
       return n.data ? `/groups/${n.data}` : '/groups'
     case 'page_post':
       return n.post_id ? `/post/${n.post_id}` : null
+    case 'page_member_invite':
+      return n.data ? `/pages/${n.data}/settings` : '/pages'
     case 'new_report':
       return '/admin?tab=reports'
     case 'waitlist_join':

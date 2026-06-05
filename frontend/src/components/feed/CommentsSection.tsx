@@ -289,7 +289,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
                 }
               }}
             />
-            {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(text, setText, tag)} /}
+            {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(text, setText, tag)} />}
             <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5 self-end">
               {uploading ? <span className="text-xs">…</span> : <Send size={14} />}
             </button>
@@ -629,7 +629,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                     if (e.key === 'Enter' && !e.shiftKey && (replyText.trim() || replyImageUrl) && !showMentions) replyMutation.mutate()
                   }}
                 />
-                {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(replyText, setReplyText, tag)} /}
+                {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(replyText, setReplyText, tag)} />}
                 <button
                   onClick={() => { setShowReplyBox(false); setReplyText(''); setReplyImageUrl('') }}
                   className="btn-secondary text-xs px-2 py-1"

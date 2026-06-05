@@ -314,6 +314,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
+  const [sharedConfirm, setSharedConfirm] = useState(false)  // AGORA-71
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inLongPressRef = useRef(false)
   const hoveredReactionRef = useRef<string | null>(null)
@@ -411,7 +412,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
   const repost = useMutation({
     mutationFn: () => feedApi.repost(post.id, { content: shareContent, visibility: 'friends' }),
-    onSuccess: () => { setShowShare(false); setShareContent(''); invalidate() },
+    onSuccess: () => {
+      setShowShare(false); setShareContent(''); invalidate()
+      // AGORA-71: brief confirmation flash
+      setSharedConfirm(true)
+      setTimeout(() => setSharedConfirm(false), 2500)
+    },
     onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
   })
 
@@ -917,9 +923,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
                 disabled={post.visibility !== 'public'}
                 title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
-                className={`flex items-center gap-1.5 text-sm transition-colors ${post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
+                className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
                 <Repeat2 size={16} />
-                <span>{post.repost_count || ''}</span>
+                {sharedConfirm
+                  ? <span className="text-xs">Shared!</span>
+                  : <span>{post.repost_count || ''}</span>}
               </button>
             </div>
 

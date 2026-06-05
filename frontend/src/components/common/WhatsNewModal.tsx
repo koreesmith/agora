@@ -49,7 +49,13 @@ const FEATURES = [
   },
 ]
 
-export default function WhatsNewModal() {
+interface Props {
+  /** When true, show the modal regardless of localStorage (manual trigger). */
+  forceShow?: boolean
+  onClose?: () => void
+}
+
+export default function WhatsNewModal({ forceShow, onClose }: Props = {}) {
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
@@ -58,9 +64,18 @@ export default function WhatsNewModal() {
     }
   }, [])
 
+  // Respond to external force-show without touching localStorage
+  useEffect(() => {
+    if (forceShow) setVisible(true)
+  }, [forceShow])
+
   const dismiss = () => {
-    localStorage.setItem(SEEN_KEY, '1')
+    // Only set the key on the first-time auto-show, not on manual triggers
+    if (!localStorage.getItem(SEEN_KEY)) {
+      localStorage.setItem(SEEN_KEY, '1')
+    }
     setVisible(false)
+    onClose?.()
   }
 
   if (!visible) return null

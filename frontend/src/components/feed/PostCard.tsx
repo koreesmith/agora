@@ -315,6 +315,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // AGORA-87: inline quick-comment
+  const [quickComment, setQuickComment] = useState('')
   const inLongPressRef = useRef(false)
   const hoveredReactionRef = useRef<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -332,6 +334,17 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const friendLists: any[] = groupsData?.groups || []
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
+
+  // AGORA-87: quick-comment from feed view
+  const quickCommentMutation = useMutation({
+    mutationFn: () => feedApi.createComment(post.id, { content: quickComment }),
+    onSuccess: () => {
+      setQuickComment('')
+      setShowComments(true)
+      qc.invalidateQueries({ queryKey: ['comments', post.id] })
+      invalidate()
+    },
+  })
 
   // Optimistic reaction state — holds until the refetched prop catches up
   // undefined = use post.my_reaction; null = optimistically removed; string = optimistically set
@@ -986,6 +999,43 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 {repost.isPending ? 'Sharing…' : 'Share'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* AGORA-87: Inline quick-comment box */}
+      {!post.repost_of_id && (
+        <div className="flex items-center gap-2 px-1 pt-1 pb-0.5">
+          <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+            {useAuthStore.getState().user?.avatar_url
+              ? <img src={useAuthStore.getState().user!.avatar_url} alt="" className="w-full h-full object-cover" />
+              : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">
+                  {useAuthStore.getState().user?.username?.[0]?.toUpperCase()}
+                </span>}
+          </div>
+          <div className="flex-1 flex items-center gap-1.5 bg-agora-50 dark:bg-agora-800 rounded-full px-3 py-1.5 border border-agora-200 dark:border-agora-700">
+            <input
+              type="text"
+              value={quickComment}
+              onChange={e => setQuickComment(e.target.value)}
+              onFocus={() => !showComments && setShowComments(true)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && quickComment.trim() && !quickCommentMutation.isPending) {
+                  e.preventDefault()
+                  quickCommentMutation.mutate()
+                }
+              }}
+              placeholder="Write a comment…"
+              className="flex-1 bg-transparent text-sm text-agora-700 dark:text-agora-200 placeholder-agora-400 focus:outline-none min-w-0"
+            />
+            {quickComment.trim() && (
+              <button
+                onClick={() => quickCommentMutation.mutate()}
+                disabled={quickCommentMutation.isPending}
+                className="text-agora-600 hover:text-agora-800 transition-colors flex-shrink-0">
+                <ArrowRight size={14} />
+              </button>
+            )}
           </div>
         </div>
       )}

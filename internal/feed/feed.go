@@ -689,17 +689,18 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// Normalize: if image_urls provided, use those; fall back to image_url
 	if len(req.ImageURLs) > 0 {
-		// Cap at 4 photos
-		if len(req.ImageURLs) > 4 {
-			req.ImageURLs = req.ImageURLs[:4]
+		// Cap at 10 photos (AGORA-122)
+		if len(req.ImageURLs) > 10 {
+			req.ImageURLs = req.ImageURLs[:10]
 		}
 		req.ImageURL = req.ImageURLs[0]
 	} else if req.ImageURL != "" {
 		req.ImageURLs = []string{req.ImageURL}
 	}
 
-	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
-		writeError(w, 400, "post must have content or image")
+	// Allow text, image, video, or poll — any one is sufficient (AGORA-119)
+	if req.Content == "" && req.ImageURL == "" && req.VideoURL == "" && len(pollOpts) == 0 {
+		writeError(w, 400, "post must have content, image, or video")
 		return
 	}
 	if req.Visibility == "" {

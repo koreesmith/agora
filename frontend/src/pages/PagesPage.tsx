@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { pagesApi } from '../api'
-import { Users, BookOpen, PlusCircle, Search } from 'lucide-react'
+import { Users, BookOpen, PlusCircle, Search, Star } from 'lucide-react'
 
 function PageCard({ page }: { page: any }) {
   return (
@@ -43,6 +43,12 @@ export default function PagesPage() {
   })
   const myPages: any[] = mineData?.pages ?? []
 
+  const { data: featuredData } = useQuery({
+    queryKey: ['pages-featured'],
+    queryFn: () => pagesApi.featured().then(r => r.data),
+  })
+  const featuredPages: any[] = featuredData?.pages ?? []
+
   const { data: discoverData, isLoading } = useQuery({
     queryKey: ['pages-discover', searchQuery],
     queryFn: () => pagesApi.list(searchQuery ? { q: searchQuery } : undefined).then(r => r.data),
@@ -73,6 +79,18 @@ export default function PagesPage() {
           <h2 className="text-sm font-semibold text-agora-600 dark:text-agora-300 uppercase tracking-wide">Your pages</h2>
           <div className="grid gap-2 sm:grid-cols-2">
             {myPages.map((p: any) => <PageCard key={p.id} page={p} />)}
+          </div>
+        </div>
+      )}
+
+      {/* Featured pages */}
+      {featuredPages.length > 0 && !searchQuery && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-agora-600 dark:text-agora-300 uppercase tracking-wide flex items-center gap-1.5">
+            <Star size={13} className="text-yellow-500" /> Featured
+          </h2>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {featuredPages.map((p: any) => <PageCard key={p.id} page={p} />)}
           </div>
         </div>
       )}

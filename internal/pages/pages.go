@@ -50,6 +50,13 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/pages/{slug}/posts",          s.CreatePost)
 }
 
+// RegisterAdminRoutes wires the admin-only page moderation endpoints.
+// Caller must apply admin middleware before calling this.
+func RegisterAdminRoutes(r chi.Router, s *Service) {
+	r.Patch("/admin/pages/{slug}/verify",  s.AdminVerify)
+	r.Patch("/admin/pages/{slug}/feature", s.AdminFeature)
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Page struct {
@@ -90,10 +97,32 @@ type PagePost struct {
 func (s *Service) ListPages(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	featuredOnly := r.URL.Query().Get("featured") == "true"
 	limit := 20
 	offset := 0
 	if p, _ := strconv.Atoi(r.URL.Query().Get("page")); p > 0 {
 		offset = p * limit
+	}
+
+	// Featured pages shortcut (AGORA-114)
+	if featuredOnly {
+		rows, err := s.db.Query(`
+			SELECT p.id, p.slug, p.display_name, p.bio, p.avatar_url, p.cover_url,
+			       p.cover_position, p.page_type, p.owner_id, p.privacy,
+			       p.subscriber_count, p.post_count, p.created_at, p.updated_at,
+			       EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.id AND ps.user_id = $1),
+			       (p.owner_id = $1)
+			FROM pages p
+			WHERE p.privacy = 'public' AND p.is_featured = true
+			ORDER BY p.subscriber_count DESC
+			LIMIT $2 OFFSET $3
+		`, userID, limit, offset)
+		if err != nil {
+			writeError(w, 500, "db error"); return
+		}
+		defer rows.Close()
+		writeJSON(w, 200, map[string]any{"pages": scanPages(rows)})
+		return
 	}
 
 	if q != "" {
@@ -466,6 +495,36 @@ func (s *Service) notifySubscribers(pageID, actorID, postID string) {
 		}
 		s.notif.Create(uid, actorID, "page_post", postID, pageID)
 	}
+}
+
+// ── Admin: Verify / Feature (AGORA-114) ──────────────────────────────────────
+
+func (s *Service) AdminVerify(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	var req struct {
+		Verified bool `json:"verified"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	res, _ := s.db.Exec(`UPDATE pages SET is_verified = $1 WHERE slug = $2`, req.Verified, slug)
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeError(w, 404, "page not found"); return
+	}
+	writeJSON(w, 200, map[string]bool{"verified": req.Verified})
+}
+
+func (s *Service) AdminFeature(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	var req struct {
+		Featured bool `json:"featured"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	res, _ := s.db.Exec(`UPDATE pages SET is_featured = $1 WHERE slug = $2`, req.Featured, slug)
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeError(w, 404, "page not found"); return
+	}
+	writeJSON(w, 200, map[string]bool{"featured": req.Featured})
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

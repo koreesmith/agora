@@ -27,6 +27,7 @@ func NewService(db *store.DB) *Service {
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/feed/interactions", s.Record)
+	r.Delete("/feed/interactions", s.Reset)
 }
 
 // ── Record ────────────────────────────────────────────────────────────────────
@@ -76,6 +77,16 @@ func (s *Service) Record(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+
+// Reset deletes all interaction records for the authenticated user, allowing
+// their ranked feeds to recalculate from a clean slate (AGORA-104).
+func (s *Service) Reset(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	s.db.Exec(`DELETE FROM feed_interactions WHERE user_id = $1`, userID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

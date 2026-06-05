@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { adminApi, moderationApi, instanceApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X } from 'lucide-react'
+import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'|'pages'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -29,6 +29,10 @@ export default function AdminPage() {
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
+  const { data: adminPagesData, refetch: refetchAdminPages } = useQuery({ queryKey:['admin-pages'], queryFn: ()=>pagesApi.list({}).then(r=>r.data), enabled: tab==='pages' })
+  const adminPages: any[] = adminPagesData?.pages ?? []
+  const verifyPage  = useMutation({ mutationFn: ({slug,v}:{slug:string,v:boolean})=>adminPagesApi.verify(slug,v),  onSuccess:()=>refetchAdminPages() })
+  const featurePage = useMutation({ mutationFn: ({slug,v}:{slug:string,v:boolean})=>adminPagesApi.feature(slug,v), onSuccess:()=>refetchAdminPages() })
 
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
 
@@ -60,6 +64,7 @@ export default function AdminPage() {
     { id:'federation',  label:'Federation',  icon: Link2 },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
+    { id:'pages',       label:'Pages',       icon: Star },
   ]
 
   const sf = (k:string) => (e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>) =>
@@ -473,6 +478,62 @@ export default function AdminPage() {
                         className="text-xs bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 px-3 py-1.5 rounded-lg font-medium transition-colors"
                       >
                         Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Pages tab (AGORA-114) */}
+      {tab==='pages' && (
+        <div className="space-y-4">
+          <div className="card p-4">
+            <h3 className="font-semibold mb-1">Page Moderation</h3>
+            <p className="text-sm text-agora-500 mb-4">Verify notable pages and feature them in the discovery section. Verified and featured status survive owner edits.</p>
+            {adminPages.length === 0 ? (
+              <p className="text-sm text-agora-400 italic py-4 text-center">No pages yet.</p>
+            ) : (
+              <div className="divide-y divide-agora-100 dark:divide-agora-800">
+                {adminPages.map((p: any) => (
+                  <div key={p.id} className="flex items-center gap-3 py-3">
+                    <div className="w-9 h-9 rounded-xl bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                      {p.avatar_url
+                        ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">{p.display_name[0]}</span>}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{p.display_name}</span>
+                        <span className="text-agora-400 text-xs">@{p.slug}</span>
+                        {p.is_verified && <span className="text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-600 px-1.5 py-0.5 rounded">✓ Verified</span>}
+                        {p.is_featured && <span className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 px-1.5 py-0.5 rounded flex items-center gap-0.5"><Star size={10} /> Featured</span>}
+                      </div>
+                      <div className="text-xs text-agora-400">{p.subscriber_count} subscribers · {p.post_count} posts</div>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => verifyPage.mutate({ slug: p.slug, v: !p.is_verified })}
+                        disabled={verifyPage.isPending}
+                        className={`text-xs px-2.5 py-1.5 rounded-lg font-medium transition-colors ${
+                          p.is_verified
+                            ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 hover:bg-blue-200'
+                            : 'bg-agora-100 dark:bg-agora-700 text-agora-600 hover:bg-agora-200'
+                        }`}>
+                        {p.is_verified ? '✓ Verified' : 'Verify'}
+                      </button>
+                      <button
+                        onClick={() => featurePage.mutate({ slug: p.slug, v: !p.is_featured })}
+                        disabled={featurePage.isPending}
+                        className={`text-xs px-2.5 py-1.5 rounded-lg font-medium transition-colors ${
+                          p.is_featured
+                            ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 hover:bg-yellow-200'
+                            : 'bg-agora-100 dark:bg-agora-700 text-agora-600 hover:bg-agora-200'
+                        }`}>
+                        {p.is_featured ? '★ Featured' : '☆ Feature'}
                       </button>
                     </div>
                   </div>

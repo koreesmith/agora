@@ -224,12 +224,12 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, offset int, customFeedID string) {
-	var feedExists bool
-	s.db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM custom_feeds WHERE id = $1 AND owner_id = $2)`,
+	var smartRanking bool
+	err := s.db.QueryRow(
+		`SELECT smart_ranking FROM custom_feeds WHERE id = $1 AND owner_id = $2`,
 		customFeedID, userID,
-	).Scan(&feedExists)
-	if !feedExists {
+	).Scan(&smartRanking)
+	if err != nil {
 		writeError(w, 404, "feed not found")
 		return
 	}
@@ -448,7 +448,83 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	s.enrichReactions(posts, userID)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
+
+	// AGORA-103: smart ranking — re-sort by interaction score × recency
+	if smartRanking && len(posts) > 1 {
+		posts = s.rankPosts(posts, userID)
+	}
+
 	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+// rankPosts scores and re-orders posts using the viewer's historical interaction
+// data with each post's author. Score = interaction_weight × recency_decay.
+// Weights: comment=5, like=3, repost=2, link_click=1, profile_view=0.5, post_view=0.1
+func (s *Service) rankPosts(posts []Post, userID string) []Post {
+	// Fetch weighted interaction scores per target author in one query
+	rows, err := s.db.Query(`
+		SELECT target_user_id,
+		       SUM(CASE interaction_type
+		           WHEN 'comment'      THEN 5.0
+		           WHEN 'like'         THEN 3.0
+		           WHEN 'repost'       THEN 2.0
+		           WHEN 'link_click'   THEN 1.0
+		           WHEN 'profile_view' THEN 0.5
+		           WHEN 'post_view'    THEN 0.1
+		           ELSE 0 END) AS score
+		FROM feed_interactions
+		WHERE user_id = $1
+		  AND target_user_id IS NOT NULL
+		  AND created_at > NOW() - INTERVAL '90 days'
+		GROUP BY target_user_id
+	`, userID)
+	if err != nil {
+		return posts // ranking failure is non-fatal; return original order
+	}
+	defer rows.Close()
+
+	authorScore := map[string]float64{}
+	for rows.Next() {
+		var authorID string
+		var score float64
+		rows.Scan(&authorID, &score)
+		authorScore[authorID] = score
+	}
+
+	if len(authorScore) == 0 {
+		return posts // no interaction data yet; keep chronological
+	}
+
+	now := float64(time.Now().Unix())
+	type scored struct {
+		post  Post
+		score float64
+	}
+	scored_posts := make([]scored, len(posts))
+	for i, p := range posts {
+		iScore := authorScore[p.AuthorID]
+		// Recency decay: halve interaction weight every 7 days
+		postTime := float64(0)
+		if t, err := time.Parse(time.RFC3339, p.CreatedAt); err == nil {
+			postTime = float64(t.Unix())
+		}
+		ageDays := (now - postTime) / 86400.0
+		recencyDecay := 1.0 / (1.0 + ageDays/7.0)
+		scored_posts[i] = scored{p, iScore*recencyDecay + recencyDecay}
+	}
+
+	// Sort descending by score (stable to preserve relative order of ties)
+	for i := 1; i < len(scored_posts); i++ {
+		for j := i; j > 0 && scored_posts[j].score > scored_posts[j-1].score; j-- {
+			scored_posts[j], scored_posts[j-1] = scored_posts[j-1], scored_posts[j]
+		}
+	}
+
+	result := make([]Post, len(posts))
+	for i, sp := range scored_posts {
+		result[i] = sp.post
+	}
+	return result
 }
 
 func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {

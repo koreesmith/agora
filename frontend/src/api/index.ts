@@ -153,6 +153,7 @@ export const groupsApi = {
 export const interactionsApi = {
   record: (data: { target_user_id?: string, post_id?: string, interaction_type: string }) =>
     api.post('/feed/interactions', data).catch(() => {}), // fire-and-forget
+  reset: () => api.delete('/feed/interactions'),          // AGORA-104: clear history
 }
 
 
@@ -293,9 +294,9 @@ export const inviteApi = {
 
 // ── Custom Feeds ──────────────────────────────────────────────────────────────
 export const customFeedsApi = {
-  list:   ()                                                                      => api.get('/feeds'),
-  get:    (id: string)                                                            => api.get(`/feeds/${id}`),
-  create: (data: { name: string, filters: { filter_type: string, value: string }[] }) => api.post('/feeds', data),
-  update: (id: string, data: { name: string, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
-  delete: (id: string)                                                            => api.delete(`/feeds/${id}`),
+  list:   ()                                                                                                         => api.get('/feeds'),
+  get:    (id: string)                                                                                               => api.get(`/feeds/${id}`),
+  create: (data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] })      => api.post('/feeds', data),
+  update: (id: string, data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
+  delete: (id: string)                                                                                               => api.delete(`/feeds/${id}`),
 }

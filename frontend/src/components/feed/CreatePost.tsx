@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown } from 'lucide-react'
 import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
+import api from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
@@ -28,6 +29,11 @@ export default function CreatePost() {
   // Post-as-page identity selector
   const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
   const [showPagePicker, setShowPagePicker] = useState(false)
+  // AGORA-89: group tag autocomplete
+  const [groupSuggestions, setGroupSuggestions] = useState<any[]>([])
+  const [showGroupSuggestions, setShowGroupSuggestions] = useState(false)
+  const [groupTagQuery, setGroupTagQuery] = useState('')
+  const groupDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [showUploadModal, setShowUploadModal] = useState(false)
@@ -290,11 +296,26 @@ export default function CreatePost() {
             ref={inputRef as React.RefObject<HTMLTextAreaElement>}
             value={content}
             onChange={e => {
-              setContent(e.target.value)
-              handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)
-              // AGORA-123: auto-grow
-              e.target.style.height = 'auto'
-              e.target.style.height = e.target.scrollHeight + 'px'
+              const val = e.target.value
+              const pos = e.target.selectionStart ?? val.length
+              setContent(val)
+              handleChange(val, pos)
+              // AGORA-89: group tag autocomplete — detect +word before cursor
+              const before = val.slice(0, pos)
+              const groupMatch = before.match(/\+([a-zA-Z0-9_-]*)$/)
+              if (groupMatch) {
+                const q = groupMatch[1]
+                setGroupTagQuery(q)
+                if (groupDebounceRef.current) clearTimeout(groupDebounceRef.current)
+                groupDebounceRef.current = setTimeout(async () => {
+                  const res = await api.get('/groups/mention-search', { params: { q } })
+                  setGroupSuggestions(res.data.groups || [])
+                  setShowGroupSuggestions(true)
+                }, 200)
+              } else {
+                setShowGroupSuggestions(false)
+                setGroupSuggestions([])
+              }
             }}
             onKeyDown={e => { if (e.key === 'Escape') dismiss() }}
             onPaste={handlePaste}
@@ -304,9 +325,39 @@ export default function CreatePost() {
             data-1p-ignore="true"
             data-lpignore="true"
             data-form-type="other"
-            className="w-full resize-none overflow-hidden bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
+            className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
           />
           {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}
+          {/* AGORA-89: group tag suggestions */}
+          {showGroupSuggestions && groupSuggestions.length > 0 && (
+            <div className="absolute left-0 top-full mt-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-xl shadow-lg py-1 z-40 w-56">
+              {groupSuggestions.map((g: any) => (
+                <button
+                  key={g.slug}
+                  type="button"
+                  className="w-full text-left px-3 py-2 hover:bg-agora-50 dark:hover:bg-agora-700 flex items-center gap-2"
+                  onMouseDown={e => {
+                    e.preventDefault()
+                    // Replace the +partial with +slug
+                    const newContent = content.replace(/\+([a-zA-Z0-9_-]*)$/, `+${g.slug} `)
+                    setContent(newContent)
+                    setShowGroupSuggestions(false)
+                    setGroupSuggestions([])
+                  }}
+                >
+                  <div className="w-6 h-6 rounded-lg bg-agora-200 dark:bg-agora-600 overflow-hidden flex-shrink-0">
+                    {g.avatar_url
+                      ? <img src={g.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{g.name[0]}</span>}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{g.name}</p>
+                    <p className="text-xs text-agora-400">+{g.slug}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

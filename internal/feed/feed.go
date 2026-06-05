@@ -21,7 +21,8 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
-var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
+var mentionRe   = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
+var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
@@ -45,6 +46,7 @@ func (s *Service) SetFed(f fedSender)          { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/preview",                             s.GetLinkPreview)
+	r.Get("/groups/mention-search",              s.GroupMentionSearch) // AGORA-89
 	r.Get("/feed",                               s.GetFeed)
 	r.Post("/posts",                             s.CreatePost)
 	r.Get("/posts/{id}",                         s.GetPost)
@@ -791,6 +793,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyMentions(req.Content, userID, id)
+	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
 		go s.notifyPostFollowers(userID, id)
 	} else if wallStatus == "approved" {
@@ -2574,6 +2577,40 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// ── Group mention search (AGORA-89) ──────────────────────────────────────────
+
+func (s *Service) GroupMentionSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeJSON(w, 200, map[string]any{"groups": []any{}}); return
+	}
+	rows, err := s.db.Query(`
+		SELECT slug, name, avatar_url
+		FROM community_groups
+		WHERE privacy = 'public'
+		  AND (slug ILIKE $1 OR name ILIKE $1)
+		ORDER BY member_count DESC
+		LIMIT 8
+	`, "%"+q+"%")
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"groups": []any{}}); return
+	}
+	defer rows.Close()
+	type GroupHit struct {
+		Slug      string `json:"slug"`
+		Name      string `json:"name"`
+		AvatarURL string `json:"avatar_url"`
+	}
+	var groups []GroupHit
+	for rows.Next() {
+		var g GroupHit
+		rows.Scan(&g.Slug, &g.Name, &g.AvatarURL)
+		groups = append(groups, g)
+	}
+	if groups == nil { groups = []GroupHit{} }
+	writeJSON(w, 200, map[string]any{"groups": groups})
+}
+
 // ── Mention helpers ───────────────────────────────────────────────────────────
 
 func (s *Service) notifyMentions(content, authorID, postID string) {
@@ -2589,6 +2626,33 @@ func (s *Service) notifyMentions(content, authorID, postID string) {
 		if userID == "" || userID == authorID { continue }
 
 		s.notif.Create(userID, authorID, "post_mention", postID, "")
+	}
+}
+
+// notifyGroupTags parses +group-slug from post content and notifies group
+// owners and mods that their group was tagged (AGORA-89).
+func (s *Service) notifyGroupTags(content, authorID, postID string) {
+	matches := groupTagRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	for _, m := range matches {
+		slug := strings.ToLower(m[1])
+		if seen[slug] { continue }
+		seen[slug] = true
+
+		var groupID string
+		s.db.QueryRow(`SELECT id FROM community_groups WHERE slug = $1`, slug).Scan(&groupID)
+		if groupID == "" { continue }
+
+		// Notify all owners and mods
+		rows, err := s.db.Query(`SELECT user_id FROM community_group_members WHERE group_id = $1 AND role IN ('owner','mod')`, groupID)
+		if err != nil { continue }
+		for rows.Next() {
+			var uid string
+			rows.Scan(&uid)
+			if uid == authorID { continue }
+			s.notif.Create(uid, authorID, "group_tag", postID, groupID)
+		}
+		rows.Close()
 	}
 }
 

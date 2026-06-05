@@ -158,7 +158,8 @@ export const interactionsApi = {
 
 // ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
 export const pagesApi = {
-  list:        (params?: { q?: string, page?: number }) => api.get('/pages', { params }),
+  list:        (params?: { q?: string, page?: number, featured?: boolean }) => api.get('/pages', { params }),
+  featured:    ()                                        => api.get('/pages', { params: { featured: true } }),
   mine:        ()                                        => api.get('/pages/mine'),
   get:         (slug: string)                            => api.get(`/pages/${slug}`),
   create:      (data: { display_name: string, bio?: string, page_type?: string, privacy?: string, avatar_url?: string, cover_url?: string }) => api.post('/pages', data),
@@ -193,6 +194,12 @@ export const moderationApi = {
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
+// ── Admin Pages (AGORA-114) ───────────────────────────────────────────────────
+export const adminPagesApi = {
+  verify:  (slug: string, verified: boolean)  => api.patch(`/admin/pages/${slug}/verify`,  { verified }),
+  feature: (slug: string, featured: boolean)  => api.patch(`/admin/pages/${slug}/feature`, { featured }),
+}
+
 export const adminApi = {
   getSettings:     ()                          => api.get('/admin/settings'),
   updateSettings:  (data: any)                 => api.patch('/admin/settings', data),

@@ -593,15 +593,13 @@ var schema = []string{
 	// ── AGORA-128: page reporting (must come after pages table is created) ────
 	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
 
-	// ── AGORA-112: page members (admins & editors) ─────────────────────────
-	`CREATE TABLE IF NOT EXISTS page_members (
+	// ── AGORA-113: page analytics events ──────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS page_analytics_events (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
 		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		role       VARCHAR(20) NOT NULL CHECK (role IN ('owner','admin','editor')),
-		accepted   BOOLEAN     NOT NULL DEFAULT FALSE,
-		joined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		PRIMARY KEY (page_id, user_id)
+		event_type VARCHAR(30) NOT NULL
+		             CHECK (event_type IN ('subscribe','unsubscribe','post_view','post_like','post_comment','post_repost')),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
-	`CREATE INDEX IF NOT EXISTS idx_page_members_page ON page_members(page_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_page_members_user ON page_members(user_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_pae_page_time ON page_analytics_events(page_id, created_at DESC)`,
 }

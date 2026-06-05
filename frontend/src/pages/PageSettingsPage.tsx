@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { pagesApi, feedApi, pageMembersApi } from '../api'
+import { pagesApi, feedApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { ArrowLeft, Upload, X, UserPlus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Upload, X, TrendingUp, Users, Heart, MessageCircle } from 'lucide-react'
 
 const PAGE_TYPES = [
   { value: '',             label: 'Select a type (optional)' },
@@ -225,104 +225,87 @@ export default function PageSettingsPage() {
         </div>
       </div>
 
-      {/* Team management (AGORA-112) */}
-      <TeamSection slug={slug!} isOwner={page.is_owner} qc={qc} />
+      {/* Analytics (AGORA-113) */}
+      <AnalyticsSection slug={slug!} />
     </div>
   )
 }
 
-// ── Team Section ──────────────────────────────────────────────────────────────
+// ── Analytics Section ─────────────────────────────────────────────────────────
 
-function TeamSection({ slug, isOwner, qc }: { slug: string, isOwner: boolean, qc: any }) {
-  const [inviteUsername, setInviteUsername] = useState('')
-  const [inviteRole, setInviteRole] = useState<'admin'|'editor'>('editor')
-  const [inviteError, setInviteError] = useState('')
-
-  const { data, refetch } = useQuery({
-    queryKey: ['page-members', slug],
-    queryFn: () => pageMembersApi.list(slug).then(r => r.data),
-  })
-  const members: any[] = data?.members ?? []
-
-  const invite = useMutation({
-    mutationFn: () => pageMembersApi.invite(slug, inviteUsername, inviteRole),
-    onSuccess: () => { setInviteUsername(''); setInviteError(''); refetch() },
-    onError: (e: any) => setInviteError(e?.response?.data?.error ?? 'Could not invite user'),
+function AnalyticsSection({ slug }: { slug: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['page-analytics', slug],
+    queryFn: () => pagesApi.analytics(slug).then(r => r.data),
+    staleTime: 60_000,
   })
 
-  const remove = useMutation({
-    mutationFn: (userId: string) => pageMembersApi.remove(slug, userId),
-    onSuccess: () => refetch(),
-  })
+  if (isLoading) return (
+    <div className="card p-5 text-center text-agora-400 text-sm">Loading analytics…</div>
+  )
+  if (!data) return null
 
-  const setRole = useMutation({
-    mutationFn: ({ userId, role }: { userId: string, role: string }) => pageMembersApi.setRole(slug, userId, role),
-    onSuccess: () => refetch(),
-  })
+  const growth = data.subscriber_growth ?? {}
+  const topPosts: any[] = data.top_posts ?? []
 
   return (
-    <div className="card p-5 space-y-4">
-      <h3 className="font-semibold">Team</h3>
-      <p className="text-sm text-agora-500">Admins can post and edit page settings. Editors can post only. Invited users must accept before gaining access.</p>
-
-      {/* Current members */}
-      <div className="divide-y divide-agora-100 dark:divide-agora-700">
-        {members.map((m: any) => (
-          <div key={m.user_id} className="flex items-center gap-3 py-2.5">
-            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-              {m.avatar_url
-                ? <img src={m.avatar_url} alt="" className="w-full h-full object-cover" />
-                : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(m.display_name || m.username)[0]?.toUpperCase()}</span>}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{m.display_name || m.username}</p>
-              <p className="text-xs text-agora-400">@{m.username}{!m.accepted && <span className="ml-1 text-amber-500">· pending</span>}</p>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {m.role !== 'owner' && isOwner ? (
-                <select
-                  value={m.role}
-                  onChange={e => setRole.mutate({ userId: m.user_id, role: e.target.value })}
-                  className="text-xs border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1 bg-white dark:bg-agora-800">
-                  <option value="admin">Admin</option>
-                  <option value="editor">Editor</option>
-                </select>
-              ) : (
-                <span className="text-xs text-agora-500 capitalize">{m.role}</span>
-              )}
-              {m.role !== 'owner' && isOwner && (
-                <button onClick={() => remove.mutate(m.user_id)} className="text-agora-400 hover:text-red-500 transition-colors">
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
+    <div className="card p-5 space-y-5">
+      <div className="flex items-center gap-2">
+        <TrendingUp size={16} className="text-agora-500" />
+        <h3 className="font-semibold">Analytics</h3>
       </div>
 
-      {/* Invite form (owner only) */}
-      {isOwner && (
-        <div className="space-y-2 pt-2 border-t border-agora-100 dark:border-agora-700">
-          <label className="label">Invite a team member</label>
-          <div className="flex gap-2">
-            <input
-              value={inviteUsername}
-              onChange={e => setInviteUsername(e.target.value)}
-              placeholder="@username"
-              className="input flex-1 text-sm"
-              onKeyDown={e => e.key === 'Enter' && invite.mutate()}
-            />
-            <select value={inviteRole} onChange={e => setInviteRole(e.target.value as any)}
-              className="text-sm border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 bg-white dark:bg-agora-800">
-              <option value="editor">Editor</option>
-              <option value="admin">Admin</option>
-            </select>
-            <button onClick={() => invite.mutate()} disabled={!inviteUsername.trim() || invite.isPending}
-              className="btn-primary text-sm flex items-center gap-1.5">
-              <UserPlus size={14} /> Invite
-            </button>
+      {/* Stat cards */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <Users size={16} className="mx-auto text-agora-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_subscribers ?? 0}</p>
+          <p className="text-xs text-agora-500">Subscribers</p>
+        </div>
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <Heart size={16} className="mx-auto text-red-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_likes ?? 0}</p>
+          <p className="text-xs text-agora-500">Total likes</p>
+        </div>
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <MessageCircle size={16} className="mx-auto text-agora-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_comments ?? 0}</p>
+          <p className="text-xs text-agora-500">Total comments</p>
+        </div>
+      </div>
+
+      {/* Subscriber growth */}
+      <div>
+        <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-2">Subscriber growth</p>
+        <div className="flex gap-3">
+          {[['7 days', growth['7d']], ['30 days', growth['30d']], ['90 days', growth['90d']]].map(([label, val]) => (
+            <div key={label as string} className="flex-1 bg-agora-50 dark:bg-agora-800 rounded-xl p-2.5 text-center">
+              <p className={`text-lg font-bold ${(val as number) > 0 ? 'text-green-600' : (val as number) < 0 ? 'text-red-500' : ''}`}>
+                {(val as number) > 0 ? '+' : ''}{val as number}
+              </p>
+              <p className="text-xs text-agora-400">{label as string}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Top posts */}
+      {topPosts.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-2">Top posts by engagement</p>
+          <div className="space-y-2">
+            {topPosts.map((p: any) => (
+              <div key={p.id} className="flex items-center gap-3 text-sm">
+                <div className="flex-1 min-w-0">
+                  <p className="truncate text-agora-700 dark:text-agora-300">{p.content || '(no text)'}</p>
+                </div>
+                <div className="flex gap-2 text-xs text-agora-400 flex-shrink-0">
+                  <span className="flex items-center gap-0.5"><Heart size={11} /> {p.like_count}</span>
+                  <span className="flex items-center gap-0.5"><MessageCircle size={11} /> {p.comment_count}</span>
+                </div>
+              </div>
+            ))}
           </div>
-          {inviteError && <p className="text-xs text-red-500">{inviteError}</p>}
         </div>
       )}
     </div>

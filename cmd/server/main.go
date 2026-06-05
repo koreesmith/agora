@@ -158,6 +158,7 @@ func main() {
 			r.Use(authSvc.Middleware)
 			r.Use(authSvc.RequireAdmin)
 			admin.RegisterRoutes(r, adminSvc)
+			pages.RegisterAdminRoutes(r, pagesSvc)
 		})
 	})
 

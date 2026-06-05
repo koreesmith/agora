@@ -570,12 +570,12 @@ func (s *Service) MentionSearch(w http.ResponseWriter, r *http.Request) {
 			           AND f.status = 'accepted'
 			       ) AS is_friend
 			FROM users u
-			WHERE u.id != $1
-			  AND u.deletion_scheduled_at IS NULL
-			  AND u.email_verified = true
+			WHERE u.deletion_scheduled_at IS NULL
+			  AND u.is_suspended = false
 			  AND u.is_remote = false
+			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=u.id) OR (blocker_id=u.id AND blocked_id=$1))
 			  AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
-			ORDER BY is_friend DESC, u.username
+			ORDER BY (u.id = $1) DESC, is_friend DESC, u.username
 			LIMIT 8
 		`, userID, q+"%")
 	}

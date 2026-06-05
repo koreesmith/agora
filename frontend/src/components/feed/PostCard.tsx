@@ -221,6 +221,13 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
 function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: string | null) => void; invalidate: () => void }) {
   const [showAddOption, setShowAddOption] = useState(false)
   const [newOptionText, setNewOptionText] = useState('')
+  const [showVoters, setShowVoters] = useState(false)  // AGORA-48
+
+  const { data: votersData } = useQuery({
+    queryKey: ['poll-voters', post.id],
+    queryFn: () => feedApi.getPollVoters(post.id).then(r => r.data),
+    enabled: showVoters,
+  })
 
   const pollAddOption = useMutation({
     mutationFn: () => feedApi.pollAddOption(post.id, newOptionText.trim()),
@@ -289,11 +296,56 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
           <button onClick={() => { setShowAddOption(false); setNewOptionText('') }} className="btn-secondary text-sm px-3">Cancel</button>
         </div>
       )}
-      <p className="text-xs text-agora-400">
-        {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
-        {post.poll_multiple_choice && canVote && !hasVoted && <span className="ml-2">· Select all that apply</span>}
-        {hasVoted && canVote && <button onClick={() => onVote(null)} className="ml-2 underline hover:text-agora-600">Remove vote</button>}
+      <p className="text-xs text-agora-400 flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => totalVotes > 0 && setShowVoters(v => !v)}
+          className={totalVotes > 0 ? 'underline hover:text-agora-600 transition-colors' : ''}>
+          {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
+        </button>
+        {post.poll_multiple_choice && canVote && !hasVoted && <span>· Select all that apply</span>}
+        {hasVoted && canVote && <button onClick={() => onVote(null)} className="underline hover:text-agora-600">Remove vote</button>}
       </p>
+
+      {/* AGORA-48: poll voters modal */}
+      {showVoters && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+          onClick={() => setShowVoters(false)}>
+          <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-sm max-h-[70vh] flex flex-col"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 pt-4 pb-2 border-b border-agora-100 dark:border-agora-700">
+              <h3 className="font-semibold">Poll votes</h3>
+              <button onClick={() => setShowVoters(false)} className="text-agora-400 hover:text-agora-600"><X size={18} /></button>
+            </div>
+            <div className="overflow-y-auto flex-1 py-2">
+              {!votersData ? (
+                <p className="text-center text-sm text-agora-400 py-6">Loading…</p>
+              ) : votersData.options?.length === 0 ? (
+                <p className="text-center text-sm text-agora-400 py-6">No votes yet.</p>
+              ) : votersData.options?.map((opt: any) => (
+                <div key={opt.option_id} className="px-4 py-2">
+                  <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1.5">{opt.option_text}</p>
+                  {opt.voters.length === 0 ? (
+                    <p className="text-xs text-agora-400 italic">No votes</p>
+                  ) : opt.voters.map((v: any) => (
+                    <Link key={v.id} to={`/profile/${v.username}`} onClick={() => setShowVoters(false)}
+                      className="flex items-center gap-2 py-1.5 hover:opacity-80">
+                      <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {v.avatar_url
+                          ? <img src={v.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(v.display_name||v.username)[0].toUpperCase()}</span>}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{v.display_name || v.username}</p>
+                        <p className="text-xs text-agora-400">@{v.username}</p>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -30,6 +30,8 @@ export default function CreatePost() {
   const [showPagePicker, setShowPagePicker] = useState(false)
   const [friendListId, setFriendListId] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [showUploadModal, setShowUploadModal] = useState(false)
+  const uploadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [twEnabled, setTwEnabled] = useState(false)
   const [twLabel, setTwLabel] = useState('')
   const [pollEnabled, setPollEnabled] = useState(false)
@@ -114,6 +116,17 @@ export default function CreatePost() {
     }, 800)
   }, [content, previewDismissed, detectedUrl])
 
+  // AGORA-117: show upload modal after 1s to reassure users during slow HEIC conversion
+  useEffect(() => {
+    if (uploading) {
+      uploadTimerRef.current = setTimeout(() => setShowUploadModal(true), 1000)
+    } else {
+      if (uploadTimerRef.current) clearTimeout(uploadTimerRef.current)
+      setShowUploadModal(false)
+    }
+    return () => { if (uploadTimerRef.current) clearTimeout(uploadTimerRef.current) }
+  }, [uploading])
+
   const dismissPreview = () => {
     setPreview(null)
     setPreviewError('')
@@ -185,6 +198,19 @@ export default function CreatePost() {
     && !create.isPending && !uploading && (!twEnabled || twLabel.trim()) && validPoll
 
   return (
+    <>
+    {/* AGORA-117: upload progress modal — shown after 1s of uploading */}
+    {showUploadModal && (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="bg-white dark:bg-agora-800 rounded-xl shadow-xl w-full max-w-xs p-6 text-center space-y-3">
+          <div className="w-10 h-10 border-4 border-agora-600 border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="font-semibold text-agora-800 dark:text-agora-100">Uploading photo…</p>
+          <p className="text-sm text-agora-500">
+            HEIC photos from your camera roll are being converted to JPEG. This may take a moment — please wait.
+          </p>
+        </div>
+      </div>
+    )}
     <div className="card p-4 space-y-3">
       <div className="flex gap-3">
         {/* Avatar — shows selected page avatar when posting as a page */}
@@ -471,5 +497,6 @@ export default function CreatePost() {
         </button>
       </div>
     </div>
+    </>
   )
 }

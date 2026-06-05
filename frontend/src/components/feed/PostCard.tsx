@@ -66,6 +66,9 @@ interface Post {
   wall_status?: string
   // Multi-photo (AGORA-93)
   photo_urls?: string[]
+  // Video (AGORA-119)
+  video_url?: string
+  video_thumb_url?: string
   // Page attribution (AGORA-109)
   page_id?: string
   page_slug?: string
@@ -839,6 +842,19 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 </>
               )}
             </>
+          )}
+
+          {/* Video (AGORA-119) */}
+          {post.video_url && !post.repost_of_id && (
+            <div className="mt-2 rounded-xl overflow-hidden bg-black">
+              <video
+                src={post.video_url}
+                poster={post.video_thumb_url || undefined}
+                controls
+                preload="metadata"
+                className="w-full max-h-[32rem] rounded-xl"
+              />
+            </div>
           )}
 
           {/* Poll */}

@@ -32,6 +32,9 @@ const (
 	jpegQuality    = 88
 	// 50MB — covers 48MP RAW JPEGs from modern iPhones/DSLRs
 	maxUploadBytes = 50 << 20
+	// 200MB raw video upload limit; 2-minute max duration enforced by ffprobe
+	maxVideoUploadBytes = 200 << 20
+	maxVideoDurationSec = 120
 )
 
 // heicMagic identifies HEIC/HEIF files by their ftyp box.
@@ -53,7 +56,7 @@ type Service struct {
 }
 
 func NewService(uploadDir string) *Service {
-	for _, d := range []string{"avatar", "cover", "posts", "instance", "albums"} {
+	for _, d := range []string{"avatar", "cover", "posts", "instance", "albums", "videos"} {
 		os.MkdirAll(filepath.Join(uploadDir, d), 0755)
 	}
 	return &Service{uploadDir: uploadDir}
@@ -75,12 +78,112 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	if category == "" {
 		category = "posts"
 	}
+
+	// Videos go through a separate pipeline
+	if category == "videos" {
+		videoURL, thumbURL, err := s.SaveVideoUpload(r)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]string{"url": videoURL, "thumb_url": thumbURL})
+		return
+	}
+
 	url, err := s.SaveUpload(r, category, "")
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]string{"url": url})
+}
+
+// SaveVideoUpload handles video upload: validates duration, transcodes via ffmpeg,
+// generates a poster thumbnail, and returns the output URL pair.
+func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, err error) {
+	r.ParseMultipartForm(maxVideoUploadBytes)
+	file, _, ferr := r.FormFile("file")
+	if ferr != nil {
+		return "", "", fmt.Errorf("no file attached")
+	}
+	defer file.Close()
+
+	limited := io.LimitReader(file, maxVideoUploadBytes+1)
+	data, rerr := io.ReadAll(limited)
+	if rerr != nil {
+		return "", "", fmt.Errorf("could not read file")
+	}
+	if int64(len(data)) > maxVideoUploadBytes {
+		return "", "", fmt.Errorf("video is too large (max 200 MB)")
+	}
+
+	// Write raw upload to a temp file
+	in, terr := os.CreateTemp("", "video-in-*")
+	if terr != nil {
+		return "", "", fmt.Errorf("internal error")
+	}
+	defer os.Remove(in.Name())
+	if _, werr := in.Write(data); werr != nil {
+		in.Close()
+		return "", "", fmt.Errorf("internal error")
+	}
+	in.Close()
+
+	// Pre-flight: check duration with ffprobe
+	dur, derr := videoDuration(in.Name())
+	if derr != nil {
+		return "", "", fmt.Errorf("could not read video — ensure it is a valid MP4, MOV, AVI, MKV, or WebM file")
+	}
+	if dur > float64(maxVideoDurationSec) {
+		return "", "", fmt.Errorf("video is too long (max 2 minutes — this video is %.0f seconds)", dur)
+	}
+
+	id := uuid.New().String()
+	outPath := filepath.Join(s.uploadDir, "videos", id+".mp4")
+	thumbPath := filepath.Join(s.uploadDir, "videos", id+"_thumb.jpg")
+
+	// Transcode to H.264 MP4 (720p max, CRF 23, faststart for web streaming)
+	ffmpegArgs := []string{
+		"-i", in.Name(),
+		"-vf", "scale=-2:min(720\\,ih)",
+		"-c:v", "libx264", "-crf", "23", "-preset", "fast",
+		"-c:a", "aac", "-b:a", "128k",
+		"-movflags", "+faststart",
+		"-fs", "52428800", // 50MB hard cap
+		"-y", outPath,
+	}
+	if out, cerr := exec.Command("ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {
+		return "", "", fmt.Errorf("video processing failed — %s", strings.TrimSpace(string(out)))
+	}
+
+	// Generate poster thumbnail at 1 second
+	thumbArgs := []string{
+		"-i", in.Name(),
+		"-ss", "1", "-vframes", "1",
+		"-vf", "scale=-2:320",
+		"-y", thumbPath,
+	}
+	exec.Command("ffmpeg", thumbArgs...).Run() // non-fatal; thumbnail is optional
+
+	return fmt.Sprintf("/uploads/videos/%s.mp4", id),
+		fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id),
+		nil
+}
+
+// videoDuration uses ffprobe to return the video duration in seconds.
+func videoDuration(path string) (float64, error) {
+	out, err := exec.Command("ffprobe",
+		"-v", "quiet",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		path,
+	).Output()
+	if err != nil {
+		return 0, err
+	}
+	var dur float64
+	_, err = fmt.Sscanf(strings.TrimSpace(string(out)), "%f", &dur)
+	return dur, err
 }
 
 func (s *Service) SaveUpload(r *http.Request, category, _ string) (string, error) {

@@ -158,6 +158,15 @@ export const interactionsApi = {
 
 
 // ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
+// ── Page Members (AGORA-112) ──────────────────────────────────────────────────
+export const pageMembersApi = {
+  list:       (slug: string)                                      => api.get(`/pages/${slug}/members`),
+  invite:     (slug: string, username: string, role: string)      => api.post(`/pages/${slug}/members`, { username, role }),
+  accept:     (slug: string)                                      => api.post(`/pages/${slug}/members/accept`),
+  setRole:    (slug: string, userId: string, role: string)        => api.patch(`/pages/${slug}/members/${userId}/role`, { role }),
+  remove:     (slug: string, userId: string)                      => api.delete(`/pages/${slug}/members/${userId}`),
+}
+
 export const pagesApi = {
   list:        (params?: { q?: string, page?: number, featured?: boolean }) => api.get('/pages', { params }),
   featured:    ()                                        => api.get('/pages', { params: { featured: true } }),

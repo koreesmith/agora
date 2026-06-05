@@ -181,6 +181,7 @@ export const pagesApi = {
   unsubscribe: (slug: string)                            => api.delete(`/pages/${slug}/subscribe`),
   getFeed:     (slug: string, page = 0)                  => api.get(`/pages/${slug}/feed`, { params: { page } }),
   createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[] }) => api.post(`/pages/${slug}/posts`, data),
+  analytics:   (slug: string)                            => api.get(`/pages/${slug}/analytics`),
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

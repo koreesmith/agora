@@ -35,6 +35,7 @@ import MessagesPage        from './pages/MessagesPage'
 import InviteFriendPage   from './pages/InviteFriendPage'
 import CustomFeedsPage    from './pages/CustomFeedsPage'
 import CustomFeedViewPage from './pages/CustomFeedViewPage'
+import WhatsNewModal      from './components/common/WhatsNewModal'
 import CreatePagePage     from './pages/CreatePagePage'
 import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
@@ -91,7 +92,7 @@ function AppRoutes() {
       <Route path="/privacy"        element={<PrivacyPage />} />
       <Route path="/terms"          element={<TermsPage />} />
       <Route path="/support"        element={<SupportPage />} />
-      <Route element={<RequireAuth><Layout /></RequireAuth>}>
+      <Route element={<RequireAuth><><WhatsNewModal /><Layout /></></RequireAuth>}>
         <Route path="/feed"                    element={<FeedPage />} />
         <Route path="/profile/:username"       element={<ProfilePage />} />
         <Route path="/friends"                 element={<FriendsPage />} />

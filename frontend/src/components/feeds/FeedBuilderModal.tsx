@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { X, Plus, Trash2 } from 'lucide-react'
-import { customFeedsApi, friendsApi, groupsApi, pagesApi } from '../../api'
+import { X, Plus, Trash2, Sparkles, RotateCcw } from 'lucide-react'
+import { customFeedsApi, friendsApi, groupsApi, pagesApi, interactionsApi } from '../../api'
 
 interface Filter {
   filter_type: string
@@ -11,6 +11,7 @@ interface Filter {
 interface Feed {
   id: string
   name: string
+  smart_ranking?: boolean
   filters: Filter[]
 }
 
@@ -33,8 +34,10 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
   const isEditing = !!feed
 
   const [name, setName] = useState(feed?.name ?? '')
+  const [smartRanking, setSmartRanking] = useState(feed?.smart_ranking ?? false)
   const [rules, setRules] = useState<Filter[]>(feed?.filters?.map(f => ({ filter_type: f.filter_type, value: f.value })) ?? [])
   const [error, setError] = useState('')
+  const [resetDone, setResetDone] = useState(false)
 
   const { data: listsData } = useQuery({
     queryKey: ['friend-groups'],
@@ -60,12 +63,17 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
   const myPages: any[] = myPagesData?.pages ?? []
 
   const save = useMutation({
-    mutationFn: (data: { name: string, filters: Filter[] }) =>
+    mutationFn: (data: { name: string, smart_ranking: boolean, filters: Filter[] }) =>
       isEditing ? customFeedsApi.update(feed!.id, data) : customFeedsApi.create(data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['custom-feeds'] })
       onClose()
     },
+  })
+
+  const resetInteractions = useMutation({
+    mutationFn: () => interactionsApi.reset(),
+    onSuccess: () => { setResetDone(true); setTimeout(() => setResetDone(false), 3000) },
   })
 
   function addRule() {
@@ -108,7 +116,7 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
     if (rules.length === 0) { setError('Add at least one filter rule.'); return }
     const incomplete = rules.find(r => !r.value)
     if (incomplete) { setError('All filter rules must have a value selected.'); return }
-    save.mutate({ name: name.trim(), filters: rules })
+    save.mutate({ name: name.trim(), smart_ranking: smartRanking, filters: rules })
   }
 
   return (
@@ -192,6 +200,47 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
                   )
                 })}
               </div>
+            </div>
+
+            {/* Smart Ranking toggle (AGORA-103 / AGORA-104) */}
+            <div className={`rounded-xl border p-4 space-y-2 transition-colors ${
+              smartRanking
+                ? 'border-agora-400 bg-agora-50 dark:bg-agora-800/50'
+                : 'border-agora-200 dark:border-agora-600'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={15} className={smartRanking ? 'text-agora-600' : 'text-agora-400'} />
+                  <span className="text-sm font-medium text-agora-700 dark:text-agora-200">Smart Ranking</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSmartRanking(v => !v)}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                    smartRanking ? 'bg-agora-600' : 'bg-agora-200 dark:bg-agora-600'
+                  }`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+                    smartRanking ? 'translate-x-4' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+              {smartRanking && (
+                <div className="space-y-2">
+                  <p className="text-xs text-agora-500">
+                    Posts from people you interact with most will appear higher. Ranking combines engagement history with recency so old posts don't resurface.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => resetInteractions.mutate()}
+                    disabled={resetInteractions.isPending || resetDone}
+                    className="flex items-center gap-1.5 text-xs text-agora-500 hover:text-agora-700 transition-colors"
+                  >
+                    <RotateCcw size={11} />
+                    {resetDone ? 'History cleared ✓' : resetInteractions.isPending ? 'Clearing…' : 'Reset my interaction history'}
+                  </button>
+                </div>
+              )}
             </div>
 
             {error && <p className="text-sm text-red-500">{error}</p>}

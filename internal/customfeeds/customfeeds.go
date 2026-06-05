@@ -36,11 +36,12 @@ type Filter struct {
 }
 
 type Feed struct {
-	ID        string   `json:"id"`
-	OwnerID   string   `json:"owner_id"`
-	Name      string   `json:"name"`
-	CreatedAt string   `json:"created_at"`
-	Filters   []Filter `json:"filters,omitempty"`
+	ID            string   `json:"id"`
+	OwnerID       string   `json:"owner_id"`
+	Name          string   `json:"name"`
+	SmartRanking  bool     `json:"smart_ranking"`
+	CreatedAt     string   `json:"created_at"`
+	Filters       []Filter `json:"filters,omitempty"`
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -49,8 +50,9 @@ func (s *Service) CreateFeed(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.UserIDFromCtx(r.Context())
 
 	var req struct {
-		Name    string   `json:"name"`
-		Filters []Filter `json:"filters"`
+		Name         string   `json:"name"`
+		SmartRanking bool     `json:"smart_ranking"`
+		Filters      []Filter `json:"filters"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -77,8 +79,8 @@ func (s *Service) CreateFeed(w http.ResponseWriter, r *http.Request) {
 
 	var feedID string
 	if err := tx.QueryRow(
-		`INSERT INTO custom_feeds (owner_id, name) VALUES ($1, $2) RETURNING id`,
-		ownerID, req.Name,
+		`INSERT INTO custom_feeds (owner_id, name, smart_ranking) VALUES ($1, $2, $3) RETURNING id`,
+		ownerID, req.Name, req.SmartRanking,
 	).Scan(&feedID); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -115,7 +117,7 @@ func (s *Service) ListFeeds(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.UserIDFromCtx(r.Context())
 
 	rows, err := s.db.Query(
-		`SELECT id, owner_id, name, created_at FROM custom_feeds WHERE owner_id = $1 ORDER BY created_at DESC`,
+		`SELECT id, owner_id, name, smart_ranking, created_at FROM custom_feeds WHERE owner_id = $1 ORDER BY created_at DESC`,
 		ownerID,
 	)
 	if err != nil {
@@ -127,7 +129,7 @@ func (s *Service) ListFeeds(w http.ResponseWriter, r *http.Request) {
 	feeds := []Feed{}
 	for rows.Next() {
 		var f Feed
-		if err := rows.Scan(&f.ID, &f.OwnerID, &f.Name, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.OwnerID, &f.Name, &f.SmartRanking, &f.CreatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -153,8 +155,9 @@ func (s *Service) UpdateFeed(w http.ResponseWriter, r *http.Request) {
 	feedID := chi.URLParam(r, "id")
 
 	var req struct {
-		Name    string   `json:"name"`
-		Filters []Filter `json:"filters"`
+		Name         string   `json:"name"`
+		SmartRanking bool     `json:"smart_ranking"`
+		Filters      []Filter `json:"filters"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -173,8 +176,8 @@ func (s *Service) UpdateFeed(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	res, err := tx.Exec(
-		`UPDATE custom_feeds SET name = $1 WHERE id = $2 AND owner_id = $3`,
-		req.Name, feedID, ownerID,
+		`UPDATE custom_feeds SET name = $1, smart_ranking = $4 WHERE id = $2 AND owner_id = $3`,
+		req.Name, feedID, ownerID, req.SmartRanking,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -243,9 +246,9 @@ func (s *Service) DeleteFeed(w http.ResponseWriter, r *http.Request) {
 func (s *Service) fetchFeed(feedID, ownerID string) (Feed, bool) {
 	var f Feed
 	err := s.db.QueryRow(
-		`SELECT id, owner_id, name, created_at FROM custom_feeds WHERE id = $1 AND owner_id = $2`,
+		`SELECT id, owner_id, name, smart_ranking, created_at FROM custom_feeds WHERE id = $1 AND owner_id = $2`,
 		feedID, ownerID,
-	).Scan(&f.ID, &f.OwnerID, &f.Name, &f.CreatedAt)
+	).Scan(&f.ID, &f.OwnerID, &f.Name, &f.SmartRanking, &f.CreatedAt)
 	if err == sql.ErrNoRows {
 		return Feed{}, false
 	}

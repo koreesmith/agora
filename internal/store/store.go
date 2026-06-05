@@ -592,4 +592,7 @@ var schema = []string{
 
 	// ── AGORA-128: page reporting (must come after pages table is created) ────
 	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
+
+	// ── AGORA-103: smart ranking per custom feed ───────────────────────────
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS smart_ranking BOOLEAN NOT NULL DEFAULT FALSE`,
 }

@@ -101,7 +101,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
-			       p.page_id, pg.slug, pg.display_name, pg.avatar_url
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+			       p.video_url, p.video_thumb_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -148,7 +149,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
-			       p.page_id, pg.slug, pg.display_name, pg.avatar_url
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+			       p.video_url, p.video_thumb_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -381,7 +383,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
-		       p.page_id, pg.slug, pg.display_name, pg.avatar_url
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -648,6 +651,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content         string   `json:"content"`
 		ImageURL        string   `json:"image_url"`
 		ImageURLs       []string `json:"image_urls"`
+		VideoURL        string   `json:"video_url"`
+		VideoThumbURL   string   `json:"video_thumb_url"`
 		Visibility      string   `json:"visibility"`
 		GroupID         string   `json:"group_id"`
 		ContentWarning  string   `json:"content_warning"`
@@ -753,18 +758,20 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, group_id, content_warning,
+		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
+		                   visibility, community_group_id, group_id, content_warning,
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
 		                   poll_expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
 		RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
-		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours).Scan(&id)
+		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
+		req.VideoURL, req.VideoThumbURL).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -1975,6 +1982,9 @@ type Post struct {
 	WallStatus       string  `json:"wall_status,omitempty"`
 	// Multi-photo (AGORA-93)
 	PhotoURLs []string `json:"photo_urls,omitempty"`
+	// Video (AGORA-119)
+	VideoURL      string `json:"video_url,omitempty"`
+	VideoThumbURL string `json:"video_thumb_url,omitempty"`
 	// Page attribution (AGORA-109)
 	PageID     *string `json:"page_id,omitempty"`
 	PageSlug   *string `json:"page_slug,omitempty"`
@@ -2009,6 +2019,7 @@ func scanPosts(rows interface {
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
+			&p.VideoURL, &p.VideoThumbURL,
 		)
 		p.ReactionCounts = map[string]int{}
 		posts = append(posts, p)

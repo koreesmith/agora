@@ -593,6 +593,10 @@ var schema = []string{
 	// ── AGORA-128: page reporting (must come after pages table is created) ────
 	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
 
+	// ── AGORA-119: video posts ─────────────────────────────────────────────
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url       TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_thumb_url TEXT NOT NULL DEFAULT ''`,
+
 	// ── AGORA-113: page analytics events ──────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS page_analytics_events (
 		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),

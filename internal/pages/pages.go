@@ -48,6 +48,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Delete("/pages/{slug}/subscribe",    s.Unsubscribe)
 	r.Get("/pages/{slug}/feed",            s.GetFeed)
 	r.Post("/pages/{slug}/posts",          s.CreatePost)
+	r.Get("/pages/{slug}/analytics",       s.GetAnalytics)
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -324,6 +325,7 @@ func (s *Service) Subscribe(w http.ResponseWriter, r *http.Request) {
 
 	s.db.Exec(`INSERT INTO page_subscribers (page_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, pageID, userID)
 	s.db.Exec(`UPDATE pages SET subscriber_count = (SELECT COUNT(*) FROM page_subscribers WHERE page_id = $1) WHERE id = $1`, pageID)
+	go s.recordEvent(pageID, "subscribe")
 	writeJSON(w, 200, map[string]string{"message": "subscribed"})
 }
 
@@ -339,6 +341,7 @@ func (s *Service) Unsubscribe(w http.ResponseWriter, r *http.Request) {
 
 	s.db.Exec(`DELETE FROM page_subscribers WHERE page_id = $1 AND user_id = $2`, pageID, userID)
 	s.db.Exec(`UPDATE pages SET subscriber_count = (SELECT COUNT(*) FROM page_subscribers WHERE page_id = $1) WHERE id = $1`, pageID)
+	go s.recordEvent(pageID, "unsubscribe")
 	writeJSON(w, 200, map[string]string{"message": "unsubscribed"})
 }
 
@@ -466,6 +469,81 @@ func (s *Service) notifySubscribers(pageID, actorID, postID string) {
 		}
 		s.notif.Create(uid, actorID, "page_post", postID, pageID)
 	}
+}
+
+// ── Analytics (AGORA-113) ─────────────────────────────────────────────────────
+
+func (s *Service) recordEvent(pageID, eventType string) {
+	s.db.Exec(`INSERT INTO page_analytics_events (page_id, event_type) VALUES ($1, $2)`, pageID, eventType)
+}
+
+func (s *Service) GetAnalytics(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+
+	var pageID, ownerID string
+	s.db.QueryRow(`SELECT id, owner_id FROM pages WHERE slug = $1`, slug).Scan(&pageID, &ownerID)
+	if pageID == "" { writeError(w, 404, "page not found"); return }
+	if ownerID != userID {
+		writeError(w, 403, "restricted to page owner"); return
+	}
+
+	var totalSubs int
+	s.db.QueryRow(`SELECT subscriber_count FROM pages WHERE id = $1`, pageID).Scan(&totalSubs)
+
+	growth := func(days int) int {
+		var gained, lost int
+		s.db.QueryRow(`SELECT COUNT(*) FROM page_analytics_events WHERE page_id=$1 AND event_type='subscribe'   AND created_at > NOW() - ($2 || ' days')::interval`, pageID, fmt.Sprintf("%d", days)).Scan(&gained)
+		s.db.QueryRow(`SELECT COUNT(*) FROM page_analytics_events WHERE page_id=$1 AND event_type='unsubscribe' AND created_at > NOW() - ($2 || ' days')::interval`, pageID, fmt.Sprintf("%d", days)).Scan(&lost)
+		return gained - lost
+	}
+
+	type TopPost struct {
+		ID           string `json:"id"`
+		Content      string `json:"content"`
+		LikeCount    int    `json:"like_count"`
+		CommentCount int    `json:"comment_count"`
+		CreatedAt    string `json:"created_at"`
+	}
+	topRows, _ := s.db.Query(`
+		SELECT p.id, LEFT(p.content, 120),
+		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id),
+		       (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL),
+		       p.created_at
+		FROM posts p
+		WHERE p.page_id = $1 AND p.deleted_at IS NULL AND p.parent_id IS NULL
+		ORDER BY (SELECT COUNT(*) FROM likes WHERE post_id = p.id) +
+		         (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) DESC
+		LIMIT 5
+	`, pageID)
+	var topPosts []TopPost
+	if topRows != nil {
+		defer topRows.Close()
+		for topRows.Next() {
+			var tp TopPost
+			topRows.Scan(&tp.ID, &tp.Content, &tp.LikeCount, &tp.CommentCount, &tp.CreatedAt)
+			topPosts = append(topPosts, tp)
+		}
+	}
+	if topPosts == nil { topPosts = []TopPost{} }
+
+	var totalPosts, totalLikes, totalComments int
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE page_id=$1 AND deleted_at IS NULL AND parent_id IS NULL`, pageID).Scan(&totalPosts)
+	s.db.QueryRow(`SELECT COUNT(*) FROM likes l JOIN posts p ON p.id = l.post_id WHERE p.page_id=$1`, pageID).Scan(&totalLikes)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts c JOIN posts p ON p.id = c.parent_id WHERE p.page_id=$1 AND c.deleted_at IS NULL`, pageID).Scan(&totalComments)
+
+	writeJSON(w, 200, map[string]any{
+		"total_subscribers": totalSubs,
+		"subscriber_growth": map[string]int{
+			"7d":  growth(7),
+			"30d": growth(30),
+			"90d": growth(90),
+		},
+		"total_posts":    totalPosts,
+		"total_likes":    totalLikes,
+		"total_comments": totalComments,
+		"top_posts":      topPosts,
+	})
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

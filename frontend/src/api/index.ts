@@ -159,6 +159,7 @@ export const interactionsApi = {
 // ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
 export const pagesApi = {
   list:        (params?: { q?: string, page?: number }) => api.get('/pages', { params }),
+  analytics:   (slug: string)                            => api.get(`/pages/${slug}/analytics`),
   mine:        ()                                        => api.get('/pages/mine'),
   get:         (slug: string)                            => api.get(`/pages/${slug}`),
   create:      (data: { display_name: string, bio?: string, page_type?: string, privacy?: string, avatar_url?: string, cover_url?: string }) => api.post('/pages', data),

@@ -159,7 +159,7 @@ export default function CreatePost() {
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    const remaining = 4 - imageUrls.length
+    const remaining = 10 - imageUrls.length
     const toUpload = files.slice(0, remaining)
     setUploading(true)
     try {
@@ -417,10 +417,10 @@ export default function CreatePost() {
 
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
         {/* Image upload */}
-        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${imageUrls.length >= 4 ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length >= 4 ? 'Maximum 4 photos' : 'Add photos'}>
+        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${imageUrls.length >= 10 ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length >= 10 ? 'Maximum 10 photos' : 'Add photos'}>
           <Image size={18} />
-          {imageUrls.length > 0 && <span className="text-xs font-medium text-agora-500">{imageUrls.length}/4</span>}
-          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 4} />
+          {imageUrls.length > 0 && <span className="text-xs font-medium text-agora-500">{imageUrls.length}/10</span>}
+          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 10} />
         </label>
 
         {/* Trigger warning toggle */}

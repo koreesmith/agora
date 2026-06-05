@@ -114,10 +114,15 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
 
 // Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all") {
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+)/g)
+  // Split on @mentions, +group-tags, and URLs
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+)/g)
   return parts.map((part, i) => {
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
+    // AGORA-89: +group-slug links to group page
+    if (/^\+[a-zA-Z0-9_-]+$/.test(part)) {
+      return <Link key={i} to={`/groups/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^https?:\/\//i.test(part)) {
       const url = part.replace(/[.,!?)]+$/, '')

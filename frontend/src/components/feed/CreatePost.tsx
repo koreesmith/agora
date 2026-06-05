@@ -156,22 +156,41 @@ export default function CreatePost() {
     },
   })
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
+  // Shared image upload helper — accepts File[] from file input or clipboard
+  const uploadFiles = async (files: File[]) => {
     if (!files.length) return
-    const remaining = 4 - imageUrls.length
-    const toUpload = files.slice(0, remaining)
+    const MAX_PHOTOS = 10
+    const remaining = MAX_PHOTOS - imageUrls.length
+    const toUpload = files.filter(f => f.type.startsWith('image/')).slice(0, remaining)
+    if (!toUpload.length) return
     setUploading(true)
     try {
       const results = await Promise.all(toUpload.map(f => feedApi.uploadMedia(f, 'posts')))
-      setImageUrls(prev => [...prev, ...results.map(r => r.data.url)])
+      setImageUrls(prev => [...prev, ...results.map((r: any) => r.data.url)])
     } catch (err: any) {
       const msg = err?.response?.data?.error || 'Image upload failed. Please try a JPEG or PNG file.'
       alert(msg)
     } finally {
       setUploading(false)
-      e.target.value = ''
     }
+  }
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await uploadFiles(Array.from(e.target.files || []))
+    e.target.value = ''
+  }
+
+  // AGORA-76: paste images from clipboard directly into the compose box
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(e.clipboardData.items)
+      .filter(item => item.type.startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter(Boolean) as File[]
+    if (imageFiles.length > 0) {
+      e.preventDefault()
+      await uploadFiles(imageFiles)
+    }
+    // Non-image pastes (text, links) fall through to default behaviour
   }
 
   const visOptions = [
@@ -246,6 +265,7 @@ export default function CreatePost() {
             value={content}
             onChange={e => { setContent(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
             onKeyDown={e => { if (e.key === 'Escape') dismiss() }}
+            onPaste={handlePaste}
             placeholder="What's on your mind? Use @username to tag someone."
             rows={3}
             autoComplete="off"

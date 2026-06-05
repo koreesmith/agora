@@ -289,7 +289,13 @@ export default function CreatePost() {
           <textarea
             ref={inputRef as React.RefObject<HTMLTextAreaElement>}
             value={content}
-            onChange={e => { setContent(e.target.value); handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
+            onChange={e => {
+              setContent(e.target.value)
+              handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)
+              // AGORA-123: auto-grow
+              e.target.style.height = 'auto'
+              e.target.style.height = e.target.scrollHeight + 'px'
+            }}
             onKeyDown={e => { if (e.key === 'Escape') dismiss() }}
             onPaste={handlePaste}
             placeholder="What's on your mind? Use @username to tag someone."
@@ -298,7 +304,7 @@ export default function CreatePost() {
             data-1p-ignore="true"
             data-lpignore="true"
             data-form-type="other"
-            className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
+            className="w-full resize-none overflow-hidden bg-transparent text-sm text-agora-800 dark:text-agora-200 placeholder-agora-400 focus:outline-none"
           />
           {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(content, setContent, u)} />}
         </div>

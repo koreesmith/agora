@@ -593,6 +593,15 @@ var schema = []string{
 	// ── AGORA-128: page reporting (must come after pages table is created) ────
 	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
 
-	// ── AGORA-103: smart ranking per custom feed ───────────────────────────
-	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS smart_ranking BOOLEAN NOT NULL DEFAULT FALSE`,
+	// ── AGORA-112: page members (admins & editors) ─────────────────────────
+	`CREATE TABLE IF NOT EXISTS page_members (
+		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		role       VARCHAR(20) NOT NULL CHECK (role IN ('owner','admin','editor')),
+		accepted   BOOLEAN     NOT NULL DEFAULT FALSE,
+		joined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (page_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_members_page ON page_members(page_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_members_user ON page_members(user_id)`,
 }

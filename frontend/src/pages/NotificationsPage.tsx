@@ -103,10 +103,14 @@ function notifTarget(n: any): string | null {
 
 function groupedActorText(actors: any[], count: number): string {
   const names = actors.map(a => a.display_name || a.username || 'Someone')
-  if (count === 1) return names[0]
-  if (count === 2) return `${names[0]} and ${names[1]}`
-  if (count === 3 && actors.length >= 3) return `${names[0]}, ${names[1]}, and ${names[2]}`
+  // Use names.length (distinct actors) for interpolation — count may exceed
+  // names.length when the same actor acted multiple times (AGORA-135).
+  if (names.length === 0) return 'Someone'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  // 3+ distinct actors shown; remaining folded into "X others"
   const others = count - 2
+  if (others <= 0) return `${names[0]}, ${names[1]}, and ${names[2]}`
   return `${names[0]}, ${names[1]}, and ${others} other${others !== 1 ? 's' : ''}`
 }
 

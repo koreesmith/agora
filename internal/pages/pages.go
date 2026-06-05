@@ -38,16 +38,22 @@ func slugify(s string) string {
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 func RegisterRoutes(r chi.Router, s *Service) {
-	r.Get("/pages",                        s.ListPages)
-	r.Post("/pages",                       s.CreatePage)
-	r.Get("/pages/mine",                   s.MyPages)
-	r.Get("/pages/{slug}",                 s.GetPage)
-	r.Patch("/pages/{slug}",               s.UpdatePage)
-	r.Delete("/pages/{slug}",              s.DeletePage)
-	r.Post("/pages/{slug}/subscribe",      s.Subscribe)
-	r.Delete("/pages/{slug}/subscribe",    s.Unsubscribe)
-	r.Get("/pages/{slug}/feed",            s.GetFeed)
-	r.Post("/pages/{slug}/posts",          s.CreatePost)
+	r.Get("/pages",                                s.ListPages)
+	r.Post("/pages",                               s.CreatePage)
+	r.Get("/pages/mine",                           s.MyPages)
+	r.Get("/pages/{slug}",                         s.GetPage)
+	r.Patch("/pages/{slug}",                       s.UpdatePage)
+	r.Delete("/pages/{slug}",                      s.DeletePage)
+	r.Post("/pages/{slug}/subscribe",              s.Subscribe)
+	r.Delete("/pages/{slug}/subscribe",            s.Unsubscribe)
+	r.Get("/pages/{slug}/feed",                    s.GetFeed)
+	r.Post("/pages/{slug}/posts",                  s.CreatePost)
+	// AGORA-112: member management
+	r.Get("/pages/{slug}/members",                 s.ListMembers)
+	r.Post("/pages/{slug}/members",                s.InviteMember)
+	r.Post("/pages/{slug}/members/accept",         s.AcceptInvite)
+	r.Patch("/pages/{slug}/members/{userID}/role", s.SetMemberRole)
+	r.Delete("/pages/{slug}/members/{userID}",     s.RemoveMember)
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -242,8 +248,8 @@ func (s *Service) UpdatePage(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	slug := chi.URLParam(r, "slug")
 
-	if !s.isOwner(slug, userID) {
-		writeError(w, 403, "only the page owner can update it"); return
+	if !s.canEdit(slug, userID) {
+		writeError(w, 403, "only the page owner or admin can update it"); return
 	}
 
 	var req struct {
@@ -401,8 +407,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	slug := chi.URLParam(r, "slug")
 
-	if !s.isOwner(slug, userID) {
-		writeError(w, 403, "only the page owner can post"); return
+	if !s.canPost(slug, userID) {
+		writeError(w, 403, "only page owners, admins, and editors can post"); return
 	}
 
 	var pageID string
@@ -468,12 +474,172 @@ func (s *Service) notifySubscribers(pageID, actorID, postID string) {
 	}
 }
 
+// ── Member management (AGORA-112) ────────────────────────────────────────────
+
+type PageMember struct {
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	AvatarURL   string `json:"avatar_url"`
+	Role        string `json:"role"`
+	Accepted    bool   `json:"accepted"`
+	JoinedAt    string `json:"joined_at"`
+}
+
+func (s *Service) ListMembers(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	if !s.hasRole(slug, userID, "owner", "admin", "editor") && !s.isOwner(slug, userID) {
+		writeError(w, 403, "forbidden"); return
+	}
+	var pageID string
+	s.db.QueryRow(`SELECT id FROM pages WHERE slug = $1`, slug).Scan(&pageID)
+	if pageID == "" { writeError(w, 404, "page not found"); return }
+
+	// Include the owner
+	rows, err := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url, m.role, m.accepted, m.joined_at
+		FROM page_members m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.page_id = $1
+		ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.joined_at ASC
+	`, pageID)
+	if err != nil { writeError(w, 500, "db error"); return }
+	defer rows.Close()
+
+	var members []PageMember
+	for rows.Next() {
+		var m PageMember
+		rows.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.Role, &m.Accepted, &m.JoinedAt)
+		members = append(members, m)
+	}
+	if members == nil { members = []PageMember{} }
+	writeJSON(w, 200, map[string]any{"members": members})
+}
+
+func (s *Service) InviteMember(w http.ResponseWriter, r *http.Request) {
+	callerID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	if !s.hasRole(slug, callerID, "owner", "admin") && !s.isOwner(slug, callerID) {
+		writeError(w, 403, "only owners and admins can invite members"); return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" {
+		writeError(w, 400, "username required"); return
+	}
+	if req.Role != "admin" && req.Role != "editor" {
+		writeError(w, 400, "role must be admin or editor"); return
+	}
+	// Only owner can invite admins
+	if req.Role == "admin" && !s.isOwner(slug, callerID) {
+		writeError(w, 403, "only the owner can invite admins"); return
+	}
+
+	var targetID string
+	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, req.Username).Scan(&targetID)
+	if targetID == "" { writeError(w, 404, "user not found"); return }
+
+	var pageID string
+	s.db.QueryRow(`SELECT id FROM pages WHERE slug = $1`, slug).Scan(&pageID)
+
+	_, err := s.db.Exec(`
+		INSERT INTO page_members (page_id, user_id, role, accepted)
+		VALUES ($1, $2, $3, false)
+		ON CONFLICT (page_id, user_id) DO UPDATE SET role = $3
+	`, pageID, targetID, req.Role)
+	if err != nil { writeError(w, 500, "could not invite member"); return }
+
+	// Notify the invited user
+	s.notif.Create(targetID, callerID, "page_member_invite", "", pageID)
+	writeJSON(w, 201, map[string]string{"message": "invited"})
+}
+
+func (s *Service) AcceptInvite(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	var pageID string
+	s.db.QueryRow(`SELECT id FROM pages WHERE slug = $1`, slug).Scan(&pageID)
+	if pageID == "" { writeError(w, 404, "page not found"); return }
+
+	res, _ := s.db.Exec(`
+		UPDATE page_members SET accepted = true
+		WHERE page_id = $1 AND user_id = $2 AND accepted = false
+	`, pageID, userID)
+	n, _ := res.RowsAffected()
+	if n == 0 { writeError(w, 404, "no pending invite found"); return }
+	writeJSON(w, 200, map[string]string{"message": "accepted"})
+}
+
+func (s *Service) SetMemberRole(w http.ResponseWriter, r *http.Request) {
+	callerID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	targetID := chi.URLParam(r, "userID")
+	if !s.isOwner(slug, callerID) {
+		writeError(w, 403, "only the owner can change roles"); return
+	}
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Role != "admin" && req.Role != "editor") {
+		writeError(w, 400, "role must be admin or editor"); return
+	}
+	var pageID string
+	s.db.QueryRow(`SELECT id FROM pages WHERE slug = $1`, slug).Scan(&pageID)
+	s.db.Exec(`UPDATE page_members SET role = $1 WHERE page_id = $2 AND user_id = $3`, req.Role, pageID, targetID)
+	writeJSON(w, 200, map[string]string{"message": "role updated"})
+}
+
+func (s *Service) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	callerID := auth.UserIDFromCtx(r.Context())
+	slug := chi.URLParam(r, "slug")
+	targetID := chi.URLParam(r, "userID")
+	if !s.isOwner(slug, callerID) && !s.hasRole(slug, callerID, "admin") {
+		writeError(w, 403, "forbidden"); return
+	}
+	var pageID, ownerID string
+	s.db.QueryRow(`SELECT id, owner_id FROM pages WHERE slug = $1`, slug).Scan(&pageID, &ownerID)
+	if targetID == ownerID { writeError(w, 400, "cannot remove the owner"); return }
+	// Admins can only remove editors
+	if s.hasRole(slug, callerID, "admin") {
+		var targetRole string
+		s.db.QueryRow(`SELECT role FROM page_members WHERE page_id = $1 AND user_id = $2`, pageID, targetID).Scan(&targetRole)
+		if targetRole == "admin" { writeError(w, 403, "admins cannot remove other admins"); return }
+	}
+	s.db.Exec(`DELETE FROM page_members WHERE page_id = $1 AND user_id = $2`, pageID, targetID)
+	writeJSON(w, 200, map[string]string{"message": "removed"})
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (s *Service) isOwner(slug, userID string) bool {
 	var ownerID string
 	s.db.QueryRow(`SELECT owner_id FROM pages WHERE slug = $1`, slug).Scan(&ownerID)
 	return ownerID == userID
+}
+
+// hasRole checks if userID has one of the given roles in page_members (accepted only).
+func (s *Service) hasRole(slug, userID string, roles ...string) bool {
+	var pageID string
+	s.db.QueryRow(`SELECT id FROM pages WHERE slug = $1`, slug).Scan(&pageID)
+	if pageID == "" { return false }
+	var role string
+	s.db.QueryRow(`SELECT role FROM page_members WHERE page_id = $1 AND user_id = $2 AND accepted = true`, pageID, userID).Scan(&role)
+	for _, r := range roles {
+		if role == r { return true }
+	}
+	return false
+}
+
+// canManage returns true if the user is the owner OR an accepted admin/editor for posting,
+// or owner/admin for settings changes.
+func (s *Service) canPost(slug, userID string) bool {
+	return s.isOwner(slug, userID) || s.hasRole(slug, userID, "admin", "editor")
+}
+func (s *Service) canEdit(slug, userID string) bool {
+	return s.isOwner(slug, userID) || s.hasRole(slug, userID, "admin")
 }
 
 func scanPages(rows interface {

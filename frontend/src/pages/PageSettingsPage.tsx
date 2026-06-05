@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { pagesApi, feedApi } from '../api'
+import { pagesApi, feedApi, pageMembersApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { ArrowLeft, Upload, X } from 'lucide-react'
+import { ArrowLeft, Upload, X, UserPlus, Trash2 } from 'lucide-react'
 
 const PAGE_TYPES = [
   { value: '',             label: 'Select a type (optional)' },
@@ -224,6 +224,107 @@ export default function PageSettingsPage() {
           <Link to={`/pages/${slug}`} className="btn-secondary text-sm">Cancel</Link>
         </div>
       </div>
+
+      {/* Team management (AGORA-112) */}
+      <TeamSection slug={slug!} isOwner={page.is_owner} qc={qc} />
+    </div>
+  )
+}
+
+// ── Team Section ──────────────────────────────────────────────────────────────
+
+function TeamSection({ slug, isOwner, qc }: { slug: string, isOwner: boolean, qc: any }) {
+  const [inviteUsername, setInviteUsername] = useState('')
+  const [inviteRole, setInviteRole] = useState<'admin'|'editor'>('editor')
+  const [inviteError, setInviteError] = useState('')
+
+  const { data, refetch } = useQuery({
+    queryKey: ['page-members', slug],
+    queryFn: () => pageMembersApi.list(slug).then(r => r.data),
+  })
+  const members: any[] = data?.members ?? []
+
+  const invite = useMutation({
+    mutationFn: () => pageMembersApi.invite(slug, inviteUsername, inviteRole),
+    onSuccess: () => { setInviteUsername(''); setInviteError(''); refetch() },
+    onError: (e: any) => setInviteError(e?.response?.data?.error ?? 'Could not invite user'),
+  })
+
+  const remove = useMutation({
+    mutationFn: (userId: string) => pageMembersApi.remove(slug, userId),
+    onSuccess: () => refetch(),
+  })
+
+  const setRole = useMutation({
+    mutationFn: ({ userId, role }: { userId: string, role: string }) => pageMembersApi.setRole(slug, userId, role),
+    onSuccess: () => refetch(),
+  })
+
+  return (
+    <div className="card p-5 space-y-4">
+      <h3 className="font-semibold">Team</h3>
+      <p className="text-sm text-agora-500">Admins can post and edit page settings. Editors can post only. Invited users must accept before gaining access.</p>
+
+      {/* Current members */}
+      <div className="divide-y divide-agora-100 dark:divide-agora-700">
+        {members.map((m: any) => (
+          <div key={m.user_id} className="flex items-center gap-3 py-2.5">
+            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+              {m.avatar_url
+                ? <img src={m.avatar_url} alt="" className="w-full h-full object-cover" />
+                : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(m.display_name || m.username)[0]?.toUpperCase()}</span>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate">{m.display_name || m.username}</p>
+              <p className="text-xs text-agora-400">@{m.username}{!m.accepted && <span className="ml-1 text-amber-500">· pending</span>}</p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {m.role !== 'owner' && isOwner ? (
+                <select
+                  value={m.role}
+                  onChange={e => setRole.mutate({ userId: m.user_id, role: e.target.value })}
+                  className="text-xs border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1 bg-white dark:bg-agora-800">
+                  <option value="admin">Admin</option>
+                  <option value="editor">Editor</option>
+                </select>
+              ) : (
+                <span className="text-xs text-agora-500 capitalize">{m.role}</span>
+              )}
+              {m.role !== 'owner' && isOwner && (
+                <button onClick={() => remove.mutate(m.user_id)} className="text-agora-400 hover:text-red-500 transition-colors">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Invite form (owner only) */}
+      {isOwner && (
+        <div className="space-y-2 pt-2 border-t border-agora-100 dark:border-agora-700">
+          <label className="label">Invite a team member</label>
+          <div className="flex gap-2">
+            <input
+              value={inviteUsername}
+              onChange={e => setInviteUsername(e.target.value)}
+              placeholder="@username"
+              className="input flex-1 text-sm"
+              onKeyDown={e => e.key === 'Enter' && invite.mutate()}
+            />
+            <select value={inviteRole} onChange={e => setInviteRole(e.target.value as any)}
+              className="text-sm border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 bg-white dark:bg-agora-800">
+              <option value="editor">Editor</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button onClick={() => invite.mutate()} disabled={!inviteUsername.trim() || invite.isPending}
+              className="btn-primary text-sm flex items-center gap-1.5">
+              <UserPlus size={14} /> Invite
+            </button>
+          </div>
+          {inviteError && <p className="text-xs text-red-500">{inviteError}</p>}
+        </div>
+      )}
     </div>
   )
 }

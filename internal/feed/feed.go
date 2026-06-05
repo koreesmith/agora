@@ -64,6 +64,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
 	r.Post("/posts/{id}/poll/options",           s.PollAddOption)
+	r.Get("/posts/{id}/poll/voters",             s.PollVoters)
 	r.Get("/users/{username}/wall",              s.GetWall)
 	r.Get("/users/me/wall-queue",                s.GetWallQueue)
 	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
@@ -1180,6 +1181,57 @@ func (s *Service) PollUnvote(w http.ResponseWriter, r *http.Request) {
 		  AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
 	`, userID, postID)
 	writeJSON(w, 200, map[string]string{"message": "unvoted"})
+}
+
+// PollVoters returns per-option voter lists for a post's poll (AGORA-48).
+func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
+	postID := chi.URLParam(r, "id")
+
+	rows, err := s.db.Query(`
+		SELECT po.id, po.text,
+		       u.id, u.username, u.display_name, u.avatar_url
+		FROM poll_options po
+		JOIN poll_votes pv ON pv.option_id = po.id
+		JOIN users u ON u.id = pv.user_id
+		WHERE po.post_id = $1
+		ORDER BY po.position, u.display_name
+	`, postID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+
+	type Voter struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+	}
+	type OptionVoters struct {
+		OptionID   string  `json:"option_id"`
+		OptionText string  `json:"option_text"`
+		Voters     []Voter `json:"voters"`
+	}
+
+	byOption := map[string]*OptionVoters{}
+	order := []string{}
+
+	for rows.Next() {
+		var optID, optText string
+		var v Voter
+		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL)
+		if _, ok := byOption[optID]; !ok {
+			byOption[optID] = &OptionVoters{OptionID: optID, OptionText: optText, Voters: []Voter{}}
+			order = append(order, optID)
+		}
+		byOption[optID].Voters = append(byOption[optID].Voters, v)
+	}
+
+	result := make([]OptionVoters, 0, len(order))
+	for _, id := range order {
+		result = append(result, *byOption[id])
+	}
+	writeJSON(w, 200, map[string]any{"options": result})
 }
 
 // ── Wall (AGORA-19) ───────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { pagesApi, feedApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { ArrowLeft, Upload, X } from 'lucide-react'
+import { ArrowLeft, Upload, X, TrendingUp, Users, Heart, MessageCircle } from 'lucide-react'
 
 const PAGE_TYPES = [
   { value: '',             label: 'Select a type (optional)' },
@@ -224,6 +224,90 @@ export default function PageSettingsPage() {
           <Link to={`/pages/${slug}`} className="btn-secondary text-sm">Cancel</Link>
         </div>
       </div>
+
+      {/* Analytics (AGORA-113) */}
+      <AnalyticsSection slug={slug!} />
+    </div>
+  )
+}
+
+// ── Analytics Section ─────────────────────────────────────────────────────────
+
+function AnalyticsSection({ slug }: { slug: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['page-analytics', slug],
+    queryFn: () => pagesApi.analytics(slug).then(r => r.data),
+    staleTime: 60_000,
+  })
+
+  if (isLoading) return (
+    <div className="card p-5 text-center text-agora-400 text-sm">Loading analytics…</div>
+  )
+  if (!data) return null
+
+  const growth = data.subscriber_growth ?? {}
+  const topPosts: any[] = data.top_posts ?? []
+
+  return (
+    <div className="card p-5 space-y-5">
+      <div className="flex items-center gap-2">
+        <TrendingUp size={16} className="text-agora-500" />
+        <h3 className="font-semibold">Analytics</h3>
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <Users size={16} className="mx-auto text-agora-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_subscribers ?? 0}</p>
+          <p className="text-xs text-agora-500">Subscribers</p>
+        </div>
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <Heart size={16} className="mx-auto text-red-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_likes ?? 0}</p>
+          <p className="text-xs text-agora-500">Total likes</p>
+        </div>
+        <div className="bg-agora-50 dark:bg-agora-800 rounded-xl p-3 text-center">
+          <MessageCircle size={16} className="mx-auto text-agora-400 mb-1" />
+          <p className="text-xl font-bold">{data.total_comments ?? 0}</p>
+          <p className="text-xs text-agora-500">Total comments</p>
+        </div>
+      </div>
+
+      {/* Subscriber growth */}
+      <div>
+        <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-2">Subscriber growth</p>
+        <div className="flex gap-3">
+          {[['7 days', growth['7d']], ['30 days', growth['30d']], ['90 days', growth['90d']]].map(([label, val]) => (
+            <div key={label as string} className="flex-1 bg-agora-50 dark:bg-agora-800 rounded-xl p-2.5 text-center">
+              <p className={`text-lg font-bold ${(val as number) > 0 ? 'text-green-600' : (val as number) < 0 ? 'text-red-500' : ''}`}>
+                {(val as number) > 0 ? '+' : ''}{val as number}
+              </p>
+              <p className="text-xs text-agora-400">{label as string}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Top posts */}
+      {topPosts.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-2">Top posts by engagement</p>
+          <div className="space-y-2">
+            {topPosts.map((p: any) => (
+              <div key={p.id} className="flex items-center gap-3 text-sm">
+                <div className="flex-1 min-w-0">
+                  <p className="truncate text-agora-700 dark:text-agora-300">{p.content || '(no text)'}</p>
+                </div>
+                <div className="flex gap-2 text-xs text-agora-400 flex-shrink-0">
+                  <span className="flex items-center gap-0.5"><Heart size={11} /> {p.like_count}</span>
+                  <span className="flex items-center gap-0.5"><MessageCircle size={11} /> {p.comment_count}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -59,9 +59,48 @@
     #toc-home { padding: 12px 20px 8px; }
     #toc-home a { color: var(--accent-hover); font-size: 0.875rem; text-decoration: none; }
     #toc-home a:hover { text-decoration: underline; }
+
+    /* AGORA-121: mobile-friendly docs */
+    #mobile-header {
+      display: none;
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 16px; align-items: center; justify-content: space-between;
+    }
+    #mobile-header span { font-weight: 700; color: var(--accent); }
+    #hamburger {
+      background: none; border: none; cursor: pointer; color: var(--text); padding: 4px;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    #hamburger span { display: block; width: 22px; height: 2px; background: currentColor; border-radius: 2px; transition: all 0.2s; }
+    #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 99; }
+    #overlay.visible { display: block; }
+
+    @media (max-width: 768px) {
+      #mobile-header { display: flex; }
+      #sidebar {
+        top: 0; left: -100%; z-index: 101;
+        transition: left 0.25s ease;
+        width: min(var(--sidebar-width), 85vw);
+      }
+      #sidebar.open { left: 0; }
+      #content { margin-left: 0; padding: 72px 20px 48px; }
+      #doc h1 { font-size: 1.5rem; }
+      #doc h2 { font-size: 1.2rem; }
+      #doc pre { padding: 12px; font-size: 0.8rem; }
+      #doc table { display: block; overflow-x: auto; }
+    }
   </style>
 </head>
 <body>
+<div id="mobile-header">
+  <span>Agora Docs</span>
+  <button id="hamburger" aria-label="Toggle menu">
+    <span></span><span></span><span></span>
+  </button>
+</div>
+<div id="overlay"></div>
+
 <nav id="sidebar">
   <h1>Agora Docs</h1>
   <div id="toc-home"><a href="#" data-doc="overview">&#8962; Overview</a></div>
@@ -172,6 +211,18 @@ window.addEventListener('popstate', e => {
 
 const initial = location.hash.slice(1) || 'overview';
 loadDoc(initial);
+
+// AGORA-121: mobile sidebar toggle
+const hamburger = document.getElementById('hamburger');
+const sidebar   = document.getElementById('sidebar');
+const overlay   = document.getElementById('overlay');
+
+function openSidebar()  { sidebar.classList.add('open');  overlay.classList.add('visible'); }
+function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.remove('visible'); }
+
+hamburger.addEventListener('click', () => sidebar.classList.contains('open') ? closeSidebar() : openSidebar());
+overlay.addEventListener('click', closeSidebar);
+sidebar.addEventListener('click', e => { if (e.target.closest('[data-doc]') && window.innerWidth <= 768) closeSidebar(); });
 </script>
 </body>
 </html>

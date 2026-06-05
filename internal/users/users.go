@@ -540,29 +540,45 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 func (s *Service) MentionSearch(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	q := strings.TrimPrefix(r.URL.Query().Get("q"), "@")
-	if q == "" {
-		writeJSON(w, 200, map[string]any{"users": []any{}})
-		return
-	}
 
-	// Prioritise friends, then other local users
-	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url,
-		       EXISTS(
-		           SELECT 1 FROM friendships f
-		           WHERE ((f.requester_id = $1 AND f.addressee_id = u.id)
-		               OR (f.addressee_id = $1 AND f.requester_id = u.id))
-		           AND f.status = 'accepted'
-		       ) AS is_friend
-		FROM users u
-		WHERE u.id != $1
-		  AND u.deletion_scheduled_at IS NULL
-		  AND u.email_verified = true
-		  AND u.is_remote = false
-		  AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
-		ORDER BY is_friend DESC, u.username
-		LIMIT 8
-	`, userID, q+"%")
+	// Empty query: return up to 8 friends as quick suggestions so the dropdown
+	// appears immediately when the user types '@' with no characters yet.
+	var rows *sql.Rows
+	var err error
+	if q == "" {
+		rows, err = s.db.Query(`
+			SELECT u.id, u.username, u.display_name, u.avatar_url, true AS is_friend
+			FROM users u
+			JOIN friendships f ON (
+				(f.requester_id = $1 AND f.addressee_id = u.id)
+				OR (f.addressee_id = $1 AND f.requester_id = u.id)
+			)
+			WHERE f.status = 'accepted'
+			  AND u.deletion_scheduled_at IS NULL
+			  AND u.is_remote = false
+			ORDER BY u.username
+			LIMIT 8
+		`, userID)
+	} else {
+		// Prioritise friends, then other local users
+		rows, err = s.db.Query(`
+			SELECT u.id, u.username, u.display_name, u.avatar_url,
+			       EXISTS(
+			           SELECT 1 FROM friendships f
+			           WHERE ((f.requester_id = $1 AND f.addressee_id = u.id)
+			               OR (f.addressee_id = $1 AND f.requester_id = u.id))
+			           AND f.status = 'accepted'
+			       ) AS is_friend
+			FROM users u
+			WHERE u.id != $1
+			  AND u.deletion_scheduled_at IS NULL
+			  AND u.email_verified = true
+			  AND u.is_remote = false
+			  AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
+			ORDER BY is_friend DESC, u.username
+			LIMIT 8
+		`, userID, q+"%")
+	}
 	if err != nil {
 		writeError(w, 500, "db error")
 		return

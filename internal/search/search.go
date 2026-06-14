@@ -21,6 +21,7 @@ func NewService(db *store.DB) *Service {
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/search/users", s.SearchUsers)
 	r.Get("/search/posts", s.SearchPosts)
+	r.Get("/search/pages", s.SearchPages)
 }
 
 // ── User search ───────────────────────────────────────────────────────────────
@@ -186,6 +187,70 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	}
 	if posts == nil { posts = []PostResult{} }
 	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+// ── Page search (AGORA-127) ───────────────────────────────────────────────────
+
+func (s *Service) SearchPages(w http.ResponseWriter, r *http.Request) {
+	viewerID := auth.UserIDFromCtx(r.Context())
+	q := r.URL.Query().Get("q")
+	if len(q) < 2 {
+		writeJSON(w, 200, map[string]any{"pages": []any{}})
+		return
+	}
+
+	limit := 20
+	offset := 0
+	if p, _ := strconv.Atoi(r.URL.Query().Get("page")); p > 0 {
+		offset = p * limit
+	}
+
+	rows, err := s.db.Query(`
+		SELECT p.id, p.slug, p.display_name, p.bio, p.avatar_url,
+		       p.page_type, p.subscriber_count, p.post_count, p.is_verified,
+		       EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.id AND ps.user_id = $1) AS is_subscribed
+		FROM pages p
+		WHERE p.privacy = 'public'
+		  AND (p.display_name ILIKE '%' || $2 || '%'
+		       OR p.bio ILIKE '%' || $2 || '%'
+		       OR p.slug ILIKE '%' || $2 || '%')
+		ORDER BY
+		  CASE WHEN LOWER(p.slug) = LOWER($2) THEN 0
+		       WHEN LOWER(p.display_name) = LOWER($2) THEN 1
+		       ELSE 2 END,
+		  p.subscriber_count DESC
+		LIMIT $3 OFFSET $4
+	`, viewerID, q, limit, offset)
+	if err != nil {
+		writeError(w, 500, "search error")
+		return
+	}
+	defer rows.Close()
+
+	type PageResult struct {
+		ID              string `json:"id"`
+		Slug            string `json:"slug"`
+		DisplayName     string `json:"display_name"`
+		Bio             string `json:"bio"`
+		AvatarURL       string `json:"avatar_url"`
+		PageType        string `json:"page_type"`
+		SubscriberCount int    `json:"subscriber_count"`
+		PostCount       int    `json:"post_count"`
+		IsVerified      bool   `json:"is_verified"`
+		IsSubscribed    bool   `json:"is_subscribed"`
+	}
+
+	var pages []PageResult
+	for rows.Next() {
+		var p PageResult
+		rows.Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Bio, &p.AvatarURL,
+			&p.PageType, &p.SubscriberCount, &p.PostCount, &p.IsVerified, &p.IsSubscribed)
+		pages = append(pages, p)
+	}
+	if pages == nil {
+		pages = []PageResult{}
+	}
+	writeJSON(w, 200, map[string]any{"pages": pages})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

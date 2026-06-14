@@ -66,6 +66,14 @@ interface Post {
   wall_status?: string
   // Multi-photo (AGORA-93)
   photo_urls?: string[]
+  // Video (AGORA-119)
+  video_url?: string
+  video_thumb_url?: string
+  // Page attribution (AGORA-109)
+  page_id?: string
+  page_slug?: string
+  page_name?: string
+  page_avatar_url?: string
   created_at: string
   edited_at?: string
 }
@@ -213,6 +221,13 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
 function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: string | null) => void; invalidate: () => void }) {
   const [showAddOption, setShowAddOption] = useState(false)
   const [newOptionText, setNewOptionText] = useState('')
+  const [showVoters, setShowVoters] = useState(false)  // AGORA-48
+
+  const { data: votersData } = useQuery({
+    queryKey: ['poll-voters', post.id],
+    queryFn: () => feedApi.getPollVoters(post.id).then(r => r.data),
+    enabled: showVoters,
+  })
 
   const pollAddOption = useMutation({
     mutationFn: () => feedApi.pollAddOption(post.id, newOptionText.trim()),
@@ -281,11 +296,56 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
           <button onClick={() => { setShowAddOption(false); setNewOptionText('') }} className="btn-secondary text-sm px-3">Cancel</button>
         </div>
       )}
-      <p className="text-xs text-agora-400">
-        {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
-        {post.poll_multiple_choice && canVote && !hasVoted && <span className="ml-2">· Select all that apply</span>}
-        {hasVoted && canVote && <button onClick={() => onVote(null)} className="ml-2 underline hover:text-agora-600">Remove vote</button>}
+      <p className="text-xs text-agora-400 flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => totalVotes > 0 && setShowVoters(v => !v)}
+          className={totalVotes > 0 ? 'underline hover:text-agora-600 transition-colors' : ''}>
+          {totalVotes} {totalVotes === 1 ? 'vote' : 'votes'}
+        </button>
+        {post.poll_multiple_choice && canVote && !hasVoted && <span>· Select all that apply</span>}
+        {hasVoted && canVote && <button onClick={() => onVote(null)} className="underline hover:text-agora-600">Remove vote</button>}
       </p>
+
+      {/* AGORA-48: poll voters modal */}
+      {showVoters && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+          onClick={() => setShowVoters(false)}>
+          <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-sm max-h-[70vh] flex flex-col"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 pt-4 pb-2 border-b border-agora-100 dark:border-agora-700">
+              <h3 className="font-semibold">Poll votes</h3>
+              <button onClick={() => setShowVoters(false)} className="text-agora-400 hover:text-agora-600"><X size={18} /></button>
+            </div>
+            <div className="overflow-y-auto flex-1 py-2">
+              {!votersData ? (
+                <p className="text-center text-sm text-agora-400 py-6">Loading…</p>
+              ) : votersData.options?.length === 0 ? (
+                <p className="text-center text-sm text-agora-400 py-6">No votes yet.</p>
+              ) : votersData.options?.map((opt: any) => (
+                <div key={opt.option_id} className="px-4 py-2">
+                  <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1.5">{opt.option_text}</p>
+                  {opt.voters.length === 0 ? (
+                    <p className="text-xs text-agora-400 italic">No votes</p>
+                  ) : opt.voters.map((v: any) => (
+                    <Link key={v.id} to={`/profile/${v.username}`} onClick={() => setShowVoters(false)}
+                      className="flex items-center gap-2 py-1.5 hover:opacity-80">
+                      <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {v.avatar_url
+                          ? <img src={v.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(v.display_name||v.username)[0].toUpperCase()}</span>}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{v.display_name || v.username}</p>
+                        <p className="text-xs text-agora-400">@{v.username}</p>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -306,7 +366,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
+  const [sharedConfirm, setSharedConfirm] = useState(false)  // AGORA-71
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // AGORA-87: inline quick-comment
+  const [quickComment, setQuickComment] = useState('')
   const inLongPressRef = useRef(false)
   const hoveredReactionRef = useRef<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -324,6 +387,17 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const friendLists: any[] = groupsData?.groups || []
 
   const invalidate = () => qc.invalidateQueries({ queryKey: [invalidateKey] })
+
+  // AGORA-87: quick-comment from feed view
+  const quickCommentMutation = useMutation({
+    mutationFn: () => feedApi.createComment(post.id, { content: quickComment }),
+    onSuccess: () => {
+      setQuickComment('')
+      setShowComments(true)
+      qc.invalidateQueries({ queryKey: ['comments', post.id] })
+      invalidate()
+    },
+  })
 
   // Optimistic reaction state — holds until the refetched prop catches up
   // undefined = use post.my_reaction; null = optimistically removed; string = optimistically set
@@ -403,7 +477,12 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
   const repost = useMutation({
     mutationFn: () => feedApi.repost(post.id, { content: shareContent, visibility: 'friends' }),
-    onSuccess: () => { setShowShare(false); setShareContent(''); invalidate() },
+    onSuccess: () => {
+      setShowShare(false); setShareContent(''); invalidate()
+      // AGORA-71: brief confirmation flash
+      setSharedConfirm(true)
+      setTimeout(() => setSharedConfirm(false), 2500)
+    },
     onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
   })
 
@@ -460,12 +539,15 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
       {/* Author row */}
       <div className="flex items-start gap-3">
-        <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`} className="flex-shrink-0">
-          <div className="w-10 h-10 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
-            {post.author_avatar_url && !post.repost_of_id
+        {/* Avatar — shows page avatar for page posts */}
+        <Link to={post.page_id && post.page_slug ? `/pages/${post.page_slug}` : `/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`} className="flex-shrink-0">
+          <div className={`w-10 h-10 ${post.page_id ? 'rounded-xl' : 'rounded-full'} bg-agora-200 dark:bg-agora-700 overflow-hidden`}>
+            {post.page_id && post.page_avatar_url
+              ? <img src={post.page_avatar_url} alt="" className="w-full h-full object-cover" />
+              : post.author_avatar_url && !post.repost_of_id
               ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
               : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300">
-                  {(post.repost_of_id ? post.repost_author_display_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
+                  {(post.page_id ? post.page_name : post.repost_of_id ? post.repost_author_display_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
                 </span>
             }
           </div>
@@ -474,20 +556,33 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`}
-                className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
-                {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
-              </Link>
-              {(() => {
+              {/* Name — page name for page posts */}
+              {post.page_id && post.page_slug ? (
+                <>
+                  <Link to={`/pages/${post.page_slug}`}
+                    className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
+                    {post.page_name}
+                  </Link>
+                  <span className="text-agora-400 text-xs">@{post.page_slug}</span>
+                </>
+              ) : (
+                <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`}
+                  className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
+                  {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
+                </Link>
+              )}
+              {!post.page_id && (() => {
                 const pronouns = post.repost_of_id ? post.repost_author_pronouns : post.author_pronouns
                 return pronouns ? (
                   <span className="text-agora-400 dark:text-agora-500 text-xs">({pronouns})</span>
                 ) : null
               })()}
-              <span className="text-agora-400 text-xs">
-                {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
-                  !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
-              </span>
+              {!post.page_id && (
+                <span className="text-agora-400 text-xs">
+                  {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
+                    !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
+                </span>
+              )}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               <Link to={`/post/${post.repost_of_id ? post.repost_of_id : post.id}`}
                 className="text-agora-400 text-xs hover:underline">
@@ -820,6 +915,19 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </>
           )}
 
+          {/* Video (AGORA-119) */}
+          {post.video_url && !post.repost_of_id && (
+            <div className="mt-2 rounded-xl overflow-hidden bg-black">
+              <video
+                src={post.video_url}
+                poster={post.video_thumb_url || undefined}
+                controls
+                preload="metadata"
+                className="w-full max-h-[32rem] rounded-xl"
+              />
+            </div>
+          )}
+
           {/* Poll */}
           {post.poll_options && post.poll_options.length >= 2 && (
             <PollWidget post={post} onVote={pollVote.mutate} invalidate={invalidate} />
@@ -880,9 +988,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
                 disabled={post.visibility !== 'public'}
                 title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
-                className={`flex items-center gap-1.5 text-sm transition-colors ${post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
+                className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
                 <Repeat2 size={16} />
-                <span>{post.repost_count || ''}</span>
+                {sharedConfirm
+                  ? <span className="text-xs">Shared!</span>
+                  : <span>{post.repost_count || ''}</span>}
               </button>
             </div>
 
@@ -949,6 +1059,43 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 {repost.isPending ? 'Sharing…' : 'Share'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* AGORA-87: Inline quick-comment box */}
+      {!post.repost_of_id && (
+        <div className="flex items-center gap-2 px-1 pt-1 pb-0.5">
+          <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+            {useAuthStore.getState().user?.avatar_url
+              ? <img src={useAuthStore.getState().user!.avatar_url} alt="" className="w-full h-full object-cover" />
+              : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">
+                  {useAuthStore.getState().user?.username?.[0]?.toUpperCase()}
+                </span>}
+          </div>
+          <div className="flex-1 flex items-center gap-1.5 bg-agora-50 dark:bg-agora-800 rounded-full px-3 py-1.5 border border-agora-200 dark:border-agora-700">
+            <input
+              type="text"
+              value={quickComment}
+              onChange={e => setQuickComment(e.target.value)}
+              onFocus={() => !showComments && setShowComments(true)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && quickComment.trim() && !quickCommentMutation.isPending) {
+                  e.preventDefault()
+                  quickCommentMutation.mutate()
+                }
+              }}
+              placeholder="Write a comment…"
+              className="flex-1 bg-transparent text-sm text-agora-700 dark:text-agora-200 placeholder-agora-400 focus:outline-none min-w-0"
+            />
+            {quickComment.trim() && (
+              <button
+                onClick={() => quickCommentMutation.mutate()}
+                disabled={quickCommentMutation.isPending}
+                className="text-agora-600 hover:text-agora-800 transition-colors flex-shrink-0">
+                <ArrowRight size={14} />
+              </button>
+            )}
           </div>
         </div>
       )}

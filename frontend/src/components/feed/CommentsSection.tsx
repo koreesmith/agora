@@ -114,10 +114,15 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
 
 // Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all") {
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+)/g)
+  // Split on @mentions, +group-tags, and URLs
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+)/g)
   return parts.map((part, i) => {
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
+    // AGORA-89: +group-slug links to group page
+    if (/^\+[a-zA-Z0-9_-]+$/.test(part)) {
+      return <Link key={i} to={`/groups/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^https?:\/\//i.test(part)) {
       const url = part.replace(/[.,!?)]+$/, '')
@@ -140,7 +145,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
   const [imageUrl, setImageUrl] = useState('')
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
-  const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+  const { mentionUsers, mentionGroups, mentionPages, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
@@ -284,7 +289,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
                 }
               }}
             />
-            {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(text, setText, u)} />}
+            {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(text, setText, tag)} />}
             <button onClick={() => create.mutate()} disabled={(!text.trim() && !imageUrl) || create.isPending || uploading} className="btn-primary px-3 py-1.5 self-end">
               {uploading ? <span className="text-xs">…</span> : <Send size={14} />}
             </button>
@@ -322,7 +327,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const inLongPressRef = useRef(false)
   const hoveredReactionRef = useRef<string | null>(null)
   const replyFileRef = useRef<HTMLInputElement>(null)
-  const { mentionUsers, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
+  const { mentionUsers, mentionGroups, mentionPages, showMentions, handleChange, insertMention, dismiss, inputRef } = useMentions()
 
   const handleReplyImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
@@ -424,11 +429,15 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           {editing ? (
             <div className="mt-1 space-y-1.5">
               <textarea
-                className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400"
-                rows={2}
+                className="w-full bg-white dark:bg-agora-800 rounded-lg border border-agora-200 dark:border-agora-600 px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-agora-400 min-h-[36px]"
+                rows={1}
                 autoComplete="off"
                 value={editContent}
-                onChange={e => setEditContent(e.target.value)}
+                onChange={e => {
+                  setEditContent(e.target.value)
+                  e.target.style.height = 'auto'
+                  e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'
+                }}
                 autoFocus
               />
               <div className="flex gap-1.5 justify-end">
@@ -620,7 +629,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                     if (e.key === 'Enter' && !e.shiftKey && (replyText.trim() || replyImageUrl) && !showMentions) replyMutation.mutate()
                   }}
                 />
-                {showMentions && <MentionDropdown users={mentionUsers} onSelect={u => insertMention(replyText, setReplyText, u)} />}
+                {showMentions && <MentionDropdown users={mentionUsers} groups={mentionGroups} pages={mentionPages} onSelect={tag => insertMention(replyText, setReplyText, tag)} />}
                 <button
                   onClick={() => { setShowReplyBox(false); setReplyText(''); setReplyImageUrl('') }}
                   className="btn-secondary text-xs px-2 py-1"

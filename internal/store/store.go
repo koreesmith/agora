@@ -523,6 +523,10 @@ var schema = []string{
 		value       TEXT        NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+	// AGORA-111: add page filter types
+	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
+	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page'))`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
 
 	// ── Multi-photo posts (AGORA-93) ───────────────────────────────────────
@@ -534,4 +538,72 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_post_photos_post ON post_photos(post_id, position ASC)`,
+
+	// ── Pages (AGORA-106) ─────────────────────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS pages (
+		id               UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+		slug             VARCHAR(50)  UNIQUE NOT NULL,
+		display_name     VARCHAR(100) NOT NULL,
+		bio              TEXT         NOT NULL DEFAULT '',
+		avatar_url       TEXT         NOT NULL DEFAULT '',
+		cover_url        TEXT         NOT NULL DEFAULT '',
+		cover_position   TEXT         NOT NULL DEFAULT '50% 50%',
+		page_type        VARCHAR(30)  NOT NULL DEFAULT ''
+		                   CHECK (page_type IN ('band','business','organization','creator','')),
+		owner_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		privacy          VARCHAR(20)  NOT NULL DEFAULT 'public'
+		                   CHECK (privacy IN ('public','private')),
+		subscriber_count INT          NOT NULL DEFAULT 0,
+		post_count       INT          NOT NULL DEFAULT 0,
+		is_verified      BOOLEAN      NOT NULL DEFAULT FALSE,
+		is_featured      BOOLEAN      NOT NULL DEFAULT FALSE,
+		created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+		updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_slug    ON pages(slug)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_owner   ON pages(owner_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_popular ON pages(subscriber_count DESC) WHERE privacy = 'public'`,
+
+	`CREATE TABLE IF NOT EXISTS page_subscribers (
+		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (page_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_subs_user ON page_subscribers(user_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_subs_page ON page_subscribers(page_id)`,
+
+	// Link posts to a page
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS page_id UUID REFERENCES pages(id) ON DELETE SET NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_posts_page ON posts(page_id, created_at DESC)`,
+
+	// ── Feed interaction tracking (AGORA-102) ─────────────────────────────
+	`CREATE TABLE IF NOT EXISTS feed_interactions (
+		id               UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id          UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		target_user_id   UUID        REFERENCES users(id) ON DELETE CASCADE,
+		post_id          UUID        REFERENCES posts(id) ON DELETE CASCADE,
+		interaction_type VARCHAR(30) NOT NULL
+		                   CHECK (interaction_type IN ('like','comment','repost','profile_view','link_click','post_view')),
+		created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_feed_int_user    ON feed_interactions(user_id, created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_feed_int_target  ON feed_interactions(target_user_id, created_at DESC)`,
+
+	// ── AGORA-128: page reporting (must come after pages table is created) ────
+	`ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_page_id UUID REFERENCES pages(id) ON DELETE CASCADE`,
+
+	// ── AGORA-119: video posts ─────────────────────────────────────────────
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url       TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_thumb_url TEXT NOT NULL DEFAULT ''`,
+
+	// ── AGORA-113: page analytics events ──────────────────────────────────
+	`CREATE TABLE IF NOT EXISTS page_analytics_events (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		event_type VARCHAR(30) NOT NULL
+		             CHECK (event_type IN ('subscribe','unsubscribe','post_view','post_like','post_comment','post_repost')),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_pae_page_time ON page_analytics_events(page_id, created_at DESC)`,
 }

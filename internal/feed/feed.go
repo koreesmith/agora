@@ -21,7 +21,8 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
-var mentionRe = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
+var mentionRe   = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
+var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
@@ -45,6 +46,7 @@ func (s *Service) SetFed(f fedSender)          { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/preview",                             s.GetLinkPreview)
+	r.Get("/groups/mention-search",              s.GroupMentionSearch) // AGORA-89
 	r.Get("/feed",                               s.GetFeed)
 	r.Post("/posts",                             s.CreatePost)
 	r.Get("/posts/{id}",                         s.GetPost)
@@ -64,6 +66,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
 	r.Post("/posts/{id}/poll/options",           s.PollAddOption)
+	r.Get("/posts/{id}/poll/voters",             s.PollVoters)
 	r.Get("/users/{username}/wall",              s.GetWall)
 	r.Get("/users/me/wall-queue",                s.GetWallQueue)
 	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
@@ -100,13 +103,16 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
-			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+			       p.video_url, p.video_thumb_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			LEFT JOIN users wu ON wu.id = p.wall_user_id
+			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -145,13 +151,16 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
-			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+			       p.video_url, p.video_thumb_url
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 			LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 			LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 			LEFT JOIN users wu ON wu.id = p.wall_user_id
+			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND p.visibility != 'private'
@@ -173,6 +182,11 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
 			      AND f.status = 'accepted'
 			    )
+			    OR (
+			      -- AGORA-109: include posts from pages the user subscribes to
+			      p.page_id IS NOT NULL
+			      AND EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.page_id AND ps.user_id = $1)
+			    )
 			  )
 			  AND (
 			    -- Friend-list posts: only show if viewer is in that specific friend list
@@ -188,6 +202,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			          AND fg.user_id = p.author_id
 			      )
 			    )
+			    OR p.page_id IS NOT NULL
 			  )
 			  AND (
 			    p.community_group_id IS NULL
@@ -214,12 +229,12 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, offset int, customFeedID string) {
-	var feedExists bool
-	s.db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM custom_feeds WHERE id = $1 AND owner_id = $2)`,
+	var smartRanking bool
+	err := s.db.QueryRow(
+		`SELECT smart_ranking FROM custom_feeds WHERE id = $1 AND owner_id = $2`,
 		customFeedID, userID,
-	).Scan(&feedExists)
-	if !feedExists {
+	).Scan(&smartRanking)
+	if err != nil {
 		writeError(w, 404, "feed not found")
 		return
 	}
@@ -235,6 +250,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
+	var includePageIDs, excludePageIDs []string
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -249,6 +265,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			excludeGroupIDs = append(excludeGroupIDs, val)
 		case "post_type":
 			postTypes = append(postTypes, val)
+		case "include_page":
+			includePageIDs = append(includePageIDs, val)
+		case "exclude_page":
+			excludePageIDs = append(excludePageIDs, val)
 		}
 	}
 	filterRows.Close()
@@ -265,8 +285,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	var extraClauses []string
 
-	// Inclusion: posts must come from at least one included source (OR across groups/communities)
-	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 {
+	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
+	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -288,6 +308,15 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			inclParts = append(inclParts, fmt.Sprintf(
 				`p.community_group_id IN (%s)`, strings.Join(phs, ",")))
 		}
+		// AGORA-111: include posts from specific pages
+		if len(includePageIDs) > 0 {
+			phs := make([]string, len(includePageIDs))
+			for i, id := range includePageIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`p.page_id IN (%s)`, strings.Join(phs, ",")))
+		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
 
@@ -307,6 +336,16 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		}
 		extraClauses = append(extraClauses, fmt.Sprintf(
 			`(p.community_group_id IS NULL OR p.community_group_id NOT IN (%s))`,
+			strings.Join(phs, ",")))
+	}
+	// AGORA-111: exclude posts from specific pages
+	if len(excludePageIDs) > 0 {
+		phs := make([]string, len(excludePageIDs))
+		for i, id := range excludePageIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`(p.page_id IS NULL OR p.page_id NOT IN (%s))`,
 			strings.Join(phs, ",")))
 	}
 
@@ -346,13 +385,16 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
-		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
 		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
 		  AND p.visibility != 'private'
@@ -412,7 +454,83 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	s.enrichReactions(posts, userID)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
+
+	// AGORA-103: smart ranking — re-sort by interaction score × recency
+	if smartRanking && len(posts) > 1 {
+		posts = s.rankPosts(posts, userID)
+	}
+
 	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+// rankPosts scores and re-orders posts using the viewer's historical interaction
+// data with each post's author. Score = interaction_weight × recency_decay.
+// Weights: comment=5, like=3, repost=2, link_click=1, profile_view=0.5, post_view=0.1
+func (s *Service) rankPosts(posts []Post, userID string) []Post {
+	// Fetch weighted interaction scores per target author in one query
+	rows, err := s.db.Query(`
+		SELECT target_user_id,
+		       SUM(CASE interaction_type
+		           WHEN 'comment'      THEN 5.0
+		           WHEN 'like'         THEN 3.0
+		           WHEN 'repost'       THEN 2.0
+		           WHEN 'link_click'   THEN 1.0
+		           WHEN 'profile_view' THEN 0.5
+		           WHEN 'post_view'    THEN 0.1
+		           ELSE 0 END) AS score
+		FROM feed_interactions
+		WHERE user_id = $1
+		  AND target_user_id IS NOT NULL
+		  AND created_at > NOW() - INTERVAL '90 days'
+		GROUP BY target_user_id
+	`, userID)
+	if err != nil {
+		return posts // ranking failure is non-fatal; return original order
+	}
+	defer rows.Close()
+
+	authorScore := map[string]float64{}
+	for rows.Next() {
+		var authorID string
+		var score float64
+		rows.Scan(&authorID, &score)
+		authorScore[authorID] = score
+	}
+
+	if len(authorScore) == 0 {
+		return posts // no interaction data yet; keep chronological
+	}
+
+	now := float64(time.Now().Unix())
+	type scored struct {
+		post  Post
+		score float64
+	}
+	scored_posts := make([]scored, len(posts))
+	for i, p := range posts {
+		iScore := authorScore[p.AuthorID]
+		// Recency decay: halve interaction weight every 7 days
+		postTime := float64(0)
+		if t, err := time.Parse(time.RFC3339, p.CreatedAt); err == nil {
+			postTime = float64(t.Unix())
+		}
+		ageDays := (now - postTime) / 86400.0
+		recencyDecay := 1.0 / (1.0 + ageDays/7.0)
+		scored_posts[i] = scored{p, iScore*recencyDecay + recencyDecay}
+	}
+
+	// Sort descending by score (stable to preserve relative order of ties)
+	for i := 1; i < len(scored_posts); i++ {
+		for j := i; j > 0 && scored_posts[j].score > scored_posts[j-1].score; j-- {
+			scored_posts[j], scored_posts[j-1] = scored_posts[j-1], scored_posts[j]
+		}
+	}
+
+	result := make([]Post, len(posts))
+	for i, sp := range scored_posts {
+		result[i] = sp.post
+	}
+	return result
 }
 
 func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
@@ -506,10 +624,13 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
-		       NULL::uuid, NULL::text, NULL::text, 'approved'::text
+		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
@@ -536,6 +657,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content         string   `json:"content"`
 		ImageURL        string   `json:"image_url"`
 		ImageURLs       []string `json:"image_urls"`
+		VideoURL        string   `json:"video_url"`
+		VideoThumbURL   string   `json:"video_thumb_url"`
 		Visibility      string   `json:"visibility"`
 		GroupID         string   `json:"group_id"`
 		ContentWarning  string   `json:"content_warning"`
@@ -569,17 +692,18 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// Normalize: if image_urls provided, use those; fall back to image_url
 	if len(req.ImageURLs) > 0 {
-		// Cap at 4 photos
-		if len(req.ImageURLs) > 4 {
-			req.ImageURLs = req.ImageURLs[:4]
+		// Cap at 10 photos (AGORA-122)
+		if len(req.ImageURLs) > 10 {
+			req.ImageURLs = req.ImageURLs[:10]
 		}
 		req.ImageURL = req.ImageURLs[0]
 	} else if req.ImageURL != "" {
 		req.ImageURLs = []string{req.ImageURL}
 	}
 
-	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
-		writeError(w, 400, "post must have content or image")
+	// Allow text, image, video, or poll — any one is sufficient (AGORA-119)
+	if req.Content == "" && req.ImageURL == "" && req.VideoURL == "" && len(pollOpts) == 0 {
+		writeError(w, 400, "post must have content, image, or video")
 		return
 	}
 	if req.Visibility == "" {
@@ -641,18 +765,20 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, community_group_id, group_id, content_warning,
+		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
+		                   visibility, community_group_id, group_id, content_warning,
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
 		                   poll_expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
 		RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
-		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours).Scan(&id)
+		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
+		req.VideoURL, req.VideoThumbURL).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -671,6 +797,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.notifyMentions(req.Content, userID, id)
+	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
 		go s.notifyPostFollowers(userID, id)
 	} else if wallStatus == "approved" {
@@ -794,13 +921,16 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
-		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
 		LEFT JOIN users rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
 	`, id, viewerID)
 	if err != nil {
@@ -1063,6 +1193,57 @@ func (s *Service) PollUnvote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "unvoted"})
 }
 
+// PollVoters returns per-option voter lists for a post's poll (AGORA-48).
+func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
+	postID := chi.URLParam(r, "id")
+
+	rows, err := s.db.Query(`
+		SELECT po.id, po.text,
+		       u.id, u.username, u.display_name, u.avatar_url
+		FROM poll_options po
+		JOIN poll_votes pv ON pv.option_id = po.id
+		JOIN users u ON u.id = pv.user_id
+		WHERE po.post_id = $1
+		ORDER BY po.position, u.display_name
+	`, postID)
+	if err != nil {
+		writeError(w, 500, "db error"); return
+	}
+	defer rows.Close()
+
+	type Voter struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		AvatarURL   string `json:"avatar_url"`
+	}
+	type OptionVoters struct {
+		OptionID   string  `json:"option_id"`
+		OptionText string  `json:"option_text"`
+		Voters     []Voter `json:"voters"`
+	}
+
+	byOption := map[string]*OptionVoters{}
+	order := []string{}
+
+	for rows.Next() {
+		var optID, optText string
+		var v Voter
+		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL)
+		if _, ok := byOption[optID]; !ok {
+			byOption[optID] = &OptionVoters{OptionID: optID, OptionText: optText, Voters: []Voter{}}
+			order = append(order, optID)
+		}
+		byOption[optID].Voters = append(byOption[optID].Voters, v)
+	}
+
+	result := make([]OptionVoters, 0, len(order))
+	for _, id := range order {
+		result = append(result, *byOption[id])
+	}
+	writeJSON(w, 200, map[string]any{"options": result})
+}
+
 // ── Wall (AGORA-19) ───────────────────────────────────────────────────────────
 
 func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
@@ -1094,11 +1275,14 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
-		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.wall_user_id = $2
 		  AND p.deleted_at IS NULL
 		  AND `+statusFilter+`
@@ -1133,11 +1317,14 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
-		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved')
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.wall_user_id = $1 AND p.wall_status = 'pending' AND p.deleted_at IS NULL
 		ORDER BY p.created_at ASC
 	`, userID)
@@ -1863,6 +2050,14 @@ type Post struct {
 	WallStatus       string  `json:"wall_status,omitempty"`
 	// Multi-photo (AGORA-93)
 	PhotoURLs []string `json:"photo_urls,omitempty"`
+	// Video (AGORA-119)
+	VideoURL      string `json:"video_url,omitempty"`
+	VideoThumbURL string `json:"video_thumb_url,omitempty"`
+	// Page attribution (AGORA-109)
+	PageID     *string `json:"page_id,omitempty"`
+	PageSlug   *string `json:"page_slug,omitempty"`
+	PageName   *string `json:"page_name,omitempty"`
+	PageAvatar *string `json:"page_avatar_url,omitempty"`
 	// Repost source
 	RepostAuthorUsername *string `json:"repost_author_username,omitempty"`
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
@@ -1891,6 +2086,8 @@ func scanPosts(rows interface {
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
+			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
+			&p.VideoURL, &p.VideoThumbURL,
 		)
 		p.ReactionCounts = map[string]int{}
 		posts = append(posts, p)
@@ -2393,6 +2590,40 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// ── Group mention search (AGORA-89) ──────────────────────────────────────────
+
+func (s *Service) GroupMentionSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeJSON(w, 200, map[string]any{"groups": []any{}}); return
+	}
+	rows, err := s.db.Query(`
+		SELECT slug, name, avatar_url
+		FROM community_groups
+		WHERE privacy = 'public'
+		  AND (slug ILIKE $1 OR name ILIKE $1)
+		ORDER BY member_count DESC
+		LIMIT 8
+	`, "%"+q+"%")
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"groups": []any{}}); return
+	}
+	defer rows.Close()
+	type GroupHit struct {
+		Slug      string `json:"slug"`
+		Name      string `json:"name"`
+		AvatarURL string `json:"avatar_url"`
+	}
+	var groups []GroupHit
+	for rows.Next() {
+		var g GroupHit
+		rows.Scan(&g.Slug, &g.Name, &g.AvatarURL)
+		groups = append(groups, g)
+	}
+	if groups == nil { groups = []GroupHit{} }
+	writeJSON(w, 200, map[string]any{"groups": groups})
+}
+
 // ── Mention helpers ───────────────────────────────────────────────────────────
 
 func (s *Service) notifyMentions(content, authorID, postID string) {
@@ -2408,6 +2639,33 @@ func (s *Service) notifyMentions(content, authorID, postID string) {
 		if userID == "" || userID == authorID { continue }
 
 		s.notif.Create(userID, authorID, "post_mention", postID, "")
+	}
+}
+
+// notifyGroupTags parses +group-slug from post content and notifies group
+// owners and mods that their group was tagged (AGORA-89).
+func (s *Service) notifyGroupTags(content, authorID, postID string) {
+	matches := groupTagRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	for _, m := range matches {
+		slug := strings.ToLower(m[1])
+		if seen[slug] { continue }
+		seen[slug] = true
+
+		var groupID string
+		s.db.QueryRow(`SELECT id FROM community_groups WHERE slug = $1`, slug).Scan(&groupID)
+		if groupID == "" { continue }
+
+		// Notify all owners and mods
+		rows, err := s.db.Query(`SELECT user_id FROM community_group_members WHERE group_id = $1 AND role IN ('owner','mod')`, groupID)
+		if err != nil { continue }
+		for rows.Next() {
+			var uid string
+			rows.Scan(&uid)
+			if uid == authorID { continue }
+			s.notif.Create(uid, authorID, "group_tag", postID, groupID)
+		}
+		rows.Close()
 	}
 }
 

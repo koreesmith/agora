@@ -8,14 +8,14 @@ RUN go mod tidy && go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o agora ./cmd/server
 
 FROM alpine:3.19
-RUN apk --no-cache add ca-certificates tzdata netcat-openbsd libheif-tools
+RUN apk --no-cache add ca-certificates tzdata netcat-openbsd libheif-tools ffmpeg
 WORKDIR /app
 
 COPY --from=builder /app/agora .
 COPY --from=builder /app/.env.example .env
 COPY --from=builder /app/docs ./docs
 
-RUN mkdir -p /data/uploads/avatars /data/uploads/posts /data/uploads/instance
+RUN mkdir -p /data/uploads/avatars /data/uploads/posts /data/uploads/instance /data/uploads/videos
 
 EXPOSE 8080
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen, HelpCircle, Sparkles } from 'lucide-react'
+import WhatsNewModal from '../common/WhatsNewModal'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
@@ -12,6 +13,7 @@ export default function Layout() {
   const navigate = useNavigate()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [dark, setDark] = useState(() => localStorage.getItem('theme') === 'dark')
+  const [showWhatsNew, setShowWhatsNew] = useState(false)
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -48,6 +50,7 @@ export default function Layout() {
     { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
     { to: '/friends',                   icon: Users,          label: 'Friends' },
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
+    { to: '/pages',                     icon: BookOpen,       label: 'Pages' },
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
     { to: '/albums',                    icon: Images,         label: 'Photo Albums' },
     { to: '/discover',                  icon: Compass,        label: 'Find Friends' },
@@ -106,6 +109,17 @@ export default function Layout() {
           {dark ? <Sun size={18} /> : <Moon size={18} />}
           {dark ? 'Light mode' : 'Dark mode'}
         </button>
+        {/* AGORA-132: Help & What's New */}
+        <a href="/docs#user/index" target="_blank" rel="noopener noreferrer"
+          className="flex items-center gap-3 px-3 py-2.5 w-full rounded-lg text-sm font-medium text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-800 transition-colors">
+          <HelpCircle size={18} />
+          Help & docs
+        </a>
+        <button onClick={() => setShowWhatsNew(true)}
+          className="flex items-center gap-3 px-3 py-2.5 w-full rounded-lg text-sm font-medium text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-800 transition-colors">
+          <Sparkles size={18} />
+          What's new
+        </button>
         <button onClick={() => { logout(); navigate('/login') }}
           className="flex items-center gap-3 px-3 py-2.5 w-full rounded-lg text-sm font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
           <LogOut size={18} />
@@ -152,6 +166,8 @@ export default function Layout() {
         </main>
       </div>
       <ChatWindows />
+      {/* AGORA-132: What's New modal — auto-shows on first login; also manually triggerable */}
+      <WhatsNewModal forceShow={showWhatsNew} onClose={() => setShowWhatsNew(false)} />
     </div>
   )
 }

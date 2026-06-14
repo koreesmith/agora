@@ -58,6 +58,8 @@ export const feedApi = {
   pollVote:      (id: string, option_id: string) => api.post(`/posts/${id}/poll/vote`, { option_id }),
   pollUnvote:    (id: string)              => api.delete(`/posts/${id}/poll/vote`),
   pollAddOption: (id: string, text: string) => api.post(`/posts/${id}/poll/options`, { text }),
+  getPollVoters:      (id: string)              => api.get(`/posts/${id}/poll/voters`),
+  groupMentionSearch: (q: string)               => api.get('/groups/mention-search', { params: { q } }),
   getWall:       (username: string)        => api.get(`/users/${username}/wall`),
   getWallQueue:  ()                        => api.get('/users/me/wall-queue'),
   wallApprove:   (id: string)              => api.post(`/posts/${id}/wall-approve`),
@@ -149,10 +151,44 @@ export const groupsApi = {
   rejectRequest:  (slug: string, requestID: string)          => api.post(`/groups/${slug}/requests/${requestID}/reject`),
 }
 
+// ── Interactions (AGORA-102) ──────────────────────────────────────────────────
+export const interactionsApi = {
+  record: (data: { target_user_id?: string, post_id?: string, interaction_type: string }) =>
+    api.post('/feed/interactions', data).catch(() => {}), // fire-and-forget
+  reset: () => api.delete('/feed/interactions'),          // AGORA-104: clear history
+}
+
+
+// ── Pages (AGORA-106) ─────────────────────────────────────────────────────────
+// ── Page Members (AGORA-112) ──────────────────────────────────────────────────
+export const pageMembersApi = {
+  list:       (slug: string)                                      => api.get(`/pages/${slug}/members`),
+  invite:     (slug: string, username: string, role: string)      => api.post(`/pages/${slug}/members`, { username, role }),
+  accept:     (slug: string)                                      => api.post(`/pages/${slug}/members/accept`),
+  setRole:    (slug: string, userId: string, role: string)        => api.patch(`/pages/${slug}/members/${userId}/role`, { role }),
+  remove:     (slug: string, userId: string)                      => api.delete(`/pages/${slug}/members/${userId}`),
+}
+
+export const pagesApi = {
+  list:        (params?: { q?: string, page?: number, featured?: boolean }) => api.get('/pages', { params }),
+  featured:    ()                                        => api.get('/pages', { params: { featured: true } }),
+  mine:        ()                                        => api.get('/pages/mine'),
+  get:         (slug: string)                            => api.get(`/pages/${slug}`),
+  create:      (data: { display_name: string, bio?: string, page_type?: string, privacy?: string, avatar_url?: string, cover_url?: string }) => api.post('/pages', data),
+  update:      (slug: string, data: any)                 => api.patch(`/pages/${slug}`, data),
+  delete:      (slug: string)                            => api.delete(`/pages/${slug}`),
+  subscribe:   (slug: string)                            => api.post(`/pages/${slug}/subscribe`),
+  unsubscribe: (slug: string)                            => api.delete(`/pages/${slug}/subscribe`),
+  getFeed:     (slug: string, page = 0)                  => api.get(`/pages/${slug}/feed`, { params: { page } }),
+  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[] }) => api.post(`/pages/${slug}/posts`, data),
+  analytics:   (slug: string)                            => api.get(`/pages/${slug}/analytics`),
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 export const searchApi = {
   searchUsers: (q: string, scope = 'local') => api.get('/search/users', { params: { q, scope } }),
   searchPosts: (q: string, page = 0)        => api.get('/search/posts', { params: { q, page } }),
+  searchPages: (q: string, page = 0)        => api.get('/search/pages', { params: { q, page } }),
 }
 
 // ── Moderation ────────────────────────────────────────────────────────────────
@@ -171,6 +207,12 @@ export const moderationApi = {
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
+// ── Admin Pages (AGORA-114) ───────────────────────────────────────────────────
+export const adminPagesApi = {
+  verify:  (slug: string, verified: boolean)  => api.patch(`/admin/pages/${slug}/verify`,  { verified }),
+  feature: (slug: string, featured: boolean)  => api.patch(`/admin/pages/${slug}/feature`, { featured }),
+}
+
 export const adminApi = {
   getSettings:     ()                          => api.get('/admin/settings'),
   updateSettings:  (data: any)                 => api.patch('/admin/settings', data),
@@ -271,9 +313,9 @@ export const inviteApi = {
 
 // ── Custom Feeds ──────────────────────────────────────────────────────────────
 export const customFeedsApi = {
-  list:   ()                                                                      => api.get('/feeds'),
-  get:    (id: string)                                                            => api.get(`/feeds/${id}`),
-  create: (data: { name: string, filters: { filter_type: string, value: string }[] }) => api.post('/feeds', data),
-  update: (id: string, data: { name: string, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
-  delete: (id: string)                                                            => api.delete(`/feeds/${id}`),
+  list:   ()                                                                                                         => api.get('/feeds'),
+  get:    (id: string)                                                                                               => api.get(`/feeds/${id}`),
+  create: (data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] })      => api.post('/feeds', data),
+  update: (id: string, data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
+  delete: (id: string)                                                                                               => api.delete(`/feeds/${id}`),
 }

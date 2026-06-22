@@ -138,11 +138,14 @@ func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, e
 	outPath := filepath.Join(s.uploadDir, "videos", id+".mp4")
 	thumbPath := filepath.Join(s.uploadDir, "videos", id+"_thumb.jpg")
 
-	// Transcode to H.264 MP4 (720p max, CRF 23, faststart for web streaming)
+	// Transcode to H.264 MP4 (720p max, CRF 26, faststart for web streaming).
+	// ultrafast preset + multiple threads keeps wall-clock time under Cloudflare's
+	// 100s origin timeout even for HEVC source files from iPhone cameras.
 	ffmpegArgs := []string{
 		"-i", in.Name(),
 		"-vf", "scale=-2:min(720\\,ih)",
-		"-c:v", "libx264", "-crf", "23", "-preset", "fast",
+		"-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+		"-threads", "0",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		"-fs", "52428800", // 50MB hard cap

@@ -178,11 +178,13 @@ func main() {
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{
-		Addr:         cfg.HTTPAddr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              cfg.HTTPAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		// ReadTimeout and WriteTimeout are intentionally unset — chi's Timeout
+		// middleware handles per-request deadlines (60s for normal routes, none
+		// for video uploads which can take minutes to transcode).
 	}
 
 	done := make(chan os.Signal, 1)

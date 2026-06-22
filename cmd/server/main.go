@@ -84,8 +84,8 @@ func main() {
 	r.Use(func(next http.Handler) http.Handler {
 		timeout := middleware.Timeout(60 * time.Second)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip timeout for WebSocket connections
-			if r.Header.Get("Upgrade") == "websocket" {
+			// Skip timeout for WebSocket connections and video uploads (transcode can take minutes)
+			if r.Header.Get("Upgrade") == "websocket" || r.URL.Path == "/api/media/upload" && r.URL.Query().Get("category") == "videos" {
 				next.ServeHTTP(w, r)
 				return
 			}

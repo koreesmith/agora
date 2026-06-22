@@ -148,7 +148,6 @@ func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, e
 		"-threads", "0",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
-		"-fs", "52428800", // 50MB hard cap
 		"-y", outPath,
 	}
 	if out, cerr := exec.Command("ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {

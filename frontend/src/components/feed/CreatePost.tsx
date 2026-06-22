@@ -229,7 +229,7 @@ export default function CreatePost() {
       setVideoThumbUrl((res as any).data.thumb_url || '')
       setImageUrls([]) // video and photos are mutually exclusive
     } catch (err: any) {
-      alert(err?.response?.data?.error || 'Video upload failed. Make sure it is under 2 minutes and 200 MB.')
+      alert(err?.response?.data?.error || 'Video upload failed. Make sure it is under 2 minutes.')
     } finally {
       setUploadingVideo(false)
       e.target.value = ''

@@ -239,6 +239,9 @@ export const adminApi = {
   listWaitlist:    ()           => api.get('/admin/waitlist'),
   approveWaitlist: (id: string) => api.post(`/admin/waitlist/${id}/approve`),
   rejectWaitlist:  (id: string) => api.delete(`/admin/waitlist/${id}`),
+  // Media cleanup
+  scanOrphans:   () => api.get('/admin/media/orphans'),
+  deleteOrphans: () => api.delete('/admin/media/orphans'),
 }
 
 

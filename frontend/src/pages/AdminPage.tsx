@@ -2,11 +2,11 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'|'pages'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -53,6 +53,12 @@ export default function AdminPage() {
   const resendVerif    = useMutation({ mutationFn: (id:string)=>adminApi.resendVerification(id) })
   const approveWait    = useMutation({ mutationFn: (id:string)=>adminApi.approveWaitlist(id), onSuccess:()=>{ ok('Approved — invite sent'); qc.invalidateQueries({queryKey:['admin-waitlist']}) } })
   const rejectWait     = useMutation({ mutationFn: (id:string)=>adminApi.rejectWaitlist(id),  onSuccess:()=>{ ok('Rejected'); qc.invalidateQueries({queryKey:['admin-waitlist']}) } })
+  const [orphanScan, setOrphanScan]   = useState<{count:number, total_bytes:number, orphans:{path:string,url:string,size:number,mod_time:string}[]}|null>(null)
+  const [orphanScanning, setOrphanScanning] = useState(false)
+  const deleteOrphans = useMutation({
+    mutationFn: () => adminApi.deleteOrphans(),
+    onSuccess: (res) => { ok(`Deleted ${res.data.count} file(s)`); setOrphanScan(null) },
+  })
 
   const tabs = [
     { id:'overview',    label:'Overview',    icon: BookOpen },
@@ -65,6 +71,7 @@ export default function AdminPage() {
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
     { id:'pages',       label:'Pages',       icon: Star },
+    { id:'media',       label:'Storage',     icon: HardDrive },
   ]
 
   const sf = (k:string) => (e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>) =>
@@ -482,6 +489,74 @@ export default function AdminPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab==='media' && (
+        <div className="space-y-4">
+          <div className="card p-4 space-y-4">
+            <div>
+              <h3 className="font-semibold">Orphaned Media</h3>
+              <p className="text-sm text-agora-500 mt-0.5">
+                Scan the uploads directory for files no longer referenced by any post, album, profile, or page.
+              </p>
+            </div>
+
+            <button
+              onClick={async () => {
+                setOrphanScanning(true)
+                try {
+                  const res = await adminApi.scanOrphans()
+                  setOrphanScan(res.data)
+                } catch { ok('Scan failed') }
+                finally { setOrphanScanning(false) }
+              }}
+              disabled={orphanScanning}
+              className="btn-secondary text-sm"
+            >
+              {orphanScanning ? 'Scanning…' : 'Scan for orphaned files'}
+            </button>
+
+            {orphanScan && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm">
+                    Found <span className="font-semibold">{orphanScan.count}</span> orphaned file{orphanScan.count !== 1 ? 's' : ''}
+                    {orphanScan.count > 0 && (
+                      <span className="text-agora-400"> · {(orphanScan.total_bytes / 1024 / 1024).toFixed(1)} MB</span>
+                    )}
+                  </p>
+                  {orphanScan.count > 0 && (
+                    <button
+                      onClick={() => { if (confirm(`Permanently delete ${orphanScan.count} orphaned file(s)?`)) deleteOrphans.mutate() }}
+                      disabled={deleteOrphans.isPending}
+                      className="btn-danger text-sm"
+                    >
+                      {deleteOrphans.isPending ? 'Deleting…' : `Delete all ${orphanScan.count} file(s)`}
+                    </button>
+                  )}
+                </div>
+
+                {orphanScan.count === 0 && (
+                  <p className="text-sm text-agora-400 italic">No orphaned files found.</p>
+                )}
+
+                {orphanScan.orphans.length > 0 && (
+                  <div className="rounded-lg border border-agora-200 dark:border-agora-700 divide-y divide-agora-100 dark:divide-agora-800 overflow-hidden">
+                    {orphanScan.orphans.map(f => (
+                      <div key={f.path} className="flex items-center gap-3 px-3 py-2 text-sm">
+                        <span className="font-mono text-xs text-agora-500 flex-1 truncate">{f.path}</span>
+                        <span className="text-xs text-agora-400 flex-shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                        <span className="text-xs text-agora-300 dark:text-agora-600 flex-shrink-0 hidden sm:block">
+                          {new Date(f.mod_time).toLocaleDateString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

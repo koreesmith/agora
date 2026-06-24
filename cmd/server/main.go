@@ -62,7 +62,7 @@ func main() {
 	feedSvc.SetAlbums(albumsSvc)
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
-	adminSvc  := admin.NewService(db, cfg, notifSvc)
+	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)

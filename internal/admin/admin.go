@@ -18,6 +18,7 @@ type Service struct {
 	db       *store.DB
 	cfg      *config.Config
 	notifSvc notifSender
+	media    mediaStore
 }
 
 type notifSender interface {
@@ -26,8 +27,12 @@ type notifSender interface {
 	SendWaitlistApproved(email, displayName, acceptURL string)
 }
 
-func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender) *Service {
-	return &Service{db: db, cfg: cfg, notifSvc: notifSvc}
+type mediaStore interface {
+	UploadDir() string
+}
+
+func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender, media mediaStore) *Service {
+	return &Service{db: db, cfg: cfg, notifSvc: notifSvc, media: media}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
@@ -69,6 +74,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/admin/waitlist",              s.ListWaitlist)
 	r.Post("/admin/waitlist/{id}/approve", s.ApproveWaitlist)
 	r.Delete("/admin/waitlist/{id}",      s.RejectWaitlist)
+
+	// Media cleanup
+	r.Get("/admin/media/orphans",    s.ScanOrphans)
+	r.Delete("/admin/media/orphans", s.DeleteOrphans)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

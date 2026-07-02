@@ -62,7 +62,7 @@ func main() {
 	feedSvc.SetAlbums(albumsSvc)
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
-	adminSvc  := admin.NewService(db, cfg, notifSvc)
+	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
 	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)
@@ -84,8 +84,8 @@ func main() {
 	r.Use(func(next http.Handler) http.Handler {
 		timeout := middleware.Timeout(60 * time.Second)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip timeout for WebSocket connections
-			if r.Header.Get("Upgrade") == "websocket" {
+			// Skip timeout for WebSocket connections and video uploads (transcode can take minutes)
+			if r.Header.Get("Upgrade") == "websocket" || r.URL.Path == "/api/media/upload" && r.URL.Query().Get("category") == "videos" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -178,11 +178,13 @@ func main() {
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{
-		Addr:         cfg.HTTPAddr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              cfg.HTTPAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		// ReadTimeout and WriteTimeout are intentionally unset — chi's Timeout
+		// middleware handles per-request deadlines (60s for normal routes, none
+		// for video uploads which can take minutes to transcode).
 	}
 
 	done := make(chan os.Signal, 1)

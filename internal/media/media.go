@@ -32,8 +32,8 @@ const (
 	jpegQuality    = 88
 	// 50MB — covers 48MP RAW JPEGs from modern iPhones/DSLRs
 	maxUploadBytes = 50 << 20
-	// 200MB raw video upload limit; 2-minute max duration enforced by ffprobe
-	maxVideoUploadBytes = 200 << 20
+	// 2GB raw video upload limit; actual constraint is 2-minute duration via ffprobe
+	maxVideoUploadBytes = 2 << 30
 	maxVideoDurationSec = 120
 )
 
@@ -101,33 +101,29 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 // SaveVideoUpload handles video upload: validates duration, transcodes via ffmpeg,
 // generates a poster thumbnail, and returns the output URL pair.
 func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, err error) {
-	r.ParseMultipartForm(maxVideoUploadBytes)
+	// 32MB in memory; larger uploads are spooled to disk by the multipart parser
+	r.ParseMultipartForm(32 << 20)
 	file, _, ferr := r.FormFile("file")
 	if ferr != nil {
 		return "", "", fmt.Errorf("no file attached")
 	}
 	defer file.Close()
 
-	limited := io.LimitReader(file, maxVideoUploadBytes+1)
-	data, rerr := io.ReadAll(limited)
-	if rerr != nil {
-		return "", "", fmt.Errorf("could not read file")
-	}
-	if int64(len(data)) > maxVideoUploadBytes {
-		return "", "", fmt.Errorf("video is too large (max 200 MB)")
-	}
-
-	// Write raw upload to a temp file
+	// Stream directly to a temp file — avoids loading the raw upload into RAM
 	in, terr := os.CreateTemp("", "video-in-*")
 	if terr != nil {
 		return "", "", fmt.Errorf("internal error")
 	}
 	defer os.Remove(in.Name())
-	if _, werr := in.Write(data); werr != nil {
-		in.Close()
-		return "", "", fmt.Errorf("internal error")
-	}
+
+	n, copyErr := io.Copy(in, io.LimitReader(file, maxVideoUploadBytes+1))
 	in.Close()
+	if copyErr != nil {
+		return "", "", fmt.Errorf("could not read file")
+	}
+	if n > maxVideoUploadBytes {
+		return "", "", fmt.Errorf("video is too large (max 2 GB)")
+	}
 
 	// Pre-flight: check duration with ffprobe
 	dur, derr := videoDuration(in.Name())
@@ -142,14 +138,16 @@ func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, e
 	outPath := filepath.Join(s.uploadDir, "videos", id+".mp4")
 	thumbPath := filepath.Join(s.uploadDir, "videos", id+"_thumb.jpg")
 
-	// Transcode to H.264 MP4 (720p max, CRF 23, faststart for web streaming)
+	// Transcode to H.264 MP4 (720p max, CRF 26, faststart for web streaming).
+	// ultrafast preset + multiple threads keeps wall-clock time under Cloudflare's
+	// 100s origin timeout even for HEVC source files from iPhone cameras.
 	ffmpegArgs := []string{
 		"-i", in.Name(),
 		"-vf", "scale=-2:min(720\\,ih)",
-		"-c:v", "libx264", "-crf", "23", "-preset", "fast",
+		"-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+		"-threads", "0",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
-		"-fs", "52428800", // 50MB hard cap
 		"-y", outPath,
 	}
 	if out, cerr := exec.Command("ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {

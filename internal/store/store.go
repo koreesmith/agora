@@ -606,4 +606,5 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_pae_page_time ON page_analytics_events(page_id, created_at DESC)`,
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS smart_ranking BOOLEAN NOT NULL DEFAULT false`,
 }

@@ -53,11 +53,27 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// RequireAdmin gates routes that manage the instance itself — settings, SMTP
+// credentials, role assignment, user deletion, federation. These are admin-only:
+// moderators must NOT reach them (a moderator with admin-panel access could
+// promote themselves via the role endpoint).
 func (s *Service) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		role := ctxkeys.GetUserRole(r.Context())
-		if role != "admin" && role != "moderator" {
+		if role != "admin" {
 			writeError(w, http.StatusForbidden, "admin required"); return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireModerator gates content-moderation routes (reports, suspensions, bans).
+// Both moderators and admins qualify.
+func (s *Service) RequireModerator(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		role := ctxkeys.GetUserRole(r.Context())
+		if role != "admin" && role != "moderator" {
+			writeError(w, http.StatusForbidden, "moderator required"); return
 		}
 		next.ServeHTTP(w, r)
 	})

@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -263,9 +265,11 @@ func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 // fetchRemoteProfile GETs /federation/users/{handle} on the remote instance.
 // Returns an empty map on any error (caller must handle gracefully).
 func (s *Service) fetchRemoteProfile(handle, instance string) map[string]string {
-	url := "https://" + instance + "/federation/users/" + handle
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+	if !isValidInstanceHost(instance) {
+		return map[string]string{}
+	}
+	reqURL := "https://" + instance + "/federation/users/" + url.PathEscape(handle)
+	resp, err := fedHTTPClient.Get(reqURL)
 	if err != nil || resp.StatusCode != 200 {
 		return map[string]string{}
 	}
@@ -382,6 +386,11 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 // remote instance and creating/updating the local stub. Returns the local profile.
 // Query param: handle=username@instance.com
 func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
+	if !s.federationEnabled() {
+		writeError(w, 404, "federation not enabled")
+		return
+	}
+
 	raw := r.URL.Query().Get("handle")
 	if raw == "" {
 		writeError(w, 400, "handle required — format: username@instance.com")
@@ -394,6 +403,11 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username, instance := parts[0], parts[1]
+
+	if !isValidInstanceHost(instance) {
+		writeError(w, 400, "invalid instance domain")
+		return
+	}
 
 	// Don't look up our own users this way
 	localDomain := domainFromURL(s.cfg.InstanceDomain)
@@ -592,8 +606,7 @@ func (s *Service) drainQueue() {
 }
 
 func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
+	resp, err := fedHTTPClient.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
 	if err != nil {
 		return err
 	}
@@ -636,8 +649,10 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(decoded), nil
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://" + domain + "/.well-known/agora-instance")
+	if !isValidInstanceHost(domain) {
+		return nil, fmt.Errorf("invalid instance domain")
+	}
+	resp, err := fedHTTPClient.Get("https://" + domain + "/.well-known/agora-instance")
 	if err != nil { return nil, fmt.Errorf("could not reach instance: %w", err) }
 	defer resp.Body.Close()
 
@@ -726,8 +741,8 @@ func (s *Service) refreshInstances() {
 		var domain string
 		rows.Scan(&domain)
 		go func(d string) {
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Get("https://" + d + "/.well-known/agora-instance")
+			if !isValidInstanceHost(d) { return }
+			resp, err := fedHTTPClient.Get("https://" + d + "/.well-known/agora-instance")
 			if err != nil { return }
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -749,6 +764,67 @@ func domainFromURL(u string) string {
 	u = strings.TrimPrefix(u, "https://")
 	u = strings.TrimPrefix(u, "http://")
 	return strings.Split(u, "/")[0]
+}
+
+// ── SSRF protection ─────────────────────────────────────────────────────────────
+//
+// All outbound federation requests go through fedHTTPClient, whose dialer refuses
+// to connect to non-public IP addresses. This prevents an attacker-supplied
+// instance host (e.g. via /federation/lookup) from making the server reach
+// internal services, cloud metadata endpoints (169.254.169.254), or loopback.
+
+var fedHTTPClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: &http.Transport{DialContext: safeDialContext},
+}
+
+// isPublicIP reports whether ip is a globally routable address we're willing to
+// connect to. Loopback, private, link-local, CGNAT, unspecified, and multicast
+// ranges are all rejected.
+func isPublicIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	// 100.64.0.0/10 — carrier-grade NAT (not covered by IsPrivate)
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return false
+	}
+	return true
+}
+
+// safeDialContext resolves the target host, verifies every resolved IP is public,
+// then dials a validated IP directly (closing the DNS-rebinding window between
+// the check and the connection).
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ipa := range ips {
+		if !isPublicIP(ipa.IP) {
+			return nil, fmt.Errorf("refusing to connect to non-public address %s", ipa.IP)
+		}
+	}
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// isValidInstanceHost performs cheap syntactic validation on a federation host
+// before it's ever placed into a URL. It rejects empty values, over-long names,
+// and anything containing characters that could alter the request target.
+func isValidInstanceHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	if strings.ContainsAny(h, "/\\?#@ \t\r\n") {
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

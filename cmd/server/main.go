@@ -153,6 +153,13 @@ func main() {
 			interactions.RegisterRoutes(r, interactionsSvc)
 		})
 
+		// Moderator or admin — content moderation actions
+		r.Group(func(r chi.Router) {
+			r.Use(authSvc.Middleware)
+			r.Use(authSvc.RequireModerator)
+			moderation.RegisterModeratorRoutes(r, modSvc)
+		})
+
 		// Admin only
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)

@@ -22,9 +22,16 @@ func NewService(db *store.DB, notif *notifications.Service) *Service {
 	return &Service{db: db, notif: notif}
 }
 
+// RegisterRoutes registers endpoints available to any authenticated user.
+// Filing a report is intentionally open to all users.
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/reports", s.CreateReport)
+}
 
+// RegisterModeratorRoutes registers privileged moderation actions. The caller
+// MUST wrap this group with auth.RequireModerator — these handlers do not
+// re-check the caller's role themselves.
+func RegisterModeratorRoutes(r chi.Router, s *Service) {
 	r.Get("/moderation/reports",                     s.ListReports)
 	r.Post("/moderation/reports/{id}/review",        s.ReviewReport)
 	r.Get("/moderation/users",                       s.ListModeratedUsers)

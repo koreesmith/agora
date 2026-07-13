@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -10,15 +11,18 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/store"
 )
 
 const (
@@ -35,7 +39,15 @@ const (
 	// 2GB raw video upload limit; actual constraint is 2-minute duration via ffprobe
 	maxVideoUploadBytes = 2 << 30
 	maxVideoDurationSec = 120
+	// Hard cap on how long a single ffmpeg transcode may run before it is killed,
+	// so a pathological input can't hold a transcode slot forever.
+	transcodeTimeout = 15 * time.Minute
 )
+
+// transcodeSem limits how many ffmpeg transcodes run concurrently. Each ffmpeg
+// invocation already uses every CPU core (-threads 0), so running many at once
+// only thrashes the box — phone uploads mostly arrive one at a time per user.
+var transcodeSem = make(chan struct{}, 2)
 
 // heicMagic identifies HEIC/HEIF files by their ftyp box.
 // HEIC files start with a 4-byte length, then "ftyp", then a brand like "heic", "heix", "mif1", etc.
@@ -52,20 +64,28 @@ func isHEIC(data []byte) bool {
 }
 
 type Service struct {
+	db        *store.DB
 	uploadDir string
 }
 
-func NewService(uploadDir string) *Service {
+func NewService(db *store.DB, uploadDir string) *Service {
 	for _, d := range []string{"avatar", "cover", "posts", "instance", "albums", "videos"} {
 		os.MkdirAll(filepath.Join(uploadDir, d), 0755)
 	}
-	return &Service{uploadDir: uploadDir}
+	// Transcode jobs run in-process; any left "processing" belong to a previous
+	// run whose goroutine died with the process. Fail them so clients polling
+	// those jobs stop waiting instead of spinning forever. (AGORA-137)
+	if db != nil {
+		db.Exec(`UPDATE video_transcode_jobs SET status='failed', error='video processing was interrupted — please try again', updated_at=NOW() WHERE status='processing'`)
+	}
+	return &Service{db: db, uploadDir: uploadDir}
 }
 
 func (s *Service) UploadDir() string { return s.uploadDir }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/media/upload", s.Upload)
+	r.Get("/media/jobs/{id}", s.VideoJobStatus)
 }
 
 func (s *Service) FileServer() http.Handler {
@@ -73,20 +93,23 @@ func (s *Service) FileServer() http.Handler {
 }
 
 func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
-	_ = auth.UserIDFromCtx(r.Context())
+	userID := auth.UserIDFromCtx(r.Context())
 	category := r.URL.Query().Get("category")
 	if category == "" {
 		category = "posts"
 	}
 
-	// Videos go through a separate pipeline
+	// Videos go through a separate, asynchronous pipeline (AGORA-137): the raw
+	// file is saved and validated inline, then transcoding runs in a background
+	// goroutine so the request returns immediately — well within Cloudflare's
+	// 100s origin timeout — instead of blocking on ffmpeg.
 	if category == "videos" {
-		videoURL, thumbURL, err := s.SaveVideoUpload(r)
+		jobID, err := s.StartVideoJob(r, userID)
 		if err != nil {
 			writeError(w, 400, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]string{"url": videoURL, "thumb_url": thumbURL})
+		writeJSON(w, 200, map[string]string{"job_id": jobID, "status": "processing"})
 		return
 	}
 
@@ -98,74 +121,163 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"url": url})
 }
 
-// SaveVideoUpload handles video upload: validates duration, transcodes via ffmpeg,
-// generates a poster thumbnail, and returns the output URL pair.
-func (s *Service) SaveVideoUpload(r *http.Request) (videoURL, thumbURL string, err error) {
+// StartVideoJob saves and validates the raw upload inline, records a
+// video_transcode_jobs row in the "processing" state, and kicks off transcoding
+// in a background goroutine. It returns the job ID immediately; the caller polls
+// VideoJobStatus for completion. (AGORA-137)
+func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, err error) {
 	// 32MB in memory; larger uploads are spooled to disk by the multipart parser
 	r.ParseMultipartForm(32 << 20)
 	file, _, ferr := r.FormFile("file")
 	if ferr != nil {
-		return "", "", fmt.Errorf("no file attached")
+		return "", fmt.Errorf("no file attached")
 	}
 	defer file.Close()
 
-	// Stream directly to a temp file — avoids loading the raw upload into RAM
-	in, terr := os.CreateTemp("", "video-in-*")
+	// Stream directly to a temp file — avoids loading the raw upload into RAM.
+	// This file outlives the request (the background goroutine reads it), so it
+	// is removed by runTranscode rather than deferred here.
+	in, terr := os.CreateTemp("", "video-raw-*")
 	if terr != nil {
-		return "", "", fmt.Errorf("internal error")
+		return "", fmt.Errorf("internal error")
 	}
-	defer os.Remove(in.Name())
+	rawPath := in.Name()
 
 	n, copyErr := io.Copy(in, io.LimitReader(file, maxVideoUploadBytes+1))
 	in.Close()
 	if copyErr != nil {
-		return "", "", fmt.Errorf("could not read file")
+		os.Remove(rawPath)
+		return "", fmt.Errorf("could not read file")
 	}
 	if n > maxVideoUploadBytes {
-		return "", "", fmt.Errorf("video is too large (max 2 GB)")
+		os.Remove(rawPath)
+		return "", fmt.Errorf("video is too large (max 2 GB)")
 	}
 
-	// Pre-flight: check duration with ffprobe
-	dur, derr := videoDuration(in.Name())
+	// Pre-flight: check duration with ffprobe. This is cheap (metadata only) and
+	// lets us reject invalid or over-length videos with a clear error before we
+	// create a job or spend any transcode time.
+	dur, derr := videoDuration(rawPath)
 	if derr != nil {
-		return "", "", fmt.Errorf("could not read video — ensure it is a valid MP4, MOV, AVI, MKV, or WebM file")
+		os.Remove(rawPath)
+		return "", fmt.Errorf("could not read video — ensure it is a valid MP4, MOV, AVI, MKV, or WebM file")
 	}
 	if dur > float64(maxVideoDurationSec) {
-		return "", "", fmt.Errorf("video is too long (max 2 minutes — this video is %.0f seconds)", dur)
+		os.Remove(rawPath)
+		return "", fmt.Errorf("video is too long (max 2 minutes — this video is %.0f seconds)", dur)
 	}
 
 	id := uuid.New().String()
-	outPath := filepath.Join(s.uploadDir, "videos", id+".mp4")
-	thumbPath := filepath.Join(s.uploadDir, "videos", id+"_thumb.jpg")
+	if err := s.db.QueryRow(
+		`INSERT INTO video_transcode_jobs (id, user_id, status) VALUES ($1, $2, 'processing') RETURNING id`,
+		id, userID,
+	).Scan(&jobID); err != nil {
+		os.Remove(rawPath)
+		return "", fmt.Errorf("internal error")
+	}
+
+	go s.runTranscode(jobID, rawPath, id)
+	return jobID, nil
+}
+
+// runTranscode performs the actual ffmpeg work off the request path and records
+// the outcome on the job row. The output is written to a temp file and atomically
+// renamed into place only on success, so the served URL never points at a
+// partially-written (unplayable) file.
+func (s *Service) runTranscode(jobID, rawPath, id string) {
+	defer os.Remove(rawPath)
+
+	// Bound concurrency so we don't run more CPU-saturating ffmpeg jobs than the
+	// box can handle. The job stays "processing" while it waits for a slot.
+	transcodeSem <- struct{}{}
+	defer func() { <-transcodeSem }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), transcodeTimeout)
+	defer cancel()
+
+	videosDir := filepath.Join(s.uploadDir, "videos")
+	tmpOut := filepath.Join(videosDir, id+".tmp.mp4")
+	finalOut := filepath.Join(videosDir, id+".mp4")
+	thumbPath := filepath.Join(videosDir, id+"_thumb.jpg")
 
 	// Transcode to H.264 MP4 (720p max, CRF 26, faststart for web streaming).
-	// ultrafast preset + multiple threads keeps wall-clock time under Cloudflare's
-	// 100s origin timeout even for HEVC source files from iPhone cameras.
+	// -pix_fmt yuv420p forces 4:2:0 chroma: libx264 otherwise preserves the
+	// source pixel format, and browsers cannot decode 4:4:4/4:2:2 H.264, so a
+	// non-4:2:0 source would transcode "successfully" yet refuse to play.
 	ffmpegArgs := []string{
-		"-i", in.Name(),
+		"-i", rawPath,
 		"-vf", "scale=-2:min(720\\,ih)",
 		"-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+		"-pix_fmt", "yuv420p",
 		"-threads", "0",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
-		"-y", outPath,
+		"-y", tmpOut,
 	}
-	if out, cerr := exec.Command("ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {
-		return "", "", fmt.Errorf("video processing failed — %s", strings.TrimSpace(string(out)))
+	if out, cerr := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {
+		os.Remove(tmpOut)
+		log.Printf("media: transcode job %s failed: %v — %s", jobID, cerr, strings.TrimSpace(string(out)))
+		s.failJob(jobID, "video processing failed — the file may be corrupt or in an unsupported format")
+		return
 	}
 
-	// Generate poster thumbnail at 1 second
+	// Atomically move the completed file into the served location.
+	if err := os.Rename(tmpOut, finalOut); err != nil {
+		os.Remove(tmpOut)
+		log.Printf("media: transcode job %s could not finalize output: %v", jobID, err)
+		s.failJob(jobID, "video processing failed — could not save output")
+		return
+	}
+
+	// Generate poster thumbnail at 1 second — non-fatal; thumbnail is optional.
 	thumbArgs := []string{
-		"-i", in.Name(),
+		"-i", finalOut,
 		"-ss", "1", "-vframes", "1",
 		"-vf", "scale=-2:320",
 		"-y", thumbPath,
 	}
-	exec.Command("ffmpeg", thumbArgs...).Run() // non-fatal; thumbnail is optional
+	thumbURL := ""
+	if err := exec.CommandContext(ctx, "ffmpeg", thumbArgs...).Run(); err == nil {
+		thumbURL = fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id)
+	}
 
-	return fmt.Sprintf("/uploads/videos/%s.mp4", id),
-		fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id),
-		nil
+	videoURL := fmt.Sprintf("/uploads/videos/%s.mp4", id)
+	s.db.Exec(
+		`UPDATE video_transcode_jobs SET status='done', video_url=$2, video_thumb_url=$3, updated_at=NOW() WHERE id=$1`,
+		jobID, videoURL, thumbURL,
+	)
+}
+
+// failJob marks a transcode job as failed with a user-facing error message.
+func (s *Service) failJob(jobID, msg string) {
+	s.db.Exec(
+		`UPDATE video_transcode_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1`,
+		jobID, msg,
+	)
+}
+
+// VideoJobStatus returns the current state of a transcode job. It is scoped to
+// the requesting user so callers can only poll their own jobs.
+func (s *Service) VideoJobStatus(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	jobID := chi.URLParam(r, "id")
+
+	var status, videoURL, thumbURL, errMsg string
+	err := s.db.QueryRow(
+		`SELECT status, video_url, video_thumb_url, error FROM video_transcode_jobs WHERE id=$1 AND user_id=$2`,
+		jobID, userID,
+	).Scan(&status, &videoURL, &thumbURL, &errMsg)
+	if err != nil {
+		writeError(w, 404, "job not found")
+		return
+	}
+
+	writeJSON(w, 200, map[string]string{
+		"status":    status,
+		"url":       videoURL,
+		"thumb_url": thumbURL,
+		"error":     errMsg,
+	})
 }
 
 // videoDuration uses ffprobe to return the video duration in seconds.

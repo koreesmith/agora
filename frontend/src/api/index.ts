@@ -72,6 +72,8 @@ export const feedApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
+  // AGORA-137: poll async video transcode job status
+  getVideoJob:   (jobId: string) => api.get(`/media/jobs/${jobId}`),
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────

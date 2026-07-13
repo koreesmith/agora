@@ -607,4 +607,18 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_pae_page_time ON page_analytics_events(page_id, created_at DESC)`,
 	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS smart_ranking BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AGORA-137: async video transcoding jobs ───────────────────────────
+	`CREATE TABLE IF NOT EXISTS video_transcode_jobs (
+		id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		status          VARCHAR(20) NOT NULL DEFAULT 'processing'
+		                  CHECK (status IN ('processing','done','failed')),
+		video_url       TEXT        NOT NULL DEFAULT '',
+		video_thumb_url TEXT        NOT NULL DEFAULT '',
+		error           TEXT        NOT NULL DEFAULT '',
+		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_video_jobs_user ON video_transcode_jobs(user_id, created_at DESC)`,
 }

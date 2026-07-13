@@ -52,7 +52,7 @@ func main() {
 	// ── Services ──────────────────────────────────────────────────────────
 	emailSvc  := notifications.NewEmailService(db, cfg)
 	notifSvc  := notifications.NewService(db, emailSvc)
-	mediaSvc  := media.NewService(cfg.UploadDir)
+	mediaSvc  := media.NewService(db, cfg.UploadDir)
 	userSvc   := users.NewService(db, mediaSvc)
 	authSvc   := auth.NewService(db, cfg, notifSvc)
 	friendSvc := friends.NewService(db, notifSvc)

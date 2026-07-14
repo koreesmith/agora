@@ -5,6 +5,7 @@ events {
 http {
     limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
     limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
+    limit_req_zone $binary_remote_addr zone=federation:10m rate=60r/m;
 
     server {
         listen 80;
@@ -64,6 +65,7 @@ http {
         }
 
         location /.well-known/ {
+            limit_req zone=federation burst=20 nodelay;
             proxy_pass http://frontend:80/.well-known/;
             proxy_http_version 1.1;
             proxy_set_header Host      $host;
@@ -71,6 +73,7 @@ http {
         }
 
         location /federation/ {
+            limit_req zone=federation burst=20 nodelay;
             proxy_pass http://frontend:80/federation/;
             proxy_http_version 1.1;
             proxy_set_header Host      $host;

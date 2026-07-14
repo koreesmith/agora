@@ -468,6 +468,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
+	// AGORA-148: an admin-blocked instance can't Follow, but until now could
+	// still reply into threads — apply the same block-list check Follow uses.
+	var status string
+	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
+	if status == "blocked" {
+		return
+	}
+
 	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(note.InReplyTo)
 	if !ok {
 		return

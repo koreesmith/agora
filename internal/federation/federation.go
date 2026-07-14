@@ -746,8 +746,14 @@ func (s *Service) getOrCreateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, e
 // ── Background sync ───────────────────────────────────────────────────────────
 
 func (s *Service) StartBackgroundSync(ctx context.Context) {
-	if !s.federationEnabled() { return }
-
+	// Deliberately does NOT gate the whole loop on federationEnabled() at
+	// startup — that was a bug: federation_enabled is an admin-toggleable
+	// runtime setting, but a one-time check here meant that if it happened to
+	// be off (or unset) at the exact moment the server process started, the
+	// delivery-queue drain loop would never run again for that process's
+	// lifetime, even after an admin turned federation back on — outbound
+	// activities would sit queued forever until the next restart. Instead the
+	// loop always runs, and each tick re-checks the current value.
 	queueTicker  := time.NewTicker(30 * time.Second)  // drain outbound queue
 	apQueueTicker := time.NewTicker(20 * time.Second) // drain standard-AP delivery queue
 	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
@@ -759,21 +765,31 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	defer profileTicker.Stop()
 
 	// Run immediately on start
-	go s.drainQueue()
-	go s.drainAPQueue()
+	if s.federationEnabled() {
+		go s.drainQueue()
+		go s.drainAPQueue()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-queueTicker.C:
-			go s.drainQueue()
+			if s.federationEnabled() {
+				go s.drainQueue()
+			}
 		case <-apQueueTicker.C:
-			go s.drainAPQueue()
+			if s.federationEnabled() {
+				go s.drainAPQueue()
+			}
 		case <-syncTicker.C:
-			go s.refreshInstances()
+			if s.federationEnabled() {
+				go s.refreshInstances()
+			}
 		case <-profileTicker.C:
-			go s.syncStaleRemoteUsers()
+			if s.federationEnabled() {
+				go s.syncStaleRemoteUsers()
+			}
 		}
 	}
 }

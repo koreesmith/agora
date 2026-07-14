@@ -42,7 +42,15 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
 	r.Get("/federation/users/{handle}/followers", s.Followers)
 	r.Get("/federation/search",          s.Search)
-	r.Get("/federation/lookup",          s.LookupUser) // resolve user@instance.com
+}
+
+// RegisterAuthedRoutes registers federation routes that require a valid Agora
+// session. LookupUser (AGORA-139) is only ever called by Agora's own
+// authenticated frontend (SearchPage) — requiring auth removes it as an
+// anonymous-callable surface, on top of the SSRF protection fedHTTPClient's
+// dialer already provides on the outbound fetch it triggers.
+func RegisterAuthedRoutes(r chi.Router, s *Service) {
+	r.Get("/federation/lookup", s.LookupUser) // resolve user@instance.com
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────

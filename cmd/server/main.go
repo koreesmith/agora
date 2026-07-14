@@ -178,6 +178,10 @@ func main() {
 
 	// Federation endpoints
 	federation.RegisterRoutes(r, fedSvc)
+	r.Group(func(r chi.Router) {
+		r.Use(authSvc.Middleware)
+		federation.RegisterAuthedRoutes(r, fedSvc)
+	})
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

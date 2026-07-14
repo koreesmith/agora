@@ -181,6 +181,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		WallApprovalRequired *bool   `json:"wall_approval_required"`
 		DmPrivacy            *string `json:"dm_privacy"`
 		ExpoPushToken        *string `json:"expo_push_token"`
+		ActivityPubEnabled   *bool   `json:"activitypub_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -223,6 +224,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ExpoPushToken != nil {
 		sets = append(sets, fmt.Sprintf("expo_push_token = $%d", i)); args = append(args, *req.ExpoPushToken); i++
+	}
+	if req.ActivityPubEnabled != nil {
+		sets = append(sets, fmt.Sprintf("activitypub_enabled = $%d", i)); args = append(args, *req.ActivityPubEnabled); i++
 	}
 
 	args = append(args, userID)

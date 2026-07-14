@@ -649,4 +649,8 @@ var schema = []string{
 		updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_video_jobs_user ON video_transcode_jobs(user_id, created_at DESC)`,
+
+	// AGORA-145: per-account opt-out of standard ActivityPub federation,
+	// separate from the instance-wide federation_enabled toggle.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
 }

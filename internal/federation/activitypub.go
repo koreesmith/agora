@@ -36,8 +36,9 @@ type apUser struct {
 }
 
 // apEligibleUser returns the given local username if it's eligible to be
-// federated: exists, local, not private, not scheduled for deletion. Used by
-// every new AP endpoint so the eligibility rule stays in exactly one place.
+// federated: exists, local, not private, not scheduled for deletion, and
+// hasn't opted out via activitypub_enabled. Used by every new AP endpoint so
+// the eligibility rule stays in exactly one place.
 func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 	var u apUser
 	err := s.db.QueryRow(`
@@ -45,12 +46,23 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 		       federation_public_key, federation_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
-		  AND deletion_scheduled_at IS NULL
+		  AND activitypub_enabled = true AND deletion_scheduled_at IS NULL
 	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.PubKeyPEM, &u.PrivKeyPEM)
 	if err != nil {
 		return nil, false
 	}
 	return &u, true
+}
+
+// absoluteURL resolves a possibly-relative URL (e.g. an avatar path like
+// "/uploads/avatars/xyz.jpg", stored relative because the SPA resolves it
+// against its own origin) against the instance domain, so it's dereferenceable
+// by remote fediverse servers. Already-absolute URLs pass through unchanged.
+func (s *Service) absoluteURL(u string) string {
+	if u == "" || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return strings.TrimRight(s.cfg.InstanceDomain, "/") + "/" + strings.TrimLeft(u, "/")
 }
 
 func (s *Service) actorURL(username string) string {
@@ -195,7 +207,7 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 		},
 	}
 	if u.AvatarURL != "" {
-		obj["icon"] = map[string]string{"type": "Image", "url": u.AvatarURL}
+		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
 	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
@@ -472,14 +484,14 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content string
-	var profilePrivate bool
+	var profilePrivate, apEnabled bool
 	var createdAt time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, p.visibility, p.content, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &visibility, &content, &createdAt)
-	if err != nil || visibility != "public" || profilePrivate {
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &createdAt)
+	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		return
 	}
 
@@ -496,9 +508,9 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 	}
 
 	var username string
-	var profilePrivate bool
-	if err := s.db.QueryRow(`SELECT username, profile_private FROM users WHERE id = $1`, userID).
-		Scan(&username, &profilePrivate); err != nil || profilePrivate {
+	var profilePrivate, apEnabled bool
+	if err := s.db.QueryRow(`SELECT username, profile_private, activitypub_enabled FROM users WHERE id = $1`, userID).
+		Scan(&username, &profilePrivate, &apEnabled); err != nil || profilePrivate || !apEnabled {
 		return
 	}
 

@@ -18,16 +18,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
 
 type Service struct {
-	db  *store.DB
-	cfg *config.Config
+	db    *store.DB
+	cfg   *config.Config
+	notif *notifications.Service
 }
 
-func NewService(db *store.DB, cfg *config.Config, _, _ any) *Service {
-	return &Service{db: db, cfg: cfg}
+func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
+	return &Service{db: db, cfg: cfg, notif: notif}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {

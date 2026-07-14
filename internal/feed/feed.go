@@ -49,20 +49,16 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/groups/mention-search",              s.GroupMentionSearch) // AGORA-89
 	r.Get("/feed",                               s.GetFeed)
 	r.Post("/posts",                             s.CreatePost)
-	r.Get("/posts/{id}",                         s.GetPost)
 	r.Delete("/posts/{id}",                      s.DeletePost)
 	r.Patch("/posts/{id}",                       s.EditPost)
 	r.Post("/posts/{id}/like",                   s.LikePost)
 	r.Delete("/posts/{id}/like",                 s.UnlikePost)
 	r.Post("/posts/{id}/react",                  s.ReactPost)
 	r.Delete("/posts/{id}/react",                s.UnreactPost)
-	r.Get("/posts/{id}/reactions",               s.GetReactions)
 	r.Post("/posts/{id}/repost",                 s.Repost)
-	r.Get("/posts/{id}/comments",                s.GetComments)
-	r.Post("/posts/{id}/comments",               s.CreateComment)
+	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
-	r.Get("/users/{username}/posts",             s.GetUserPosts)
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
 	r.Post("/posts/{id}/poll/options",           s.PollAddOption)
@@ -71,6 +67,17 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/users/me/wall-queue",                s.GetWallQueue)
 	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
 	r.Post("/posts/{id}/wall-reject",            s.WallReject)
+}
+
+// RegisterPublicRoutes registers read-only routes reachable by guests
+// (no auth required, though a valid token — via OptionalMiddleware — still
+// personalizes results like/reaction state, blocks, etc).
+func RegisterPublicRoutes(r chi.Router, s *Service) {
+	r.Get("/feed/public",             s.PublicFeed)
+	r.Get("/posts/{id}",              s.GetPost)
+	r.Get("/posts/{id}/reactions",    s.GetReactions)
+	r.Get("/posts/{id}/comments",     s.GetComments)
+	r.Get("/users/{username}/posts",  s.GetUserPosts)
 }
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
@@ -463,6 +470,75 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
+// PublicFeed serves a chronological, instance-wide feed of public posts for
+// guests and members alike: authored by non-profile_private users, top-level
+// (no comments), and not scoped to a wall/group/page. Unlike GetFeed this is
+// not personalized to a friend graph.
+func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
+	viewerID := auth.UserIDFromCtx(r.Context())
+	limit, offset := pageParams(r)
+
+	// viewerID feeds a uuid column below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
+	blockClause := ""
+	if viewerID != "" {
+		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))`
+	}
+
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
+		       cg.name, cg.slug,
+		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
+		WHERE p.parent_id IS NULL
+		  AND p.deleted_at IS NULL
+		  AND p.visibility = 'public'
+		  AND NOT u.profile_private
+		  AND u.deletion_scheduled_at IS NULL
+		  AND p.wall_user_id IS NULL
+		  AND p.community_group_id IS NULL
+		  AND p.page_id IS NULL
+		  %s
+		ORDER BY p.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, blockClause), viewerParam, limit, offset)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	s.enrichReactions(posts, viewerID)
+	s.enrichPolls(posts, viewerID)
+	s.enrichPhotos(posts)
+
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
 // rankPosts scores and re-orders posts using the viewer's historical interaction
 // data with each post's author. Score = interaction_weight × recency_decay.
 // Weights: comment=5, like=3, repost=2, link_click=1, profile_view=0.5, post_view=0.1
@@ -612,6 +688,14 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		visFilter = `p.visibility = 'public'`
 	}
 
+	// viewerID is compared against uuid columns; an empty string (guest) is
+	// invalid input for the uuid type, so pass NULL instead — comparisons
+	// against NULL correctly evaluate to false/no-match.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
@@ -635,7 +719,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
 		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
-	`, viewerID, authorID, limit, offset)
+	`, viewerParam, authorID, limit, offset)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -860,6 +944,29 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Author's profile-private gate applies regardless of the individual
+	// post's own visibility, consistent with GetUserPosts's timeline gate.
+	if authorID != viewerID {
+		var authorProfilePrivate bool
+		s.db.QueryRow(`SELECT profile_private FROM users WHERE id = $1`, authorID).Scan(&authorProfilePrivate)
+		if authorProfilePrivate {
+			var isFriend bool
+			if viewerID != "" {
+				s.db.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM friendships
+						WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+						AND status = 'accepted'
+					)
+				`, viewerID, authorID).Scan(&isFriend)
+			}
+			if !isFriend {
+				writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private_profile"})
+				return
+			}
+		}
+	}
+
 	// Access control
 	if authorID != viewerID {
 		switch visibility {
@@ -907,6 +1014,13 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// viewerID feeds uuid columns below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
 	// Access granted — run the full query
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
@@ -932,7 +1046,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
-	`, id, viewerID)
+	`, id, viewerParam)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -1627,6 +1741,12 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
+	// viewerID feeds a uuid column below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
 
 	type Comment struct {
 		ID             string         `json:"id"`
@@ -1673,7 +1793,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	`
 
 	// Top-level comments
-	rows, err := s.db.Query(commentSQL, viewerID, postID)
+	rows, err := s.db.Query(commentSQL, viewerParam, postID)
 	if err != nil {
 		writeError(w, 500, "db error"); return
 	}
@@ -1691,12 +1811,12 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 
 	// Replies for each top-level comment, and depth-2 replies for each depth-1 reply
 	for i, c := range comments {
-		rrows, err := s.db.Query(commentSQL, viewerID, c.ID)
+		rrows, err := s.db.Query(commentSQL, viewerParam, c.ID)
 		if err != nil { continue }
 		for rrows.Next() {
 			reply := scanComment(rrows)
 			// Fetch depth-2 replies for this depth-1 reply
-			rrrows, err2 := s.db.Query(commentSQL, viewerID, reply.ID)
+			rrrows, err2 := s.db.Query(commentSQL, viewerParam, reply.ID)
 			if err2 == nil {
 				for rrrows.Next() {
 					reply.Replies = append(reply.Replies, scanComment(rrrows))

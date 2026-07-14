@@ -52,6 +52,9 @@ export default function LandingPage() {
             <span style={{ fontWeight: 700, fontSize: 18, color: '#102a43' }}>{name}</span>
           </div>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <Link to="/explore" style={{ fontSize: 14, fontWeight: 500, color: '#486581', textDecoration: 'none', padding: '6px 12px', borderRadius: 8 }}>
+              Explore
+            </Link>
             <Link to="/login" style={{ fontSize: 14, fontWeight: 500, color: '#486581', textDecoration: 'none', padding: '6px 12px', borderRadius: 8 }}>
               Sign in
             </Link>
@@ -89,6 +92,9 @@ export default function LandingPage() {
               )}
               <Link to="/login" style={{ border: '1px solid #d9e2ec', color: '#334e68', fontWeight: 600, padding: '12px 24px', borderRadius: 12, textDecoration: 'none', fontSize: 16 }}>
                 Sign in
+              </Link>
+              <Link to="/explore" style={{ border: '1px solid #d9e2ec', color: '#334e68', fontWeight: 600, padding: '12px 24px', borderRadius: 12, textDecoration: 'none', fontSize: 16 }}>
+                Browse public posts
               </Link>
             </div>
             {/* AGORA-120: iOS App Store link */}

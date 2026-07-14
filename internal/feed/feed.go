@@ -32,6 +32,9 @@ type fedSender interface {
 	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
 	BroadcastPublicPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
+	// DeliverReply drives outbound ActivityPub delivery for a comment that
+	// directly replies to a fediverse participant (AGORA-147).
+	DeliverReply(userID, commentID, replyToID string)
 }
 
 type Service struct {
@@ -1976,6 +1979,11 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(replyToAuthorID, userID, "comment_reply", postID, "")
 	}
 	go s.notifyMentions(req.Content, userID, postID)
+
+	// AGORA-147: deliver to the fediverse if replying directly to a remote participant
+	if req.ReplyToID != "" && s.fed != nil {
+		go s.fed.DeliverReply(userID, id, req.ReplyToID)
+	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
 }

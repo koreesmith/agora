@@ -11,6 +11,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -249,7 +250,7 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&id, &content, &createdAt); err != nil {
 			continue
 		}
-		items = append(items, s.buildCreateActivity(actor, id, content, createdAt))
+		items = append(items, s.buildCreateActivity(actor, id, content, createdAt, ""))
 	}
 	if items == nil {
 		items = []map[string]any{}
@@ -265,19 +266,25 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// buildCreateActivity builds a Create activity wrapping a Note, used by both
-// the Outbox (historical posts) and BroadcastPublicPost (new posts).
-func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time) map[string]any {
+// buildCreateActivity builds a Create activity wrapping a Note, used by the
+// Outbox (historical posts), BroadcastPublicPost (new top-level posts), and
+// DeliverReply (comment replies — inReplyTo set, to targeted at the
+// recipient instead of just Public).
+func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time, inReplyTo string) map[string]any {
 	objID := actor + "/posts/" + postID
 	published := createdAt.UTC().Format(time.RFC3339)
+	to := []string{"https://www.w3.org/ns/activitystreams#Public"}
 	note := map[string]any{
 		"id":           objID,
 		"type":         "Note",
 		"attributedTo": actor,
 		"content":      plainTextToHTML(content),
 		"published":    published,
-		"to":           []string{"https://www.w3.org/ns/activitystreams#Public"},
+		"to":           to,
 		"cc":           []string{actor + "/followers"},
+	}
+	if inReplyTo != "" {
+		note["inReplyTo"] = inReplyTo
 	}
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
@@ -285,7 +292,7 @@ func (s *Service) buildCreateActivity(actor, postID, content string, createdAt t
 		"type":      "Create",
 		"actor":     actor,
 		"published": published,
-		"to":        []string{"https://www.w3.org/ns/activitystreams#Public"},
+		"to":        to,
 		"cc":        []string{actor + "/followers"},
 		"object":    note,
 	}
@@ -328,16 +335,20 @@ func (s *Service) Followers(w http.ResponseWriter, r *http.Request) {
 // legacy custom-protocol shape. It verifies the HTTP Signature (not the old
 // embedded-JSON-field Ed25519 scheme) before doing anything else.
 func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, body []byte) {
-	if err := verifyInboundSignature(r, body); err != nil {
+	verifiedActor, err := verifyInboundSignature(r, body)
+	if err != nil {
 		log.Printf("federation: ap signature verification failed: %v", err)
 		writeError(w, 401, "invalid signature")
 		return
 	}
 
+	// verifiedActor (derived from the signature's keyId, above) is the
+	// trustworthy signer identity — the body's own "actor"/"attributedTo"
+	// fields are not cryptographically tied to the signature and are only
+	// used below where they don't need to be trusted on their own.
 	var a struct {
 		ID     string          `json:"id"`
 		Type   string          `json:"type"`
-		Actor  string          `json:"actor"`
 		Object json.RawMessage `json:"object"`
 	}
 	if err := json.Unmarshal(body, &a); err != nil {
@@ -347,7 +358,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 
 	switch a.Type {
 	case "Follow":
-		s.handleInboundFollow(a.ID, a.Actor, a.Object)
+		s.handleInboundFollow(a.ID, verifiedActor, a.Object)
 	case "Undo":
 		var inner struct {
 			Type   string          `json:"type"`
@@ -355,8 +366,10 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		}
 		json.Unmarshal(a.Object, &inner)
 		if inner.Type == "Follow" {
-			s.handleInboundUndoFollow(a.Actor, inner.Object)
+			s.handleInboundUndoFollow(verifiedActor, inner.Object)
 		}
+	case "Create":
+		s.handleInboundCreate(verifiedActor, a.Object)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -383,10 +396,11 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 		return
 	}
 
-	followerInbox, err := fetchActorInbox(followerActor)
-	if err != nil || followerInbox == "" {
+	profile, err := fetchActorProfile(followerActor)
+	if err != nil || profile.Inbox == "" {
 		return
 	}
+	followerInbox := profile.Inbox
 
 	s.db.Exec(`
 		INSERT INTO ap_followers (followed_user_id, follower_actor_url, follower_inbox_url)
@@ -429,6 +443,184 @@ func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.R
 	s.db.Exec(`DELETE FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2`, userID, followerActor)
 }
 
+// ── Inbound Create (replies into threads we own) ──────────────────────────────
+
+// handleInboundCreate ingests a reply from the fediverse into an existing
+// Agora-owned thread. Top-level remote posts (no inReplyTo, or inReplyTo not
+// resolving to something we own) are not ingested — that's AGORA-146's scope,
+// a general fediverse timeline, not this ticket's reply-threading.
+func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
+	var note struct {
+		ID           string `json:"id"`
+		AttributedTo string `json:"attributedTo"`
+		Content      string `json:"content"`
+		InReplyTo    string `json:"inReplyTo"`
+	}
+	if err := json.Unmarshal(objectRaw, &note); err != nil {
+		return
+	}
+	// attributedTo must match the cryptographically verified signer — an
+	// activity envelope signed by A cannot claim to contain a Note by B.
+	if note.AttributedTo == "" || note.AttributedTo != verifiedActor {
+		return
+	}
+	if note.ID == "" || note.InReplyTo == "" {
+		return
+	}
+
+	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(note.InReplyTo)
+	if !ok {
+		return
+	}
+
+	// Re-check the thread is still eligible now, not just when it was created —
+	// mirrors the same defense-in-depth re-check BroadcastPublicPost does.
+	var profilePrivate, apEnabled bool
+	if err := s.db.QueryRow(`SELECT profile_private, activitypub_enabled FROM users WHERE id = $1`, postAuthorID).
+		Scan(&profilePrivate, &apEnabled); err != nil || profilePrivate || !apEnabled || visibility != "public" {
+		return
+	}
+
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+
+	domain := domainFromURL(note.ID)
+	var commentID string
+	err = s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance)
+		VALUES ($1, $2, $3, $4, true, $5, $6)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain).Scan(&commentID)
+	if err != nil {
+		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
+		// when the row already existed — expected on redelivery, not an error.
+		return
+	}
+
+	if s.notif != nil {
+		if postAuthorID != remoteUserID {
+			s.notif.Create(postAuthorID, remoteUserID, "post_comment", rootPostID, "")
+		}
+	}
+}
+
+// resolveReplyTarget resolves an inReplyTo URL to a local insertion point,
+// applying the same two-level depth cap CreateComment enforces (feed.go)
+// so inbound replies can't create threads deeper than the UI supports.
+// inReplyTo may point at either one of our own post/comment AP object URLs,
+// or a previously-ingested remote reply (looked up by remote_post_id).
+func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, visibility, postAuthorID string, ok bool) {
+	targetID := localPostIDFromURL(inReplyTo, s.cfg.InstanceDomain)
+	if targetID == "" {
+		s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND is_remote = true`, inReplyTo).Scan(&targetID)
+	}
+	if targetID == "" {
+		return "", "", "", "", false
+	}
+
+	var targetParentID *string
+	if err := s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, targetID).
+		Scan(&targetParentID); err != nil {
+		return "", "", "", "", false
+	}
+
+	if targetParentID == nil {
+		// Target is a top-level post — the reply becomes a depth-0 comment.
+		rootPostID = targetID
+	} else {
+		// Target is itself a comment — walk up one more level. If ITS parent
+		// also has a parent, target is already as deep as the UI allows.
+		var grandParentID *string
+		s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, *targetParentID).Scan(&grandParentID)
+		if grandParentID != nil {
+			return "", "", "", "", false
+		}
+		rootPostID = *targetParentID
+	}
+	parentID = targetID
+
+	if err := s.db.QueryRow(`SELECT visibility, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, rootPostID).
+		Scan(&visibility, &postAuthorID); err != nil || postAuthorID == "" {
+		return "", "", "", "", false
+	}
+	return parentID, rootPostID, visibility, postAuthorID, true
+}
+
+// localPostIDFromURL extracts the trailing post/comment UUID from one of our
+// own AP object URLs (.../federation/users/{username}/posts/{id}[/activity]),
+// returning "" for anything that isn't ours.
+func localPostIDFromURL(u, instanceDomain string) string {
+	base := strings.TrimRight(instanceDomain, "/") + "/federation/users/"
+	if !strings.HasPrefix(u, base) {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(u, base), "/")
+	if len(parts) < 3 || parts[1] != "posts" {
+		return ""
+	}
+	return strings.SplitN(parts[2], "#", 2)[0]
+}
+
+// getOrCreateRemoteAPUser returns the local stub user id for a remote AP
+// actor, fetching and caching their profile on first sight. Distinct from
+// getOrCreateRemoteUser (federation.go), which is the old custom protocol's
+// stub creation via its own non-standard profile endpoint.
+func (s *Service) getOrCreateRemoteAPUser(actorURL string) (string, error) {
+	var id string
+	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
+	if id != "" {
+		return id, nil
+	}
+
+	profile, err := fetchActorProfile(actorURL)
+	if err != nil {
+		return "", err
+	}
+	domain := domainFromURL(actorURL)
+	handle := profile.PreferredUsername
+	if handle == "" {
+		handle = "user"
+	}
+	displayName := profile.Name
+	if displayName == "" {
+		displayName = handle + "@" + domain
+	}
+	syntheticUsername := handle + "@" + domain
+
+	err = s.db.QueryRow(`
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
+		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
+		                   ap_actor_url, ap_inbox_url)
+		VALUES ($1, $1, '', $2, $3, $4, true, true, $5, $6, NOW(), $7, $8)
+		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
+		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8
+		RETURNING id
+	`, syntheticUsername, displayName, profile.IconURL, profile.Summary,
+		handle, domain, actorURL, profile.Inbox,
+	).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// htmlToPlainText converts the (sanitized) HTML content fediverse software
+// sends in a Note's "content" field into plain text, consistent with how
+// Agora's own renderContent expects plain text and does its own @mention/URL
+// linkification. Good enough for the small tag set Mastodon etc. emit
+// (p, br, a, span, strong, em, ...); not a general HTML sanitizer.
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+var htmlBlockBreakRe = regexp.MustCompile(`(?i)<(br|/p|/li)\s*/?>`)
+
+func htmlToPlainText(s string) string {
+	s = htmlBlockBreakRe.ReplaceAllString(s, "\n")
+	s = htmlTagRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(html.UnescapeString(s))
+}
+
 // usernameFromActorURL extracts the username from one of our own actor URLs
 // (.../federation/users/{username}), rejecting anything that isn't ours.
 func usernameFromActorURL(u, instanceDomain string) string {
@@ -442,35 +634,58 @@ func usernameFromActorURL(u, instanceDomain string) string {
 	return rest
 }
 
-// fetchActorInbox dereferences a remote actor URL (via the SSRF-safe
-// fedHTTPClient) to find their inbox.
-func fetchActorInbox(actorURL string) (string, error) {
+// remoteActorProfile is what we need from a remote actor document, whether
+// we're just resolving their inbox (Follow accept) or creating a full
+// remote-user stub for them (inbound replies).
+type remoteActorProfile struct {
+	Inbox             string
+	PreferredUsername string
+	Name              string
+	Summary           string
+	IconURL           string
+}
+
+// fetchActorProfile dereferences a remote actor URL (via the SSRF-safe
+// fedHTTPClient) and returns the fields we care about.
+func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
 	if !strings.HasPrefix(actorURL, "https://") {
-		return "", fmt.Errorf("actor url must be https")
+		return nil, fmt.Errorf("actor url must be https")
 	}
 	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/activity+json")
 	resp, err := fedHTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("actor fetch returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("actor fetch returned %d", resp.StatusCode)
 	}
 	var actor struct {
-		Inbox string `json:"inbox"`
+		Inbox             string `json:"inbox"`
+		PreferredUsername string `json:"preferredUsername"`
+		Name              string `json:"name"`
+		Summary           string `json:"summary"`
+		Icon              struct {
+			URL string `json:"url"`
+		} `json:"icon"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
-		return "", err
+		return nil, err
 	}
 	if actor.Inbox == "" {
-		return "", fmt.Errorf("actor has no inbox")
+		return nil, fmt.Errorf("actor has no inbox")
 	}
-	return actor.Inbox, nil
+	return &remoteActorProfile{
+		Inbox:             actor.Inbox,
+		PreferredUsername: actor.PreferredUsername,
+		Name:              actor.Name,
+		Summary:           actor.Summary,
+		IconURL:           actor.Icon.URL,
+	}, nil
 }
 
 // ── Outbound: broadcast public posts to followers ─────────────────────────────
@@ -495,7 +710,7 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 		return
 	}
 
-	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt)
+	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "")
 	s.deliverToFollowers(userID, activity)
 }
 
@@ -528,6 +743,49 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 		"to": []string{"https://www.w3.org/ns/activitystreams#Public"},
 	}
 	s.deliverToFollowers(userID, activity)
+}
+
+// DeliverReply delivers a new comment to the fediverse when it's a direct
+// reply to a remote AP participant (someone whose reply we previously
+// ingested via handleInboundCreate) — the minimum viable half of "at least
+// the actor being replied to" from AGORA-147's AC. A plain comment on a local
+// thread, or a reply to another local user, is a no-op here.
+func (s *Service) DeliverReply(userID, commentID, replyToID string) {
+	if !s.federationEnabled() {
+		return
+	}
+
+	var targetIsRemote bool
+	var targetActorURL, targetInboxURL, targetRemotePostID string
+	err := s.db.QueryRow(`
+		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1
+	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
+	if err != nil || !targetIsRemote || targetActorURL == "" || targetInboxURL == "" || targetRemotePostID == "" {
+		return
+	}
+
+	var username, content string
+	var apEnabled bool
+	var createdAt time.Time
+	if err := s.db.QueryRow(`
+		SELECT u.username, u.activitypub_enabled, p.content, p.created_at
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.author_id = $2
+	`, commentID, userID).Scan(&username, &apEnabled, &content, &createdAt); err != nil || !apEnabled {
+		return
+	}
+
+	actor := s.actorURL(username)
+	activity := s.buildCreateActivity(actor, commentID, content, createdAt, targetRemotePostID)
+	// Address the reply at the recipient directly rather than only Public/followers.
+	if note, ok := activity["object"].(map[string]any); ok {
+		note["to"] = []string{targetActorURL}
+	}
+	activity["to"] = []string{targetActorURL}
+
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
 }
 
 func (s *Service) deliverToFollowers(userID string, activity map[string]any) {

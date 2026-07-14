@@ -151,11 +151,19 @@ export default function AdminPage() {
           <div><label className="label">Deletion grace period (days)</label>
             <input type="number" className="input" autoComplete="off" value={settingsForm.deletion_grace_days||'30'} onChange={sf('deletion_grace_days')} /></div>
           <div className="flex items-center justify-between py-2">
-            <div><p className="font-medium text-sm">Enable federation</p>
+            <div><p className="font-medium text-sm">Enable federation (Agora instances)</p>
               <p className="text-xs text-agora-400">Allow connecting with other Agora instances</p></div>
             <button onClick={()=>setSettingsForm(f=>({...f,federation_enabled:f.federation_enabled==='true'?'false':'true'}))}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors ${settingsForm.federation_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.federation_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+              <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation above; users can also opt out individually in their own Settings.</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
             </button>
           </div>
           <div className="flex items-center justify-between py-2">

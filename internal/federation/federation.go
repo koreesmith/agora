@@ -111,7 +111,11 @@ type Activity struct {
 }
 
 func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
-	if !s.federationEnabled() {
+	// AGORA-156: the two protocols sharing this endpoint are gated
+	// independently — federation_enabled for the old custom Agora-to-Agora
+	// activities, activitypub_enabled for standard ActivityPub — so read the
+	// body and figure out which one this is before gating on either.
+	if !s.federationEnabled() && !s.activityPubEnabled() {
 		writeError(w, 404, "federation not enabled")
 		return
 	}
@@ -133,7 +137,16 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &probe)
 	if len(probe.Context) > 0 || probe.Type == "Follow" || probe.Type == "Undo" {
+		if !s.activityPubEnabled() {
+			writeError(w, 404, "federation not enabled")
+			return
+		}
 		s.handleStandardInbox(w, r, body)
+		return
+	}
+
+	if !s.federationEnabled() {
+		writeError(w, 404, "federation not enabled")
 		return
 	}
 
@@ -764,9 +777,13 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	defer syncTicker.Stop()
 	defer profileTicker.Stop()
 
-	// Run immediately on start
+	// Run immediately on start. drainAPQueue (standard ActivityPub) is gated
+	// by activityPubEnabled (AGORA-156); everything else is the old custom
+	// protocol and stays on federationEnabled.
 	if s.federationEnabled() {
 		go s.drainQueue()
+	}
+	if s.activityPubEnabled() {
 		go s.drainAPQueue()
 	}
 
@@ -779,7 +796,7 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 				go s.drainQueue()
 			}
 		case <-apQueueTicker.C:
-			if s.federationEnabled() {
+			if s.activityPubEnabled() {
 				go s.drainAPQueue()
 			}
 		case <-syncTicker.C:
@@ -819,6 +836,18 @@ func (s *Service) federationEnabled() bool {
 	var val string
 	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'federation_enabled'`).Scan(&val)
 	return val == "true"
+}
+
+// activityPubEnabled is the instance-wide toggle for standard ActivityPub
+// (AGORA-156) — distinct from federationEnabled, which gates the older
+// custom Agora-to-Agora protocol. Defaults to on (unset != "false") so
+// existing instances that already have federation configured don't lose
+// fediverse discoverability the moment this ships; an admin can turn it off
+// explicitly in Admin > Settings.
+func (s *Service) activityPubEnabled() bool {
+	var val string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'activitypub_enabled'`).Scan(&val)
+	return val != "false"
 }
 
 func domainFromURL(u string) string {

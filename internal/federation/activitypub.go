@@ -38,9 +38,16 @@ type apUser struct {
 
 // apEligibleUser returns the given local username if it's eligible to be
 // federated: exists, local, not private, not scheduled for deletion, and
-// hasn't opted out via activitypub_enabled. Used by every new AP endpoint so
-// the eligibility rule stays in exactly one place.
+// hasn't opted out via the per-account activitypub_enabled column. Also
+// checks the instance-wide activityPubEnabled() setting (AGORA-156) — not
+// the same thing despite the similar name: that one is an admin-controlled
+// instance_settings key, this column is a per-user opt-out. Used by every AP
+// endpoint (WebFinger, actor doc, Outbox, Followers, inbound Follow) so both
+// eligibility rules stay in exactly one place.
 func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
+	if !s.activityPubEnabled() {
+		return nil, false
+	}
 	var u apUser
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, bio, avatar_url,
@@ -159,6 +166,10 @@ func (s *Service) WebFinger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) HostMeta(w http.ResponseWriter, r *http.Request) {
+	if !s.activityPubEnabled() {
+		writeError(w, 404, "not found")
+		return
+	}
 	domain := strings.TrimRight(s.cfg.InstanceDomain, "/")
 	w.Header().Set("Content-Type", "application/xrd+xml; charset=utf-8")
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
@@ -775,10 +786,21 @@ func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMess
 		return
 	}
 
-	res, err := s.db.Exec(`INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, remoteUserID, postID)
+	// AGORA-157: write to reactions (reaction_type='like'), not the legacy
+	// likes table — the UI's like button (ReactPost) writes there, and
+	// enrichReactions (feed.go) only falls back to likes for a post that has
+	// zero reactions rows at all, so a Like landing in likes is invisible to
+	// the reaction count/list for virtually every real post. Mirrors
+	// ReactPost's own upsert + legacy-row cleanup exactly.
+	res, err := s.db.Exec(`
+		INSERT INTO reactions (user_id, post_id, reaction_type)
+		VALUES ($1, $2, 'like')
+		ON CONFLICT (user_id, post_id) DO NOTHING
+	`, remoteUserID, postID)
 	if err != nil {
 		return
 	}
+	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
 	if n, _ := res.RowsAffected(); n == 0 {
 		return // already liked — redelivery, don't re-notify
 	}
@@ -808,6 +830,9 @@ func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.Raw
 	if remoteUserID == "" {
 		return
 	}
+	// Only remove the reaction if it's still the 'like' we created — a remote
+	// actor's Undo(Like) shouldn't be able to clear a since-changed reaction.
+	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2 AND reaction_type = 'like'`, remoteUserID, postID)
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
 }
 
@@ -934,7 +959,7 @@ func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
 // eligibility itself (defense in depth — never trusts the caller) and enqueues
 // a signed Create activity for each of the author's ActivityPub followers.
 func (s *Service) BroadcastPublicPost(userID, postID string) {
-	if !s.federationEnabled() {
+	if !s.activityPubEnabled() {
 		return
 	}
 
@@ -958,7 +983,7 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 // federated post is edited (AGORA-150), re-deriving current state the same
 // defense-in-depth way BroadcastPublicPost does rather than trusting the caller.
 func (s *Service) BroadcastUpdatePost(userID, postID string) {
-	if !s.federationEnabled() {
+	if !s.activityPubEnabled() {
 		return
 	}
 
@@ -982,7 +1007,7 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 // Followers who never received the original Create simply ignore an unknown
 // object id, so this doesn't need to re-derive the post's past visibility.
 func (s *Service) BroadcastDeletePost(userID, postID string) {
-	if !s.federationEnabled() {
+	if !s.activityPubEnabled() {
 		return
 	}
 
@@ -1015,7 +1040,7 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 // the actor being replied to" from AGORA-147's AC. A plain comment on a local
 // thread, or a reply to another local user, is a no-op here.
 func (s *Service) DeliverReply(userID, commentID, replyToID string) {
-	if !s.federationEnabled() {
+	if !s.activityPubEnabled() {
 		return
 	}
 

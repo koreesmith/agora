@@ -32,6 +32,9 @@ type fedSender interface {
 	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
 	BroadcastPublicPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
+	// BroadcastUpdatePost delivers a signed Update when a federated post is
+	// edited (AGORA-150).
+	BroadcastUpdatePost(userID, postID string)
 	// DeliverReply drives outbound ActivityPub delivery for a comment that
 	// directly replies to a fediverse participant (AGORA-147).
 	DeliverReply(userID, commentID, replyToID string)
@@ -1995,7 +1998,15 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	commentID := chi.URLParam(r, "commentID")
 
 	var commentAuthor, parentAuthor string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`, commentID, postID).Scan(&commentAuthor)
+	// Match direct children of the post (depth-0 comments) or children of
+	// those (depth-1 replies-to-a-reply) — the full 2-level depth Agora
+	// supports. Previously only depth-0 matched, so a reply-to-a-reply could
+	// never be deleted through this endpoint at all.
+	s.db.QueryRow(`
+		SELECT author_id FROM posts
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND (parent_id = $2 OR parent_id IN (SELECT id FROM posts WHERE parent_id = $2))
+	`, commentID, postID).Scan(&commentAuthor)
 	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&parentAuthor)
 
 	if commentAuthor == "" {
@@ -2008,6 +2019,12 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, commentID)
+
+	// AGORA-151: notify fediverse participants a federated reply was removed
+	if s.fed != nil {
+		go s.fed.BroadcastDeletePost(commentAuthor, commentID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -2108,6 +2125,11 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AGORA-150: notify fediverse followers a federated post was edited
+	if s.fed != nil {
+		go s.fed.BroadcastUpdatePost(userID, id)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "updated"})
 }
 
@@ -2117,8 +2139,13 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	commentID := chi.URLParam(r, "commentID")
 
 	var authorID string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`,
-		commentID, postID).Scan(&authorID)
+	// Same fix as DeleteComment: match depth-0 comments or depth-1 replies-to-
+	// a-reply, not just direct children of the post.
+	s.db.QueryRow(`
+		SELECT author_id FROM posts
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND (parent_id = $2 OR parent_id IN (SELECT id FROM posts WHERE parent_id = $2))
+	`, commentID, postID).Scan(&authorID)
 	if authorID == "" {
 		writeError(w, 404, "comment not found"); return
 	}

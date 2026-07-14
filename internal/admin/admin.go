@@ -82,6 +82,18 @@ func RegisterRoutes(r chi.Router, s *Service) {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
+// adminEditableSettings is an explicit allowlist of instance_settings keys
+// the admin panel can read and write (AGORA-143). Anything not listed here —
+// notably federation_public_key/federation_private_key, the instance-wide
+// signing keypair — is never serialized, regardless of what's in the table.
+// Shared by GetSettings and UpdateSettings so the two can't drift apart.
+var adminEditableSettings = map[string]bool{
+	"instance_name": true, "instance_description": true, "registration_mode": true,
+	"federation_enabled": true, "deletion_grace_days": true, "logo_url": true,
+	"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
+	"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
+}
+
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`SELECT key, value FROM instance_settings ORDER BY key`)
 	if err != nil {
@@ -94,6 +106,9 @@ func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var k, v string
 		rows.Scan(&k, &v)
+		if !adminEditableSettings[k] {
+			continue
+		}
 		// Redact SMTP password in response
 		if k == "smtp_password" && v != "" {
 			v = "••••••••"
@@ -111,15 +126,8 @@ func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := map[string]bool{
-		"instance_name": true, "instance_description": true, "registration_mode": true,
-		"federation_enabled": true, "deletion_grace_days": true, "logo_url": true,
-		"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
-		"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
-	}
-
 	for k, v := range updates {
-		if !allowed[k] {
+		if !adminEditableSettings[k] {
 			continue
 		}
 		// Don't overwrite password if placeholder sent

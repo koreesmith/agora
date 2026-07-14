@@ -230,7 +230,7 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 	// paginated OrderedCollection — enough for AP crawlers/Mastodon's
 	// initial fetch when someone follows this actor.
 	rows, err := s.db.Query(`
-		SELECT id, content, created_at
+		SELECT id, content, content_warning, created_at
 		FROM posts
 		WHERE author_id = $1 AND visibility = 'public' AND parent_id IS NULL
 		  AND deleted_at IS NULL AND is_remote = false
@@ -245,12 +245,12 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 
 	var items []map[string]any
 	for rows.Next() {
-		var id, content string
+		var id, content, contentWarning string
 		var createdAt time.Time
-		if err := rows.Scan(&id, &content, &createdAt); err != nil {
+		if err := rows.Scan(&id, &content, &contentWarning, &createdAt); err != nil {
 			continue
 		}
-		items = append(items, s.buildCreateActivity(actor, id, content, createdAt, ""))
+		items = append(items, s.buildCreateActivity(actor, id, content, createdAt, "", contentWarning))
 	}
 	if items == nil {
 		items = []map[string]any{}
@@ -270,30 +270,67 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 // Outbox (historical posts), BroadcastPublicPost (new top-level posts), and
 // DeliverReply (comment replies — inReplyTo set, to targeted at the
 // recipient instead of just Public).
-func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time, inReplyTo string) map[string]any {
+// buildNoteObject builds the ActivityPub Note object for a post or comment,
+// shared by Create (new post, AGORA-145) and Update (edited post, AGORA-150)
+// activities. A non-empty contentWarning maps to Note.summary — the standard
+// ActivityPub content-warning mechanism (AGORA-154): Mastodon and other
+// fediverse clients show content behind a reveal prompt when it's set.
+func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
 	objID := actor + "/posts/" + postID
 	published := createdAt.UTC().Format(time.RFC3339)
-	to := []string{"https://www.w3.org/ns/activitystreams#Public"}
 	note := map[string]any{
 		"id":           objID,
 		"type":         "Note",
 		"attributedTo": actor,
 		"content":      plainTextToHTML(content),
 		"published":    published,
-		"to":           to,
+		"to":           []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"cc":           []string{actor + "/followers"},
 	}
 	if inReplyTo != "" {
 		note["inReplyTo"] = inReplyTo
 	}
+	if contentWarning != "" {
+		note["summary"] = contentWarning
+	}
+	return note
+}
+
+// buildCreateActivity wraps a Note in a Create activity, used by the Outbox
+// (historical posts), BroadcastPublicPost (new top-level posts), and
+// DeliverReply (comment replies).
+func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
+	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	objID := actor + "/posts/" + postID
+	to := note["to"]
+	cc := note["cc"]
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
 		"id":        objID + "/activity",
 		"type":      "Create",
 		"actor":     actor,
-		"published": published,
+		"published": note["published"],
 		"to":        to,
-		"cc":        []string{actor + "/followers"},
+		"cc":        cc,
+		"object":    note,
+	}
+}
+
+// buildUpdateActivity wraps the same Note shape in an Update activity, sent
+// when a previously-federated post is edited (AGORA-150).
+func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
+	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	objID := actor + "/posts/" + postID
+	to := note["to"]
+	cc := note["cc"]
+	return map[string]any{
+		"@context":  "https://www.w3.org/ns/activitystreams",
+		"id":        fmt.Sprintf("%s/updates/%d", objID, time.Now().UnixNano()),
+		"type":      "Update",
+		"actor":     actor,
+		"published": time.Now().UTC().Format(time.RFC3339),
+		"to":        to,
+		"cc":        cc,
 		"object":    note,
 	}
 }
@@ -455,6 +492,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		AttributedTo string `json:"attributedTo"`
 		Content      string `json:"content"`
 		InReplyTo    string `json:"inReplyTo"`
+		Summary      string `json:"summary"` // AGORA-154: content-warning text, if any
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -497,11 +535,11 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	domain := domainFromURL(note.ID)
 	var commentID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance)
-		VALUES ($1, $2, $3, $4, true, $5, $6)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
+		VALUES ($1, $2, $3, $4, true, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain).Scan(&commentID)
+	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain, htmlToPlainText(note.Summary)).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -706,19 +744,43 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 		return
 	}
 
-	var username, visibility, content string
+	var username, visibility, content, contentWarning string
 	var profilePrivate, apEnabled bool
 	var createdAt time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &createdAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		return
 	}
 
-	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "")
+	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	s.deliverToFollowers(userID, activity)
+}
+
+// BroadcastUpdatePost delivers a signed Update activity when a previously-
+// federated post is edited (AGORA-150), re-deriving current state the same
+// defense-in-depth way BroadcastPublicPost does rather than trusting the caller.
+func (s *Service) BroadcastUpdatePost(userID, postID string) {
+	if !s.federationEnabled() {
+		return
+	}
+
+	var username, visibility, content, contentWarning string
+	var profilePrivate, apEnabled bool
+	var createdAt time.Time
+	err := s.db.QueryRow(`
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
+	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+		return
+	}
+
+	activity := s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
 	s.deliverToFollowers(userID, activity)
 }
 
@@ -774,19 +836,19 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		return
 	}
 
-	var username, content string
+	var username, content, contentWarning string
 	var apEnabled bool
 	var createdAt time.Time
 	if err := s.db.QueryRow(`
-		SELECT u.username, u.activitypub_enabled, p.content, p.created_at
+		SELECT u.username, u.activitypub_enabled, p.content, p.content_warning, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2
-	`, commentID, userID).Scan(&username, &apEnabled, &content, &createdAt); err != nil || !apEnabled {
+	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
 		return
 	}
 
 	actor := s.actorURL(username)
-	activity := s.buildCreateActivity(actor, commentID, content, createdAt, targetRemotePostID)
+	activity := s.buildCreateActivity(actor, commentID, content, createdAt, targetRemotePostID, contentWarning)
 	// Address the reply at the recipient directly rather than only Public/followers.
 	if note, ok := activity["object"].(map[string]any); ok {
 		note["to"] = []string{targetActorURL}

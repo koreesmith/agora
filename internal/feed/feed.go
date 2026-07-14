@@ -27,6 +27,11 @@ var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
+	// BroadcastPublicPost/BroadcastDeletePost drive standard ActivityPub
+	// delivery to a user's fediverse followers (AGORA-145) — distinct from
+	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
+	BroadcastPublicPost(userID, postID string)
+	BroadcastDeletePost(userID, postID string)
 }
 
 type Service struct {
@@ -916,6 +921,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 				"created_at":    timeNow(),
 			},
 		})
+		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
+		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -1093,6 +1100,10 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 			"actor": username,
 			"object": map[string]string{"id": id},
 		})
+		// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
+		// not the deleter (userID may be an admin/moderator), since the Delete
+		// must come from the same actor that federated the original post.
+		go s.fed.BroadcastDeletePost(authorID, id)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "deleted"})

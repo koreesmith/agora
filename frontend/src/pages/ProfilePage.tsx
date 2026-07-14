@@ -40,22 +40,24 @@ export default function ProfilePage() {
     enabled: !!profile && canSeeTimeline && tab === 'posts',
   })
 
+  // Photos/Wall require auth — the tabs are hidden for guests, but also
+  // gate the queries so a stale tab state can't fire an unauthenticated request.
   const { data: albumsData } = useQuery({
     queryKey: ['user-albums', username],
     queryFn: () => albumsApi.listForUser(username!).then(r => r.data),
-    enabled: !!profile && canSeeTimeline && tab === 'photos',
+    enabled: !!profile && canSeeTimeline && tab === 'photos' && !!me,
   })
 
   const { data: wallData, refetch: refetchWall } = useQuery({
     queryKey: ['wall', username],
     queryFn: () => feedApi.getWall(username!).then(r => r.data),
-    enabled: !!profile && tab === 'wall',
+    enabled: !!profile && tab === 'wall' && !!me,
   })
 
   const { data: wallQueueData, refetch: refetchQueue } = useQuery({
     queryKey: ['wall-queue'],
     queryFn: () => feedApi.getWallQueue().then(r => r.data),
-    enabled: !!profile && tab === 'wall' && profile.friend_status === 'self',
+    enabled: !!profile && tab === 'wall' && profile.friend_status === 'self' && !!me,
   })
 
   const [listModalFriend, setListModalFriend] = useState<any | null>(null)
@@ -160,7 +162,12 @@ export default function ProfilePage() {
               }
             </div>
             <div className="flex gap-2 mt-10">
-              {!isSelf && !status && (
+              {!me && !isSelf && (
+                <Link to="/login" className="btn-primary text-sm flex items-center gap-1">
+                  <UserPlus size={16}/> Sign in to interact
+                </Link>
+              )}
+              {me && !isSelf && !status && (
                 <div className="flex gap-2">
                   <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                     <UserPlus size={16}/> Add friend
@@ -245,21 +252,25 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs — Photos/Wall require auth, so guests only get Posts */}
         {canSeeContent && (
           <div className="flex border-t border-agora-100 dark:border-agora-700">
             <button onClick={() => setTab('posts')}
               className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'posts' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
               <FileText size={14} /> Posts
             </button>
-            <button onClick={() => setTab('photos')}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'photos' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
-              <Images size={14} /> Photos
-            </button>
-            <button onClick={() => setTab('wall')}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'wall' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
-              <PenLine size={14} /> Wall
-            </button>
+            {me && (
+              <button onClick={() => setTab('photos')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'photos' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
+                <Images size={14} /> Photos
+              </button>
+            )}
+            {me && (
+              <button onClick={() => setTab('wall')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors ${tab === 'wall' ? 'border-b-2 border-agora-600 text-agora-600' : 'text-agora-400 hover:text-agora-600'}`}>
+                <PenLine size={14} /> Wall
+              </button>
+            )}
           </div>
         )}
       </div>

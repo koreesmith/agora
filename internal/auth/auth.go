@@ -53,6 +53,30 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// OptionalMiddleware parses a bearer token if present and attaches the user
+// to the request context, but — unlike Middleware — allows the request
+// through with no user context when the token is missing or invalid. Used
+// for read routes that guests may access (public posts, profiles).
+func (s *Service) OptionalMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			header := r.Header.Get("Authorization")
+			if strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			}
+		}
+		if tokenStr != "" {
+			if claims, err := s.parseToken(tokenStr); err == nil {
+				ctx := context.WithValue(r.Context(), ctxkeys.UserID, claims.UserID)
+				ctx  = context.WithValue(ctx, ctxkeys.UserRole, claims.Role)
+				r = r.WithContext(ctx)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RequireAdmin gates routes that manage the instance itself — settings, SMTP
 // credentials, role assignment, user deletion, federation. These are admin-only:
 // moderators must NOT reach them (a moderator with admin-panel access could

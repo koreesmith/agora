@@ -247,7 +247,12 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
         </div>
       ))}
 
-      <div className="flex gap-2 pt-1">
+      {!user && (
+        <p className="text-sm text-agora-400 pt-1">
+          <Link to="/login" className="text-agora-600 dark:text-agora-300 font-medium hover:underline">Sign in</Link> to comment.
+        </p>
+      )}
+      {user && <div className="flex gap-2 pt-1">
         <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
           {user?.avatar_url
             ? <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
@@ -295,7 +300,7 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
             </button>
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   )
 }
@@ -500,44 +505,48 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
           </span>
           {c.edited_at && <span className="text-xs text-agora-400 italic">edited</span>}
 
-          {/* Reaction button + picker */}
-          <div className="relative">
-            <button
-              onPointerDown={() => {
-                inLongPressRef.current = false
-                hoveredReactionRef.current = null
-                longPressTimerRef.current = setTimeout(() => {
-                  inLongPressRef.current = true
-                  setShowReactionPicker(true)
-                }, 400)
-              }}
-              onPointerUp={() => {
-                if (longPressTimerRef.current) {
-                  clearTimeout(longPressTimerRef.current)
-                  longPressTimerRef.current = null
-                }
-                if (!inLongPressRef.current) {
-                  handlePickReaction('like')
-                }
-              }}
-              onPointerCancel={() => {
-                if (longPressTimerRef.current) {
-                  clearTimeout(longPressTimerRef.current)
-                  longPressTimerRef.current = null
-                }
-              }}
-              onContextMenu={e => e.preventDefault()}
-              className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
-              title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
-            >
-              <span style={{ lineHeight: 1 }}>
-                {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
-              </span>
-            </button>
-            {showReactionPicker && (
-              <CommentReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
-            )}
-          </div>
+          {/* Reaction button + picker — guests get a read-only, inert icon */}
+          {user ? (
+            <div className="relative">
+              <button
+                onPointerDown={() => {
+                  inLongPressRef.current = false
+                  hoveredReactionRef.current = null
+                  longPressTimerRef.current = setTimeout(() => {
+                    inLongPressRef.current = true
+                    setShowReactionPicker(true)
+                  }, 400)
+                }}
+                onPointerUp={() => {
+                  if (longPressTimerRef.current) {
+                    clearTimeout(longPressTimerRef.current)
+                    longPressTimerRef.current = null
+                  }
+                  if (!inLongPressRef.current) {
+                    handlePickReaction('like')
+                  }
+                }}
+                onPointerCancel={() => {
+                  if (longPressTimerRef.current) {
+                    clearTimeout(longPressTimerRef.current)
+                    longPressTimerRef.current = null
+                  }
+                }}
+                onContextMenu={e => e.preventDefault()}
+                className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+                title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
+              >
+                <span style={{ lineHeight: 1 }}>
+                  {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                </span>
+              </button>
+              {showReactionPicker && (
+                <CommentReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
+              )}
+            </div>
+          ) : (
+            <span className="text-xs text-agora-300 dark:text-agora-600" title="Sign in to react">🤍</span>
+          )}
           {reactionCount > 0 && (
             <button
               onClick={() => setShowReactionsModal(true)}
@@ -550,7 +559,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             <CommentReactionsModal commentId={c.id} onClose={() => setShowReactionsModal(false)} />
           )}
 
-          {depth < 2 && (
+          {user && depth < 2 && (
             <button
               onClick={openReply}
               className="flex items-center gap-1 text-xs text-agora-400 hover:text-agora-600 transition-colors"
@@ -559,40 +568,42 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             </button>
           )}
 
-          {/* Three-dots menu */}
-          <div className="relative ml-auto">
-            <button onClick={() => setShowMenu(m => !m)}
-              className="text-xs text-agora-300 hover:text-agora-500 transition-colors p-0.5">
-              <MoreHorizontal size={13} />
-            </button>
-            {showMenu && (
-              <div className="absolute right-0 top-5 z-20 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-xl shadow-xl min-w-[150px] py-1"
-                onMouseLeave={() => setShowMenu(false)}>
-                {isOwn && !editing && (
-                  <button onClick={() => { setEditing(true); setEditContent(c.content); setShowMenu(false) }}
-                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
-                    <Pencil size={13} /> Edit
-                  </button>
-                )}
-                {canDelete && (
-                  <button onClick={() => { onDelete(); setShowMenu(false) }}
-                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20">
-                    <Trash2 size={13} /> Delete
-                  </button>
-                )}
-                {!isOwn && (
-                  <button onClick={() => { setShowReport(true); setShowMenu(false) }}
-                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
-                    <Flag size={13} /> Report
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
+          {/* Three-dots menu — edit/delete/report all require auth */}
+          {user && (
+            <div className="relative ml-auto">
+              <button onClick={() => setShowMenu(m => !m)}
+                className="text-xs text-agora-300 hover:text-agora-500 transition-colors p-0.5">
+                <MoreHorizontal size={13} />
+              </button>
+              {showMenu && (
+                <div className="absolute right-0 top-5 z-20 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-xl shadow-xl min-w-[150px] py-1"
+                  onMouseLeave={() => setShowMenu(false)}>
+                  {isOwn && !editing && (
+                    <button onClick={() => { setEditing(true); setEditContent(c.content); setShowMenu(false) }}
+                      className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
+                      <Pencil size={13} /> Edit
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button onClick={() => { onDelete(); setShowMenu(false) }}
+                      className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20">
+                      <Trash2 size={13} /> Delete
+                    </button>
+                  )}
+                  {!isOwn && (
+                    <button onClick={() => { setShowReport(true); setShowMenu(false) }}
+                      className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-agora-50 dark:hover:bg-agora-700">
+                      <Flag size={13} /> Report
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           {showReport && <ReportModal commentId={c.id} onClose={() => setShowReport(false)} />}
         </div>
 
-        {showReplyBox && (
+        {user && showReplyBox && (
           <div className="flex gap-2 mt-2">
             <div className="w-6 h-6 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
               {user?.avatar_url

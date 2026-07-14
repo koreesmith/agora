@@ -94,6 +94,11 @@ function AccessDenied({ reason, groupName, groupSlug }: {
       title = 'Private post'
       message = 'This post is private and can only be seen by its author.'
       break
+    case 'private_profile':
+      icon = <UserX size={36} className="mx-auto text-agora-400" />
+      title = 'Private profile'
+      message = 'This person has a private profile. You\'ll need to be friends with them to view their posts.'
+      break
   }
 
   return (

@@ -131,6 +131,13 @@ func main() {
 		r.Post("/notifications/unsubscribe", notifSvc.OneClickUnsubscribe)
 		r.Get("/notifications/unsubscribe",  notifSvc.UnsubscribePage)
 
+		// Public reads (guests welcome) — optional auth still personalizes results
+		r.Group(func(r chi.Router) {
+			r.Use(authSvc.OptionalMiddleware)
+			feed.RegisterPublicRoutes(r, feedSvc)
+			users.RegisterPublicRoutes(r, userSvc)
+		})
+
 		// Authenticated
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)

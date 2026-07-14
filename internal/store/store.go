@@ -653,4 +653,26 @@ var schema = []string{
 	// AGORA-145: per-account opt-out of standard ActivityPub federation,
 	// separate from the instance-wide federation_enabled toggle.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-147: remote-actor identity for standard-ActivityPub user stubs
+	// (distinct from remote_user_id/remote_instance, which the older custom
+	// protocol's stubs use), plus idempotency for inbound remote posts/replies.
+	// The posts unique index also fixes a pre-existing bug in the old custom
+	// protocol's handleInboundPost, whose bare ON CONFLICT DO NOTHING had no
+	// matching constraint to target — Postgres's bare ON CONFLICT DO NOTHING
+	// applies to any unique-constraint violation on the table, so this index
+	// makes that existing code correctly dedupe too.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ap_actor_url TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ap_inbox_url TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ap_actor_url ON users(ap_actor_url) WHERE ap_actor_url != ''`,
+	// Defensive cleanup before adding the constraint below: the old protocol's
+	// dedup bug means duplicate (remote_post_id, remote_instance) rows may
+	// already exist. Keep the earliest row per pair, drop the rest. No-op if
+	// there are no duplicates (idempotent, safe to run on every startup).
+	`DELETE FROM posts a USING posts b
+	 WHERE a.is_remote = true AND a.remote_post_id != ''
+	   AND b.is_remote = true AND b.remote_post_id != ''
+	   AND a.remote_post_id = b.remote_post_id AND a.remote_instance = b.remote_instance
+	   AND a.id > b.id`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_remote_unique ON posts(remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != ''`,
 }

@@ -63,7 +63,7 @@ func main() {
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
-	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
+	fedSvc    := federation.NewService(db, cfg, notifSvc)
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)
 	customFeedsSvc  := customfeeds.NewService(db)

@@ -144,11 +144,14 @@ func splitSignatureFields(v string) []string {
 // verifyInboundSignature validates the HTTP Signature on an inbound
 // ActivityPub request. It dereferences the signer's actor document (via the
 // SSRF-safe fedHTTPClient) to obtain their public key, then verifies both
-// the signature and that the Digest header matches the actual body.
-func verifyInboundSignature(r *http.Request, body []byte) error {
+// the signature and that the Digest header matches the actual body. On
+// success it returns the verified actor URL (the keyId with any #fragment
+// stripped) — callers must treat this, not any unsigned "actor"/"attributedTo"
+// field in the request body, as the trustworthy signer identity.
+func verifyInboundSignature(r *http.Request, body []byte) (string, error) {
 	sp, err := parseSignatureHeader(r.Header.Get("Signature"))
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Digest must match the actual body, independent of whether "digest" was
@@ -158,21 +161,21 @@ func verifyInboundSignature(r *http.Request, body []byte) error {
 		sum := sha256.Sum256(body)
 		want := "SHA-256=" + base64.StdEncoding.EncodeToString(sum[:])
 		if !strings.EqualFold(digestHeader, want) {
-			return errors.New("digest mismatch")
+			return "", errors.New("digest mismatch")
 		}
 	}
 
 	pubKey, err := fetchActorPublicKey(sp.keyID)
 	if err != nil {
-		return fmt.Errorf("fetch actor public key: %w", err)
+		return "", fmt.Errorf("fetch actor public key: %w", err)
 	}
 
 	signingString := buildSigningString(r, sp.headers)
 	hashed := sha256.Sum256([]byte(signingString))
 	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed[:], sp.signature); err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
+		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
-	return nil
+	return strings.SplitN(sp.keyID, "#", 2)[0], nil
 }
 
 // fetchActorPublicKey dereferences an actor (or actor#key) URL and extracts

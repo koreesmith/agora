@@ -32,8 +32,13 @@ func NewService(db *store.DB, cfg *config.Config, _, _ any) *Service {
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/agora-instance", s.InstanceInfo)
+	// Standard ActivityPub discovery — what Mastodon/Pleroma/etc. actually query.
+	r.Get("/.well-known/webfinger", s.WebFinger)
+	r.Get("/.well-known/host-meta", s.HostMeta)
 	r.Post("/federation/inbox",          s.Inbox)
 	r.Get("/federation/users/{handle}",  s.GetUser)
+	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
+	r.Get("/federation/users/{handle}/followers", s.Followers)
 	r.Get("/federation/search",          s.Search)
 	r.Get("/federation/lookup",          s.LookupUser) // resolve user@instance.com
 }
@@ -104,6 +109,21 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, 400, "could not read body")
+		return
+	}
+
+	// Standard ActivityPub activities (from Mastodon etc.) are verified via
+	// HTTP Signatures, not the custom protocol's embedded-JSON-field Ed25519
+	// signature below — detect and branch before the custom verification path
+	// ever runs, since a standard activity has no "signature"/"instance_id"
+	// fields and would otherwise always fail it.
+	var probe struct {
+		Context json.RawMessage `json:"@context"`
+		Type    string          `json:"type"`
+	}
+	json.Unmarshal(body, &probe)
+	if len(probe.Context) > 0 || probe.Type == "Follow" || probe.Type == "Undo" {
+		s.handleStandardInbox(w, r, body)
 		return
 	}
 
@@ -317,6 +337,16 @@ func (s *Service) syncStaleRemoteUsers() {
 
 func (s *Service) GetUser(w http.ResponseWriter, r *http.Request) {
 	handle := chi.URLParam(r, "handle")
+
+	// Standard ActivityPub actor document — legacy flat-JSON response below is
+	// unchanged for the custom protocol's own requests (no Accept header, or
+	// a plain application/json Accept).
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "application/activity+json") || strings.Contains(accept, "application/ld+json") {
+		s.writeActorObject(w, handle)
+		return
+	}
+
 	var u struct {
 		Username    string `json:"username"`
 		DisplayName string `json:"display_name"`
@@ -709,15 +739,18 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	if !s.federationEnabled() { return }
 
 	queueTicker  := time.NewTicker(30 * time.Second)  // drain outbound queue
+	apQueueTicker := time.NewTicker(20 * time.Second) // drain standard-AP delivery queue
 	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
 	profileTicker := time.NewTicker(6 * time.Hour)    // sync stale remote profiles
 
 	defer queueTicker.Stop()
+	defer apQueueTicker.Stop()
 	defer syncTicker.Stop()
 	defer profileTicker.Stop()
 
 	// Run immediately on start
 	go s.drainQueue()
+	go s.drainAPQueue()
 
 	for {
 		select {
@@ -725,6 +758,8 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 			return
 		case <-queueTicker.C:
 			go s.drainQueue()
+		case <-apQueueTicker.C:
+			go s.drainAPQueue()
 		case <-syncTicker.C:
 			go s.refreshInstances()
 		case <-profileTicker.C:

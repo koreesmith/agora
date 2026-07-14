@@ -293,7 +293,62 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 	if contentWarning != "" {
 		note["summary"] = contentWarning
 	}
+	// AGORA-152: attach images so they render on Mastodon etc., not just as a
+	// caption with no photo. Queried here (rather than threaded through every
+	// caller) to keep buildCreateActivity/buildUpdateActivity's signatures stable.
+	if images := s.postImageURLs(postID); len(images) > 0 {
+		attachments := make([]map[string]any, 0, len(images))
+		for _, u := range images {
+			attachments = append(attachments, map[string]any{
+				"type":      "Image",
+				"mediaType": guessImageMediaType(u),
+				"url":       u,
+			})
+		}
+		note["attachment"] = attachments
+	}
 	return note
+}
+
+// postImageURLs returns the images attached to a post or comment, resolved
+// to absolute URLs for remote consumption. Posts with 2+ images use
+// post_photos (AGORA-93); everything else (including comments, which only
+// ever have one) uses the single image_url column.
+func (s *Service) postImageURLs(postID string) []string {
+	rows, err := s.db.Query(`SELECT url FROM post_photos WHERE post_id = $1 ORDER BY position ASC`, postID)
+	if err == nil {
+		defer rows.Close()
+		var urls []string
+		for rows.Next() {
+			var u string
+			if rows.Scan(&u) == nil && u != "" {
+				urls = append(urls, s.absoluteURL(u))
+			}
+		}
+		if len(urls) > 0 {
+			return urls
+		}
+	}
+	var imageURL string
+	s.db.QueryRow(`SELECT image_url FROM posts WHERE id = $1`, postID).Scan(&imageURL)
+	if imageURL != "" {
+		return []string{s.absoluteURL(imageURL)}
+	}
+	return nil
+}
+
+func guessImageMediaType(url string) string {
+	lower := strings.ToLower(url)
+	switch {
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
 }
 
 // buildCreateActivity wraps a Note in a Create activity, used by the Outbox
@@ -402,11 +457,20 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			Object json.RawMessage `json:"object"`
 		}
 		json.Unmarshal(a.Object, &inner)
-		if inner.Type == "Follow" {
+		switch inner.Type {
+		case "Follow":
 			s.handleInboundUndoFollow(verifiedActor, inner.Object)
+		case "Like":
+			s.handleInboundUndoLike(verifiedActor, inner.Object)
+		case "Announce":
+			s.handleInboundUndoAnnounce(verifiedActor, inner.Object)
 		}
 	case "Create":
 		s.handleInboundCreate(verifiedActor, a.Object)
+	case "Like":
+		s.handleInboundLike(verifiedActor, a.Object)
+	case "Announce":
+		s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -665,6 +729,136 @@ func htmlToPlainText(s string) string {
 	s = htmlBlockBreakRe.ReplaceAllString(s, "\n")
 	s = htmlTagRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(s))
+}
+
+// ── Inbound Like / Announce (favorites / boosts) ──────────────────────────────
+
+// resolveFederatableTarget resolves an object URL to one of our own local
+// posts the given actor is allowed to interact with — not blocked, post
+// still exists/public, author still ap-enabled. Shared by inbound Like and
+// Announce, which (unlike Create) only ever target a post directly, never a
+// remote-comment reply chain, so this is simpler than resolveReplyTarget.
+func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (postID, postAuthorID string, ok bool) {
+	var status string
+	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
+	if status == "blocked" {
+		return "", "", false
+	}
+	postID = localPostIDFromURL(objectURL, s.cfg.InstanceDomain)
+	if postID == "" {
+		return "", "", false
+	}
+	var visibility string
+	var profilePrivate, apEnabled bool
+	err := s.db.QueryRow(`
+		SELECT p.author_id, p.visibility, u.profile_private, u.activitypub_enabled
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.deleted_at IS NULL
+	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled)
+	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+		return "", "", false
+	}
+	return postID, postAuthorID, true
+}
+
+func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
+	if !ok {
+		return
+	}
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+
+	res, err := s.db.Exec(`INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, remoteUserID, postID)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return // already liked — redelivery, don't re-notify
+	}
+
+	if s.notif != nil && postAuthorID != remoteUserID {
+		var parentID *string
+		s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, postID).Scan(&parentID)
+		notifType := "post_like"
+		if parentID != nil {
+			notifType = "comment_like"
+		}
+		s.notif.Create(postAuthorID, remoteUserID, notifType, postID, "")
+	}
+}
+
+func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	postID := localPostIDFromURL(objectURL, s.cfg.InstanceDomain)
+	if postID == "" {
+		return
+	}
+	var remoteUserID string
+	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
+	if remoteUserID == "" {
+		return
+	}
+	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
+}
+
+func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" || activityID == "" {
+		return
+	}
+	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
+	if !ok {
+		return
+	}
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+
+	var repostID string
+	err = s.db.QueryRow(`
+		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance)
+		VALUES ($1, 'public', $2, true, $3, $4)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, remoteUserID, postID, activityID, domainFromURL(activityID)).Scan(&repostID)
+	if err != nil {
+		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
+		// redelivery — expected, not an error.
+		return
+	}
+
+	if s.notif != nil && postAuthorID != remoteUserID {
+		s.notif.Create(postAuthorID, remoteUserID, "post_repost", postID, "")
+	}
+}
+
+func (s *Service) handleInboundUndoAnnounce(verifiedActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	postID := localPostIDFromURL(objectURL, s.cfg.InstanceDomain)
+	if postID == "" {
+		return
+	}
+	var remoteUserID string
+	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
+	if remoteUserID == "" {
+		return
+	}
+	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE author_id = $1 AND repost_of_id = $2 AND is_remote = true AND deleted_at IS NULL`,
+		remoteUserID, postID)
 }
 
 // usernameFromActorURL extracts the username from one of our own actor URLs

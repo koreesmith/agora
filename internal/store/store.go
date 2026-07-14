@@ -355,6 +355,34 @@ var schema = []string{
 	// Track when remote user profiles were last synced
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
 
+	// Standard ActivityPub followers — remote actors (e.g. Mastodon accounts)
+	// following a local user's public posts. Distinct from Agora's own
+	// friendships/federation_queue, which serve the older Agora-to-Agora protocol.
+	`CREATE TABLE IF NOT EXISTS ap_followers (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		followed_user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		follower_actor_url  TEXT        NOT NULL,
+		follower_inbox_url  TEXT        NOT NULL,
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (followed_user_id, follower_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_followers_user ON ap_followers(followed_user_id)`,
+
+	// Outbound ActivityPub delivery queue — separate from federation_queue
+	// because standard HTTP Signatures must be computed at send time (fresh
+	// Date header per attempt), not once at enqueue time.
+	`CREATE TABLE IF NOT EXISTS ap_delivery_queue (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		actor_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		inbox_url     TEXT        NOT NULL,
+		activity      JSONB       NOT NULL,
+		attempts      INT         NOT NULL DEFAULT 0,
+		last_error    TEXT        NOT NULL DEFAULT '',
+		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_delivery_next ON ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
 	`CREATE TABLE IF NOT EXISTS albums (
 		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
 		owner_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,

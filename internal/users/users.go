@@ -37,7 +37,6 @@ func NewService(db *store.DB, media *media.Service) *Service {
 func (s *Service) SetFed(f fedSender) { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
-	r.Get("/users/{username}",          s.GetProfile)
 	r.Patch("/users/me",                s.UpdateProfile)
 	r.Post("/users/me/avatar",          s.UploadAvatar)
 	r.Post("/users/me/cover",           s.UploadCover)
@@ -50,6 +49,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
 	r.Post("/users/{username}/notify",    s.EnablePostNotify)
 	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
+}
+
+// RegisterPublicRoutes registers read-only routes reachable by guests.
+func RegisterPublicRoutes(r chi.Router, s *Service) {
+	r.Get("/users/{username}", s.GetProfile)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────

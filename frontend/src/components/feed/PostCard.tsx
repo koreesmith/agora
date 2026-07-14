@@ -593,35 +593,37 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               </span>
             </div>
 
-            {/* Menu */}
-            <div className="relative flex-shrink-0">
-              <button onClick={() => setShowMenu(m => !m)} className="btn-ghost p-1 text-agora-400">
-                <MoreHorizontal size={16} />
-              </button>
-              {showMenu && (
-                <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
-                  onBlur={() => setShowMenu(false)}>
-                  {isOwn && !post.repost_of_id && (
-                    <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
-                      <Pencil size={14} /> Edit
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
-                      <Trash2 size={14} /> Delete
-                    </button>
-                  )}
-                  {!isOwn && (
-                    <button onClick={() => { setShowReport(true); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
-                      <Flag size={14} /> Report
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Menu — edit/delete/report all require auth */}
+            {user && (
+              <div className="relative flex-shrink-0">
+                <button onClick={() => setShowMenu(m => !m)} className="btn-ghost p-1 text-agora-400">
+                  <MoreHorizontal size={16} />
+                </button>
+                {showMenu && (
+                  <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
+                    onBlur={() => setShowMenu(false)}>
+                    {isOwn && !post.repost_of_id && (
+                      <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <Pencil size={14} /> Edit
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                    {!isOwn && (
+                      <button onClick={() => { setShowReport(true); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <Flag size={14} /> Report
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Trigger warning banner — shown when post has a content warning and not yet expanded */}
@@ -928,54 +930,61 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </div>
           )}
 
-          {/* Poll */}
+          {/* Poll — guests can view results but voting requires auth */}
           {post.poll_options && post.poll_options.length >= 2 && (
-            <PollWidget post={post} onVote={pollVote.mutate} invalidate={invalidate} />
+            <PollWidget post={post} onVote={user ? pollVote.mutate : () => {}} invalidate={invalidate} />
           )}
 
           {/* Actions */}
           <div className="mt-3">
             <div className="flex items-center gap-4 text-agora-400 dark:text-agora-500">
-              {/* Reaction button + picker */}
-              <div className="relative">
-                <button
-                  onPointerDown={() => {
-                    inLongPressRef.current = false
-                    hoveredReactionRef.current = null
-                    longPressTimerRef.current = setTimeout(() => {
-                      inLongPressRef.current = true
-                      setShowReactionPicker(true)
-                    }, 400)
-                  }}
-                  onPointerUp={() => {
-                    if (longPressTimerRef.current) {
-                      clearTimeout(longPressTimerRef.current)
-                      longPressTimerRef.current = null
-                    }
-                    if (!inLongPressRef.current) {
-                      handleReactionPick('like')
-                    }
-                    // long-press release is handled by the document pointerup listener
-                  }}
-                  onPointerCancel={() => {
-                    if (longPressTimerRef.current) {
-                      clearTimeout(longPressTimerRef.current)
-                      longPressTimerRef.current = null
-                    }
-                  }}
-                  onContextMenu={e => e.preventDefault()}
-                  className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
-                  title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
-                >
-                  <span className="text-base leading-none" style={{lineHeight:1}}>
-                    {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
-                  </span>
+              {/* Reaction button + picker — guests get a read-only, inert icon */}
+              {user ? (
+                <div className="relative">
+                  <button
+                    onPointerDown={() => {
+                      inLongPressRef.current = false
+                      hoveredReactionRef.current = null
+                      longPressTimerRef.current = setTimeout(() => {
+                        inLongPressRef.current = true
+                        setShowReactionPicker(true)
+                      }, 400)
+                    }}
+                    onPointerUp={() => {
+                      if (longPressTimerRef.current) {
+                        clearTimeout(longPressTimerRef.current)
+                        longPressTimerRef.current = null
+                      }
+                      if (!inLongPressRef.current) {
+                        handleReactionPick('like')
+                      }
+                      // long-press release is handled by the document pointerup listener
+                    }}
+                    onPointerCancel={() => {
+                      if (longPressTimerRef.current) {
+                        clearTimeout(longPressTimerRef.current)
+                        longPressTimerRef.current = null
+                      }
+                    }}
+                    onContextMenu={e => e.preventDefault()}
+                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
+                    title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
+                  >
+                    <span className="text-base leading-none" style={{lineHeight:1}}>
+                      {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                    </span>
+                    <span className="text-sm">{post.reaction_count || ''}</span>
+                  </button>
+                  {showReactionPicker && (
+                    <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
+                  )}
+                </div>
+              ) : (
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to react">
+                  <span className="text-base leading-none" style={{lineHeight:1}}>🤍</span>
                   <span className="text-sm">{post.reaction_count || ''}</span>
-                </button>
-                {showReactionPicker && (
-                  <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
-                )}
-              </div>
+                </span>
+              )}
 
               <button
                 onClick={() => setShowComments(c => !c)}
@@ -984,16 +993,23 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <span>{post.comment_count}</span>
               </button>
 
-              <button
-                onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
-                disabled={post.visibility !== 'public'}
-                title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
-                className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
-                <Repeat2 size={16} />
-                {sharedConfirm
-                  ? <span className="text-xs">Shared!</span>
-                  : <span>{post.repost_count || ''}</span>}
-              </button>
+              {user ? (
+                <button
+                  onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
+                  disabled={post.visibility !== 'public'}
+                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
+                  className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
+                  <Repeat2 size={16} />
+                  {sharedConfirm
+                    ? <span className="text-xs">Shared!</span>
+                    : <span>{post.repost_count || ''}</span>}
+                </button>
+              ) : (
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to share">
+                  <Repeat2 size={16} />
+                  <span>{post.repost_count || ''}</span>
+                </span>
+              )}
             </div>
 
             {/* Reaction summary bar */}
@@ -1063,8 +1079,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         </div>
       )}
 
-      {/* AGORA-87: Inline quick-comment box */}
-      {!post.repost_of_id && (
+      {/* AGORA-87: Inline quick-comment box — guests use the sign-in prompt in CommentsSection instead */}
+      {!post.repost_of_id && user && (
         <div className="flex items-center gap-2 px-1 pt-1 pb-0.5">
           <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
             {useAuthStore.getState().user?.avatar_url

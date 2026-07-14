@@ -110,6 +110,9 @@ export default function LoginPage() {
           Don't have an account?{' '}
           <Link to="/register" className="text-agora-600 hover:underline font-medium">Create one</Link>
         </p>
+        <p className="text-center text-sm text-agora-500 mt-2">
+          <Link to="/explore" className="text-agora-600 hover:underline font-medium">Browse public posts</Link> without signing in
+        </p>
       </div>
     </div>
   )

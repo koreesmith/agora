@@ -59,9 +59,10 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	// AGORA-146: standard-AP handle/URL resolution (search), and following a
 	// remote fediverse account.
 	r.Get("/federation/ap-lookup",     s.APLookup)
-	r.Post("/federation/follow",       s.FollowFediverseAccount)
+	r.Post("/federation/follow",        s.FollowFediverseAccount)
 	r.Delete("/federation/follow/{id}", s.UnfollowFediverseAccount)
-	r.Get("/federation/following",     s.ListFollowing)
+	r.Get("/federation/following",      s.ListFollowing)
+	r.Put("/federation/follow/{id}/notify", s.ToggleFollowNotify)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────

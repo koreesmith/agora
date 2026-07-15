@@ -23,6 +23,13 @@ import (
 
 var mentionRe   = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
+// fediverseMentionRe (AGORA-163) matches a full @handle@instance.tld mention
+// shape, distinct from a bare local @username. Duplicated (not imported) in
+// internal/federation/activitypub.go, which does the actual resolve/deliver
+// work — this package only needs to know a match is fediverse-shaped so
+// notifyMentions doesn't also treat it as a (near-certainly wrong) local
+// mention. Keep both copies in sync if this pattern ever changes.
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
@@ -2893,10 +2900,29 @@ func (s *Service) GroupMentionSearch(w http.ResponseWriter, r *http.Request) {
 // ── Mention helpers ───────────────────────────────────────────────────────────
 
 func (s *Service) notifyMentions(content, authorID, postID string) {
-	matches := mentionRe.FindAllStringSubmatch(content, -1)
+	// AGORA-163: a fediverse mention (@handle@instance.tld) must not also be
+	// treated as a local mention — @([a-zA-Z0-9_-]+) alone would otherwise
+	// match just the "handle" portion and look up a local user by that name,
+	// almost always resolving to nobody or, worse, an unrelated local user
+	// who happens to share the name. Skip any local match whose start index
+	// falls inside a fediverse match's span.
+	fediverseSpans := fediverseMentionRe.FindAllStringIndex(content, -1)
+	inFediverseSpan := func(idx int) bool {
+		for _, sp := range fediverseSpans {
+			if idx >= sp[0] && idx < sp[1] {
+				return true
+			}
+		}
+		return false
+	}
+
+	matches := mentionRe.FindAllStringSubmatchIndex(content, -1)
 	seen := map[string]bool{}
 	for _, m := range matches {
-		username := strings.ToLower(m[1])
+		if inFediverseSpan(m[0]) {
+			continue
+		}
+		username := strings.ToLower(content[m[2]:m[3]])
 		if seen[username] { continue }
 		seen[username] = true
 

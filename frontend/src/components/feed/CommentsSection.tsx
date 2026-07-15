@@ -114,9 +114,20 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
 
 // Render text with @mentions as profile links and URLs as clickable links
 export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all") {
-  // Split on @mentions, +group-tags, and URLs
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+)/g)
+  // Split on @mentions (local @username or fediverse @handle@instance.tld —
+  // AGORA-163, ordered before the bare-local pattern so a full remote handle
+  // is captured as one token, not just its handle portion), +group-tags, and
+  // URLs. No nested capturing groups within any alternative — String.split
+  // splices every capture group's result into the output, so an inner group
+  // here would corrupt the parts array.
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+)/g)
   return parts.map((part, i) => {
+    // Fediverse mention (@handle@instance.tld) — links to the same
+    // synthetic-username profile route already used everywhere else a
+    // remote user is linked (handle@domain, per the remote-stub convention).
+    if (/^@[a-zA-Z0-9_]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+$/.test(part)) {
+      return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }

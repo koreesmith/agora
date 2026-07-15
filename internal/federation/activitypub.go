@@ -2038,6 +2038,73 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	}
 }
 
+// DeliverReplyUpdate mirrors DeliverReply (AGORA-162) but sends an Update
+// instead of a Create, for a previously-delivered reply that's since been
+// edited — same remoteness/mention re-check as DeliverReply, since a reply's
+// original recipients aren't tracked separately from just re-deriving them.
+// A reply that was never federated in the first place (no remote target, no
+// mentions) is a no-op here exactly as it is in DeliverReply.
+func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var username, content, contentWarning string
+	var apEnabled bool
+	var createdAt time.Time
+	if err := s.db.QueryRow(`
+		SELECT u.username, u.activitypub_enabled, p.content, p.content_warning, p.created_at
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.author_id = $2
+	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
+		return
+	}
+
+	var targetIsRemote bool
+	var targetActorURL, targetInboxURL, targetRemotePostID string
+	s.db.QueryRow(`
+		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1
+	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
+	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
+
+	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	if !targetOK && len(mentionedActorURLs) == 0 {
+		return
+	}
+
+	actor := s.actorURL(username)
+	inReplyTo := ""
+	if targetOK {
+		inReplyTo = targetRemotePostID
+	}
+	activity := s.buildUpdateActivity(actor, commentID, content, createdAt, inReplyTo, contentWarning)
+
+	var to []string
+	if targetOK {
+		to = []string{targetActorURL}
+	}
+	to = append(to, mentionedActorURLs...)
+	if note, ok := activity["object"].(map[string]any); ok {
+		note["to"] = to
+		if len(tags) > 0 {
+			note["tag"] = tags
+		}
+	}
+	activity["to"] = to
+
+	if targetOK {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
+	for i, mentionedActorURL := range mentionedActorURLs {
+		if targetOK && mentionedActorURL == targetActorURL {
+			continue // already delivered above
+		}
+		s.enqueueAPDelivery(userID, mentionedInboxURLs[i], activity)
+	}
+}
+
 // ── Outbound Like / Undo(Like) (AGORA-158) ────────────────────────────────────
 //
 // The reverse of handleInboundLike (AGORA-153), which only ever handled a

@@ -45,6 +45,8 @@ type fedSender interface {
 	// DeliverReply drives outbound ActivityPub delivery for a comment that
 	// directly replies to a fediverse participant (AGORA-147).
 	DeliverReply(userID, commentID, replyToID string)
+	// DeliverReplyUpdate mirrors DeliverReply but for an edit (AGORA-162).
+	DeliverReplyUpdate(userID, commentID, replyToID string)
 	// BroadcastPagePostUpdate/Delete (AGORA-115): a page post's edit/delete
 	// goes through this same generic EditPost/DeletePost, but must federate
 	// under the page's own actor, not the posting member's — page posts are
@@ -2245,14 +2247,14 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	commentID := chi.URLParam(r, "commentID")
 
-	var authorID string
+	var authorID, parentID string
 	// Same fix as DeleteComment: match depth-0 comments or depth-1 replies-to-
 	// a-reply, not just direct children of the post.
 	s.db.QueryRow(`
-		SELECT author_id FROM posts
+		SELECT author_id, parent_id FROM posts
 		WHERE id = $1 AND deleted_at IS NULL
 		  AND (parent_id = $2 OR parent_id IN (SELECT id FROM posts WHERE parent_id = $2))
-	`, commentID, postID).Scan(&authorID)
+	`, commentID, postID).Scan(&authorID, &parentID)
 	if authorID == "" {
 		writeError(w, 404, "comment not found"); return
 	}
@@ -2268,6 +2270,13 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET content = $1, edited_at = NOW() WHERE id = $2`, req.Content, commentID)
+
+	// AGORA-162: mirror EditPost's federation hook — a previously-federated
+	// reply must send an Update, not go stale on the remote side forever.
+	if s.fed != nil {
+		go s.fed.DeliverReplyUpdate(userID, commentID, parentID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "updated"})
 }
 

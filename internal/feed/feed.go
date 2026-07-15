@@ -2031,9 +2031,14 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	go s.notifyMentions(req.Content, userID, postID)
 
-	// AGORA-147: deliver to the fediverse if replying directly to a remote participant
-	if req.ReplyToID != "" && s.fed != nil {
-		go s.fed.DeliverReply(userID, id, req.ReplyToID)
+	// AGORA-147/AGORA-146: deliver to the fediverse if the immediate parent
+	// — either a specific remote comment (req.ReplyToID) or, just as often,
+	// a remote account's own top-level post pulled in via a fediverse
+	// custom feed — is itself remote-authored. DeliverReply already checks
+	// remoteness generically for whatever post/comment id it's given, so
+	// this doesn't need to special-case which kind of parent it is.
+	if s.fed != nil {
+		go s.fed.DeliverReply(userID, id, parentID)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})

@@ -724,4 +724,27 @@ var schema = []string{
 		PRIMARY KEY (page_id, user_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_page_members_user ON page_members(user_id)`,
+
+	// AGORA-146: outbound fediverse follows — the reverse of ap_followers
+	// ("who follows me"), this is "who I follow" on the fediverse. accepted
+	// stays false until the remote instance's Accept arrives (async, unlike
+	// ap_followers which only ever records already-confirmed followers).
+	`CREATE TABLE IF NOT EXISTS ap_following (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		follower_user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		followed_actor_url TEXT        NOT NULL,
+		followed_inbox_url TEXT        NOT NULL,
+		accepted           BOOLEAN     NOT NULL DEFAULT false,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (follower_user_id, followed_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_following_actor ON ap_following(followed_actor_url)`,
+
+	// AGORA-146: two new custom-feed filter types surface followed fediverse
+	// accounts through the existing custom-feeds engine rather than a new
+	// timeline UI — same drop-and-readd pattern AGORA-111 used to add
+	// include_page/exclude_page.
+	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
+	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all'))`,
 }

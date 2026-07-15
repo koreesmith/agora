@@ -274,7 +274,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
-	var includePageIDs, excludePageIDs []string
+	var includePageIDs, excludePageIDs, fediverseAccountIDs []string
+	var fediverseAll bool
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -293,6 +294,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			includePageIDs = append(includePageIDs, val)
 		case "exclude_page":
 			excludePageIDs = append(excludePageIDs, val)
+		case "fediverse_account":
+			fediverseAccountIDs = append(fediverseAccountIDs, val)
+		case "fediverse_all":
+			fediverseAll = true
 		}
 	}
 	filterRows.Close()
@@ -310,7 +315,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	var extraClauses []string
 
 	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
-	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 {
+	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 ||
+		len(fediverseAccountIDs) > 0 || fediverseAll {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -340,6 +346,29 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			}
 			inclParts = append(inclParts, fmt.Sprintf(
 				`p.page_id IN (%s)`, strings.Join(phs, ",")))
+		}
+		// AGORA-146: a specific followed fediverse account. The EXISTS check
+		// re-verifies the viewer actually follows that account (not just
+		// that the stored filter value names it) so a filter's value can't
+		// be used to see an account the viewer doesn't follow.
+		if len(fediverseAccountIDs) > 0 {
+			phs := make([]string, len(fediverseAccountIDs))
+			for i, id := range fediverseAccountIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`(p.author_id IN (%s) AND EXISTS(
+				  SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+				))`, strings.Join(phs, ",")))
+		}
+		// AGORA-146: every fediverse account the viewer follows.
+		if fediverseAll {
+			inclParts = append(inclParts,
+				`(p.is_remote = true AND EXISTS(
+				  SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+				))`)
 		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
@@ -439,6 +468,14 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		        AND ((f.requester_id = $1 AND f.addressee_id = p.wall_user_id)
 		          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
 		      AND f.status = 'accepted'
+		    )
+		    -- AGORA-146: a remote followed account has no friendships row —
+		    -- scoped to custom feeds only (not the main feed query), matching
+		    -- the ticket's design that fediverse follows surface only through
+		    -- an explicit custom-feed filter, never the public instance feed.
+		    OR EXISTS(
+		      SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+		      WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
 		    )
 		  )
 		  AND (

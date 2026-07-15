@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Plus, Trash2, Sparkles, RotateCcw } from 'lucide-react'
-import { customFeedsApi, friendsApi, groupsApi, pagesApi, interactionsApi } from '../../api'
+import { customFeedsApi, friendsApi, groupsApi, pagesApi, interactionsApi, federationApi } from '../../api'
 
 interface Filter {
   filter_type: string
@@ -21,13 +21,18 @@ interface Props {
 }
 
 const FILTER_TYPES = [
-  { value: 'friend_group',    label: 'Include Friend Group' },
-  { value: 'community_group', label: 'Include Community Group' },
-  { value: 'include_page',    label: 'Include Page' },
-  { value: 'exclude_friend',  label: 'Exclude Friend' },
-  { value: 'exclude_group',   label: 'Exclude Community Group' },
-  { value: 'exclude_page',    label: 'Exclude Page' },
+  { value: 'friend_group',      label: 'Include Friend Group' },
+  { value: 'community_group',   label: 'Include Community Group' },
+  { value: 'include_page',      label: 'Include Page' },
+  { value: 'fediverse_account', label: 'Include Fediverse Account' },
+  { value: 'fediverse_all',     label: 'Include All Fediverse Follows' },
+  { value: 'exclude_friend',    label: 'Exclude Friend' },
+  { value: 'exclude_group',     label: 'Exclude Community Group' },
+  { value: 'exclude_page',      label: 'Exclude Page' },
 ]
+
+// fediverse_all has no meaningful "value" to pick — it means "everyone I follow".
+const NO_VALUE_FILTER_TYPES = new Set(['fediverse_all'])
 
 export default function FeedBuilderModal({ feed, onClose }: Props) {
   const qc = useQueryClient()
@@ -56,11 +61,16 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
     queryFn: () => pagesApi.mine().then(r => r.data),
     staleTime: 60_000,
   })
+  const { data: followingData } = useQuery({
+    queryKey: ['fediverse-following'],
+    queryFn: () => federationApi.listFollowing().then(r => r.data),
+  })
 
   const friendGroups = listsData?.groups ?? []
   const friends = friendsData?.friends ?? []
   const myGroups = (groupsData?.groups ?? []).filter((g: any) => g.is_member)
   const myPages: any[] = myPagesData?.pages ?? []
+  const following: any[] = followingData?.following ?? []
 
   const save = useMutation({
     mutationFn: (data: { name: string, smart_ranking: boolean, filters: Filter[] }) =>
@@ -87,7 +97,7 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
   function updateRule(idx: number, field: keyof Filter, val: string) {
     setRules(r => r.map((rule, i) => {
       if (i !== idx) return rule
-      if (field === 'filter_type') return { filter_type: val, value: '' }
+      if (field === 'filter_type') return { filter_type: val, value: NO_VALUE_FILTER_TYPES.has(val) ? 'true' : '' }
       return { ...rule, [field]: val }
     }))
   }
@@ -104,6 +114,13 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
       case 'include_page':
       case 'exclude_page':
         return myPages.map((p: any) => ({ id: p.id, label: p.display_name }))
+      case 'fediverse_account':
+        // A followed account only gets a local stub (users.id) once its first
+        // post has been ingested — nothing to filter by before that, so it's
+        // left out of the picker until then.
+        return following
+          .filter((f: any) => f.user_id)
+          .map((f: any) => ({ id: f.user_id, label: f.display_name || f.username || f.actor_url }))
       default:
         return []
     }
@@ -181,16 +198,18 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
                             <option key={ft.value} value={ft.value}>{ft.label}</option>
                           ))}
                         </select>
-                        <select
-                          value={rule.value}
-                          onChange={e => updateRule(idx, 'value', e.target.value)}
-                          className="flex-1 input text-sm"
-                        >
-                          <option value="">— Select —</option>
-                          {options.map((opt: any) => (
-                            <option key={opt.id} value={opt.id}>{opt.label}</option>
-                          ))}
-                        </select>
+                        {!NO_VALUE_FILTER_TYPES.has(rule.filter_type) && (
+                          <select
+                            value={rule.value}
+                            onChange={e => updateRule(idx, 'value', e.target.value)}
+                            className="flex-1 input text-sm"
+                          >
+                            <option value="">— Select —</option>
+                            {options.map((opt: any) => (
+                              <option key={opt.id} value={opt.id}>{opt.label}</option>
+                            ))}
+                          </select>
+                        )}
                       </div>
                       <button type="button" onClick={() => removeRule(idx)}
                         className="mt-2 text-red-400 hover:text-red-600 flex-shrink-0">

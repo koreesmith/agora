@@ -1338,7 +1338,12 @@ type remoteActorProfile struct {
 }
 
 // fetchActorProfile dereferences a remote actor URL (via the SSRF-safe
-// fedHTTPClient) and returns the fields we care about.
+// fedHTTPClient) and returns the fields we care about. Unsigned — most
+// fediverse software (Mastodon et al.) serves actor documents to anonymous
+// GETs, but some (Threads, and Mastodon instances with AUTHORIZED_FETCH
+// enabled) require every actor fetch to carry a valid HTTP Signature and
+// return a blanket 404 otherwise. Callers that have a local user context to
+// sign as should prefer fetchActorProfileSigned.
 func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
 	if !strings.HasPrefix(actorURL, "https://") {
 		return nil, fmt.Errorf("actor url must be https")
@@ -1348,6 +1353,44 @@ func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/activity+json")
+	return doActorProfileFetch(req)
+}
+
+// fetchActorProfileSigned is fetchActorProfile's signed counterpart, needed
+// for instances (Threads chief among them) that enforce "authorized fetch" —
+// requiring a valid HTTP Signature on every actor GET, not just inbound
+// activity deliveries. Signs as userID's own actor, generating a keypair for
+// them first if they don't have one yet (mirrors deliverAPActivity's own
+// lazy key handling for outbound POSTs). An empty-body GET still needs a
+// Digest header for our own signedHeaderList to be self-consistent; SHA-256
+// of the empty string is the standard value fediverse verifiers expect here.
+func (s *Service) fetchActorProfileSigned(userID, actorURL string) (*remoteActorProfile, error) {
+	if !strings.HasPrefix(actorURL, "https://") {
+		return nil, fmt.Errorf("actor url must be https")
+	}
+
+	var username, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT username, federation_public_key, federation_private_key FROM users WHERE id = $1`, userID).
+		Scan(&username, &pubPEM, &privPEM); err != nil {
+		return nil, err
+	}
+	_, _, privKey, err := s.getOrCreateUserKeyPair(userID, pubPEM, privPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/activity+json")
+	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+		return nil, err
+	}
+	return doActorProfileFetch(req)
+}
+
+func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 	resp, err := fedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -1429,6 +1472,7 @@ func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
 // needs, since ActivityPub has no fediverse-wide search API. Authed-only
 // (registered via RegisterAuthedRoutes), matching LookupUser's rationale.
 func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
 	raw := strings.TrimSpace(r.URL.Query().Get("handle"))
 	if raw == "" {
 		writeError(w, 400, "handle required")
@@ -1461,7 +1505,12 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profile, err := fetchActorProfile(actorURL)
+	// Signed: Threads and any Mastodon instance running with
+	// AUTHORIZED_FETCH require a valid HTTP Signature on every actor GET,
+	// not just inbound activity deliveries, and return a blanket 404
+	// otherwise — an anonymous fetchActorProfile would fail here even for a
+	// perfectly valid handle.
+	profile, err := s.fetchActorProfileSigned(userID, actorURL)
 	if err != nil {
 		writeError(w, 404, "could not resolve actor")
 		return
@@ -1506,7 +1555,7 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	profile, err := fetchActorProfile(req.ActorURL)
+	profile, err := s.fetchActorProfileSigned(userID, req.ActorURL)
 	if err != nil || profile.Inbox == "" {
 		writeError(w, 404, "could not resolve actor")
 		return

@@ -8,7 +8,7 @@ Every post has a visibility setting:
 
 | Setting | Who can see it |
 |---|---|
-| **Public** | Anyone on this instance (and federated instances if enabled) |
+| **Public** | Anyone on this instance, and — unless you've turned it off — anyone on Mastodon and the rest of the fediverse. See [The Fediverse](fediverse.md). |
 | **Friends** | Only your accepted friends |
 | **Friend List** | Only members of a specific friend group you've created |
 | **Private** | Only you |

@@ -56,6 +56,12 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // dialer already provides on the outbound fetch it triggers.
 func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/lookup", s.LookupUser) // resolve user@instance.com
+	// AGORA-146: standard-AP handle/URL resolution (search), and following a
+	// remote fediverse account.
+	r.Get("/federation/ap-lookup",     s.APLookup)
+	r.Post("/federation/follow",       s.FollowFediverseAccount)
+	r.Delete("/federation/follow/{id}", s.UnfollowFediverseAccount)
+	r.Get("/federation/following",     s.ListFollowing)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────

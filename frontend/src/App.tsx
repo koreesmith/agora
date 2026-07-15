@@ -41,6 +41,7 @@ import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
 import PageSettingsPage  from './pages/PageSettingsPage'
 import ExplorePage       from './pages/ExplorePage'
+import FediversePage     from './pages/FediversePage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -115,6 +116,7 @@ function AppRoutes() {
         <Route path="/search"                  element={<SearchPage />} />
         <Route path="/notifications"           element={<NotificationsPage />} />
         <Route path="/settings"                element={<SettingsPage />} />
+        <Route path="/fediverse"               element={<FediversePage />} />
         <Route path="/admin"                   element={<RequireAdmin><AdminPage /></RequireAdmin>} />
         <Route path="/discover"                element={<DiscoverPage />} />
         <Route path="/lists/:id"               element={<ListFeedPage />} />

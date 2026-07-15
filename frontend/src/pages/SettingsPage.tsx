@@ -300,13 +300,6 @@ export default function SettingsPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.activitypub_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
-          <div className="flex items-center justify-between py-2">
-            <div>
-              <p className="font-medium text-sm">Follow fediverse accounts</p>
-              <p className="text-xs text-agora-400">Follow people on Mastodon and other fediverse apps and see their posts in a custom feed.</p>
-            </div>
-            <Link to="/fediverse" className="btn-secondary text-xs flex-shrink-0 ml-4">Manage</Link>
-          </div>
         </div>
       )}
 

@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { federationApi } from '../api'
-import { ArrowLeft, Search, UserPlus, UserMinus, Clock } from 'lucide-react'
+import { Search, UserPlus, UserMinus, Clock } from 'lucide-react'
 
 export default function FediversePage() {
   const qc = useQueryClient()
@@ -46,12 +45,7 @@ export default function FediversePage() {
 
   return (
     <div className="max-w-xl mx-auto space-y-6">
-      <div className="flex items-center gap-2">
-        <Link to="/settings" className="btn-ghost p-1.5 text-agora-500">
-          <ArrowLeft size={18} />
-        </Link>
-        <h1 className="text-lg font-bold">Fediverse</h1>
-      </div>
+      <h1 className="text-xl font-bold">Fediverse</h1>
 
       <div className="card p-5 space-y-4">
         <div>

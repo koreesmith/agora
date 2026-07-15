@@ -706,4 +706,22 @@ var schema = []string{
 		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_page_ap_delivery_next ON page_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
+	// AGORA-112: page team membership/roles. Referenced extensively by
+	// internal/pages/pages.go (ListMembers, InviteMember, AcceptInvite,
+	// SetMemberRole, RemoveMember, hasRole) but had no migration anywhere in
+	// this file — every one of those handlers has been failing at runtime
+	// with a "relation page_members does not exist" error. The page owner
+	// itself is tracked via pages.owner_id, not a row here; only invited
+	// admin/editor members get a page_members row (accepted=false until the
+	// invite is accepted).
+	`CREATE TABLE IF NOT EXISTS page_members (
+		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		role       VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'editor')),
+		accepted   BOOLEAN     NOT NULL DEFAULT false,
+		joined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (page_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_members_user ON page_members(user_id)`,
 }

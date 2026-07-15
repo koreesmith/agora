@@ -1497,6 +1497,66 @@ func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
 	return "", fmt.Errorf("no self link found for %s@%s", handle, domain)
 }
 
+// fediverseMentionRe (AGORA-163) — kept in sync with the identical pattern in
+// internal/feed/feed.go, which only needs to know a match is fediverse-shaped
+// (to avoid also treating it as a local mention); this package does the
+// actual resolution.
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+
+// maxResolvedMentionsPerPost bounds worst-case latency/abuse surface — each
+// resolution is a live WebFinger + signed actor fetch, so an unbounded count
+// of mentions in one post could otherwise chain into many sequential
+// outbound requests from a single goroutine.
+const maxResolvedMentionsPerPost = 5
+
+// resolveFediverseMentions parses @handle@instance.tld mentions out of post
+// content and resolves each to an actor URL + inbox, for building the Note's
+// "tag" array and directly addressing them in "to" — the mechanism that
+// actually makes a mention trigger a notification on the remote side, the
+// same way DeliverReply already explicitly addresses "to" at a reply target.
+// An unresolvable handle (blocked instance, WebFinger failure, actor fetch
+// failure) is silently skipped — the mention still appears as plain text in
+// the post, just without the outbound effect, not a hard error.
+func (s *Service) resolveFediverseMentions(userID, content string) (tags []map[string]any, actorURLs, inboxURLs []string) {
+	matches := fediverseMentionRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	for _, m := range matches {
+		if len(tags) >= maxResolvedMentionsPerPost {
+			break
+		}
+		handle, domain := m[1], m[2]
+		key := strings.ToLower(handle + "@" + domain)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		var status string
+		s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, strings.ToLower(domain)).Scan(&status)
+		if status == "blocked" {
+			continue
+		}
+
+		actorURL, err := resolveActorURLViaWebFinger(handle, domain)
+		if err != nil {
+			continue
+		}
+		profile, err := s.fetchActorProfileSigned(userID, actorURL)
+		if err != nil || profile.Inbox == "" {
+			continue
+		}
+
+		tags = append(tags, map[string]any{
+			"type": "Mention",
+			"href": actorURL,
+			"name": "@" + handle + "@" + domain,
+		})
+		actorURLs = append(actorURLs, actorURL)
+		inboxURLs = append(inboxURLs, profile.Inbox)
+	}
+	return tags, actorURLs, inboxURLs
+}
+
 // ── Search / resolve a fediverse handle (AGORA-146) ───────────────────────────
 
 // APLookup resolves a typed-in fediverse handle (user@instance.tld) or a
@@ -1756,7 +1816,21 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	// AGORA-163: a fediverse mention adds recipients on top of the normal
+	// Public/followers audience — it doesn't replace it.
+	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	if len(tags) > 0 {
+		if note, ok := activity["object"].(map[string]any); ok {
+			note["tag"] = tags
+			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
+			note["to"] = to
+			activity["to"] = to
+		}
+	}
 	s.deliverToFollowers(userID, activity)
+	for _, inboxURL := range mentionedInboxURLs {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // BroadcastUpdatePost delivers a signed Update activity when a previously-
@@ -1780,7 +1854,21 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	activity := s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	// AGORA-163: re-resolve current mentions on every edit too, same as a
+	// fresh Create — not attempting to diff against what was previously sent.
+	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	if len(tags) > 0 {
+		if note, ok := activity["object"].(map[string]any); ok {
+			note["tag"] = tags
+			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
+			note["to"] = to
+			activity["to"] = to
+		}
+	}
 	s.deliverToFollowers(userID, activity)
+	for _, inboxURL := range mentionedInboxURLs {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // BroadcastDeletePost enqueues a signed Delete/Tombstone for a removed post.
@@ -1817,21 +1905,12 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 // DeliverReply delivers a new comment to the fediverse when it's a direct
 // reply to a remote AP participant (someone whose reply we previously
 // ingested via handleInboundCreate) — the minimum viable half of "at least
-// the actor being replied to" from AGORA-147's AC. A plain comment on a local
-// thread, or a reply to another local user, is a no-op here.
+// the actor being replied to" from AGORA-147's AC — or when it @mentions a
+// fediverse account (AGORA-163), which must reach them even if the reply's
+// own parent isn't remote (e.g. a comment on a purely local post that
+// mentions someone on Mastodon). A plain comment with neither is a no-op.
 func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	if !s.activityPubEnabled() {
-		return
-	}
-
-	var targetIsRemote bool
-	var targetActorURL, targetInboxURL, targetRemotePostID string
-	err := s.db.QueryRow(`
-		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
-		FROM posts p JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1
-	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
-	if err != nil || !targetIsRemote || targetActorURL == "" || targetInboxURL == "" || targetRemotePostID == "" {
 		return
 	}
 
@@ -1846,15 +1925,51 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		return
 	}
 
-	actor := s.actorURL(username)
-	activity := s.buildCreateActivity(actor, commentID, content, createdAt, targetRemotePostID, contentWarning)
-	// Address the reply at the recipient directly rather than only Public/followers.
-	if note, ok := activity["object"].(map[string]any); ok {
-		note["to"] = []string{targetActorURL}
-	}
-	activity["to"] = []string{targetActorURL}
+	var targetIsRemote bool
+	var targetActorURL, targetInboxURL, targetRemotePostID string
+	s.db.QueryRow(`
+		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1
+	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
+	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
 
-	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	if !targetOK && len(mentionedActorURLs) == 0 {
+		return
+	}
+
+	actor := s.actorURL(username)
+	inReplyTo := ""
+	if targetOK {
+		inReplyTo = targetRemotePostID
+	}
+	activity := s.buildCreateActivity(actor, commentID, content, createdAt, inReplyTo, contentWarning)
+
+	// Address the reply at the recipient directly rather than Public/followers
+	// when there's a genuine reply target, plus any mentioned actors on top.
+	var to []string
+	if targetOK {
+		to = []string{targetActorURL}
+	}
+	to = append(to, mentionedActorURLs...)
+	if note, ok := activity["object"].(map[string]any); ok {
+		note["to"] = to
+		if len(tags) > 0 {
+			note["tag"] = tags
+		}
+	}
+	activity["to"] = to
+
+	if targetOK {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
+	for i, mentionedActorURL := range mentionedActorURLs {
+		if targetOK && mentionedActorURL == targetActorURL {
+			continue // already delivered above
+		}
+		s.enqueueAPDelivery(userID, mentionedInboxURLs[i], activity)
+	}
 }
 
 // ── Outbound Like / Undo(Like) (AGORA-158) ────────────────────────────────────

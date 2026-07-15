@@ -77,21 +77,29 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		HideTimeline   bool    `json:"hide_timeline"`
 		IsRemote       bool    `json:"is_remote"`
 		RemoteInstance string  `json:"remote_instance,omitempty"`
+		APActorURL     string  `json:"ap_actor_url,omitempty"`
 		CreatedAt      string  `json:"created_at"`
 		FriendStatus   string  `json:"friend_status"`
 		FriendCount    int     `json:"friend_count"`
 		PostNotify     bool    `json:"post_notifications_enabled"`
 		IsBlocked      bool    `json:"is_blocked"`
+		// AGORA-167: fediverse-specific follow state, distinct from friending —
+		// there's no ActivityPub equivalent of an Agora friend request, only
+		// following, so the frontend uses ap_actor_url to tell a genuine
+		// fediverse profile apart from a local (or legacy-protocol) remote one.
+		FollowID     string `json:"follow_id,omitempty"`
+		Following    bool   `json:"following"`
+		FollowNotify bool   `json:"follow_notify"`
 	}
 
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
-		       location, website, profile_private, hide_timeline, is_remote, remote_instance,
+		       location, website, profile_private, hide_timeline, is_remote, remote_instance, ap_actor_url,
 		       created_at
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
-		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance,
+		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
 		&u.CreatedAt,
 	)
 	if err != nil {
@@ -149,6 +157,18 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// Is this viewer blocking the profile user (one-directional — viewer blocked them)
 		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2)`,
 			viewerID, u.ID).Scan(&u.IsBlocked)
+
+		// AGORA-167: fediverse follow/notify state for this profile, if any.
+		if u.APActorURL != "" {
+			var followID string
+			var notify bool
+			if err := s.db.QueryRow(`SELECT id, notify FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2 AND accepted = true`,
+				viewerID, u.APActorURL).Scan(&followID, &notify); err == nil {
+				u.FollowID = followID
+				u.Following = true
+				u.FollowNotify = notify
+			}
+		}
 	}
 
 	// Enforce privacy

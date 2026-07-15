@@ -38,6 +38,12 @@ type fedSender interface {
 	// DeliverReply drives outbound ActivityPub delivery for a comment that
 	// directly replies to a fediverse participant (AGORA-147).
 	DeliverReply(userID, commentID, replyToID string)
+	// BroadcastPagePostUpdate/Delete (AGORA-115): a page post's edit/delete
+	// goes through this same generic EditPost/DeletePost, but must federate
+	// under the page's own actor, not the posting member's — page posts are
+	// broadcast to page_remote_subscribers, not the member's ap_followers.
+	BroadcastPagePostUpdate(pageID, postID string)
+	BroadcastPagePostDelete(pageID, postID string)
 }
 
 type Service struct {
@@ -1083,8 +1089,8 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var authorID string
-	var wallUserID *string
-	s.db.QueryRow(`SELECT author_id, wall_user_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID, &wallUserID)
+	var wallUserID, pageID *string
+	s.db.QueryRow(`SELECT author_id, wall_user_id, page_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID, &wallUserID, &pageID)
 	if authorID == "" {
 		writeError(w, 404, "post not found")
 		return
@@ -1099,17 +1105,22 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast deletion to federated instances
 	if s.fed != nil {
-		var username string
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "delete_post",
-			"actor": username,
-			"object": map[string]string{"id": id},
-		})
-		// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
-		// not the deleter (userID may be an admin/moderator), since the Delete
-		// must come from the same actor that federated the original post.
-		go s.fed.BroadcastDeletePost(authorID, id)
+		if pageID != nil {
+			// AGORA-115: a page post federates under the page's own actor.
+			go s.fed.BroadcastPagePostDelete(*pageID, id)
+		} else {
+			var username string
+			s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+			go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+				"type":  "delete_post",
+				"actor": username,
+				"object": map[string]string{"id": id},
+			})
+			// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
+			// not the deleter (userID may be an admin/moderator), since the Delete
+			// must come from the same actor that federated the original post.
+			go s.fed.BroadcastDeletePost(authorID, id)
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
@@ -2036,8 +2047,9 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 
 	var authorID string
 	var repostOfID *string
-	s.db.QueryRow(`SELECT author_id, repost_of_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
-		Scan(&authorID, &repostOfID)
+	var pageID *string
+	s.db.QueryRow(`SELECT author_id, repost_of_id, page_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&authorID, &repostOfID, &pageID)
 	if authorID == "" {
 		writeError(w, 404, "post not found"); return
 	}
@@ -2127,7 +2139,12 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 
 	// AGORA-150: notify fediverse followers a federated post was edited
 	if s.fed != nil {
-		go s.fed.BroadcastUpdatePost(userID, id)
+		if pageID != nil {
+			// AGORA-115: a page post federates under the page's own actor.
+			go s.fed.BroadcastPagePostUpdate(*pageID, id)
+		} else {
+			go s.fed.BroadcastUpdatePost(userID, id)
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "updated"})

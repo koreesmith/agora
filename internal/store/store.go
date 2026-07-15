@@ -675,4 +675,35 @@ var schema = []string{
 	   AND a.remote_post_id = b.remote_post_id AND a.remote_instance = b.remote_instance
 	   AND a.id > b.id`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_remote_unique ON posts(remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != ''`,
+
+	// AGORA-115: standard ActivityPub federation for Pages. Each page gets
+	// its own actor identity and keypair, independent of any member's
+	// personal user actor. Followers/delivery queue are separate tables from
+	// ap_followers/ap_delivery_queue (both NOT NULL FKs to users) rather than
+	// widening those constraints on a live, populated table.
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS federation_public_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS federation_private_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	`CREATE TABLE IF NOT EXISTS page_remote_subscribers (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		page_id            UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		follower_actor_url TEXT        NOT NULL,
+		follower_inbox_url TEXT        NOT NULL,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (page_id, follower_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_remote_subs_page ON page_remote_subscribers(page_id)`,
+
+	`CREATE TABLE IF NOT EXISTS page_ap_delivery_queue (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		actor_page_id UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		inbox_url     TEXT        NOT NULL,
+		activity      JSONB       NOT NULL,
+		attempts      INT         NOT NULL DEFAULT 0,
+		last_error    TEXT        NOT NULL DEFAULT '',
+		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_ap_delivery_next ON page_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
 }

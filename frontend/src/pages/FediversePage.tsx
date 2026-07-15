@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { federationApi, usersApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { Search, UserPlus, UserMinus, Clock } from 'lucide-react'
+import { Search, UserPlus, UserMinus, Clock, Bell, BellOff } from 'lucide-react'
 
 export default function FediversePage() {
   const qc = useQueryClient()
@@ -42,6 +42,11 @@ export default function FediversePage() {
 
   const unfollow = useMutation({
     mutationFn: (id: string) => federationApi.unfollowFediverseAccount(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
+  })
+
+  const toggleNotify = useMutation({
+    mutationFn: ({ id, notify }: { id: string, notify: boolean }) => federationApi.toggleFollowNotify(id, notify),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
   })
 
@@ -140,6 +145,15 @@ export default function FediversePage() {
                 <span className="flex items-center gap-1 text-xs text-agora-400 flex-shrink-0">
                   <Clock size={12} /> Requested
                 </span>
+              )}
+              {f.accepted && (
+                <button
+                  onClick={() => toggleNotify.mutate({ id: f.id, notify: !f.notify })}
+                  disabled={toggleNotify.isPending}
+                  title={f.notify ? 'Notifications on for this account' : 'Notifications off for this account'}
+                  className={`flex-shrink-0 p-1.5 rounded-full transition-colors ${f.notify ? 'text-agora-700 bg-agora-100 dark:bg-agora-700 dark:text-white' : 'text-agora-400 hover:text-agora-600'}`}>
+                  {f.notify ? <Bell size={15} /> : <BellOff size={15} />}
+                </button>
               )}
               <button
                 onClick={() => unfollow.mutate(f.id)}

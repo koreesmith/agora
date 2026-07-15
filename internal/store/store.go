@@ -766,4 +766,12 @@ var schema = []string{
 	// whether YOUR OWN posts federate, not whether you're notified about
 	// accounts you follow).
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS fediverse_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-166: per-followed-account notification opt-in. Defaults false —
+	// following a fediverse account should not, by itself, start notifying
+	// you of their posts, mirroring how following a local profile doesn't
+	// either. fediverse_notifications_enabled above is still checked too and
+	// remains the global kill switch; both must be true for a notification
+	// to fire.
+	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
 }

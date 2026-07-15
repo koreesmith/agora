@@ -741,7 +741,7 @@ func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, us
 		return
 	}
 
-	profile, err := fetchActorProfile(followerActor)
+	profile, err := s.fetchActorProfileSigned(u.ID, followerActor)
 	if err != nil || profile.Inbox == "" {
 		return
 	}
@@ -780,7 +780,7 @@ func (s *Service) handleInboundFollowPage(followID, followerActor, objectURL, sl
 		return
 	}
 
-	profile, err := fetchActorProfile(followerActor)
+	profile, err := s.fetchActorProfileSignedAsPage(p.ID, followerActor)
 	if err != nil || profile.Inbox == "" {
 		return
 	}
@@ -955,7 +955,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
-	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -992,13 +992,13 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
 func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string) {
-	var followed bool
-	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_following WHERE followed_actor_url = $1 AND accepted = true)`, actorURL).Scan(&followed)
-	if !followed {
+	var followerUserID string
+	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
+	if followerUserID == "" {
 		return
 	}
 
-	remoteUserID, err := s.getOrCreateRemoteAPUser(actorURL)
+	remoteUserID, err := s.getOrCreateRemoteAPUser(actorURL, followerUserID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -1143,15 +1143,18 @@ func localPostIDFromURL(u, instanceDomain string) string {
 // getOrCreateRemoteAPUser returns the local stub user id for a remote AP
 // actor, fetching and caching their profile on first sight. Distinct from
 // getOrCreateRemoteUser (federation.go), which is the old custom protocol's
-// stub creation via its own non-standard profile endpoint.
-func (s *Service) getOrCreateRemoteAPUser(actorURL string) (string, error) {
+// stub creation via its own non-standard profile endpoint. signerUserID is
+// whichever local user this cache-miss fetch is happening on behalf of
+// (a reply's recipient, an existing follower, etc.) — the fetch is signed as
+// them so authorized-fetch instances like Threads don't blanket-404 it.
+func (s *Service) getOrCreateRemoteAPUser(actorURL, signerUserID string) (string, error) {
 	var id string
 	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
 	if id != "" {
 		return id, nil
 	}
 
-	profile, err := fetchActorProfile(actorURL)
+	profile, err := s.fetchActorProfileSigned(signerUserID, actorURL)
 	if err != nil {
 		return "", err
 	}
@@ -1253,7 +1256,7 @@ func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMess
 	if !ok {
 		return
 	}
-	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -1317,7 +1320,7 @@ func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, object
 	if !ok {
 		return
 	}
-	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor)
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -1395,33 +1398,13 @@ type remoteActorProfile struct {
 	IconURL           string
 }
 
-// fetchActorProfile dereferences a remote actor URL (via the SSRF-safe
-// fedHTTPClient) and returns the fields we care about. Unsigned — most
-// fediverse software (Mastodon et al.) serves actor documents to anonymous
-// GETs, but some (Threads, and Mastodon instances with AUTHORIZED_FETCH
-// enabled) require every actor fetch to carry a valid HTTP Signature and
-// return a blanket 404 otherwise. Callers that have a local user context to
-// sign as should prefer fetchActorProfileSigned.
-func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
-	if !strings.HasPrefix(actorURL, "https://") {
-		return nil, fmt.Errorf("actor url must be https")
-	}
-	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/activity+json")
-	return doActorProfileFetch(req)
-}
-
-// fetchActorProfileSigned is fetchActorProfile's signed counterpart, needed
-// for instances (Threads chief among them) that enforce "authorized fetch" —
-// requiring a valid HTTP Signature on every actor GET, not just inbound
-// activity deliveries. Signs as userID's own actor, generating a keypair for
-// them first if they don't have one yet (mirrors deliverAPActivity's own
-// lazy key handling for outbound POSTs). An empty-body GET still needs a
-// Digest header for our own signedHeaderList to be self-consistent; SHA-256
-// of the empty string is the standard value fediverse verifiers expect here.
+// fetchActorProfileSigned dereferences a remote actor URL (via the SSRF-safe
+// fedHTTPClient), signed as userID's own actor — needed for instances
+// (Threads chief among them) that enforce "authorized fetch", requiring a
+// valid HTTP Signature on every actor GET, not just inbound activity
+// deliveries, and returning a blanket 404 to anonymous requests otherwise.
+// Generates a keypair for userID first if they don't have one yet (mirrors
+// deliverAPActivity's own lazy key handling for outbound POSTs).
 func (s *Service) fetchActorProfileSigned(userID, actorURL string) (*remoteActorProfile, error) {
 	if !strings.HasPrefix(actorURL, "https://") {
 		return nil, fmt.Errorf("actor url must be https")
@@ -1437,12 +1420,42 @@ func (s *Service) fetchActorProfileSigned(userID, actorURL string) (*remoteActor
 		return nil, err
 	}
 
+	return signedActorProfileFetch(actorURL, s.actorKeyID(username), privKey)
+}
+
+// fetchActorProfileSignedAsPage mirrors fetchActorProfileSigned but signs as
+// a Page actor's own key instead of a user's — needed by
+// handleInboundFollowPage, which has no local user in context to sign as.
+func (s *Service) fetchActorProfileSignedAsPage(pageID, actorURL string) (*remoteActorProfile, error) {
+	if !strings.HasPrefix(actorURL, "https://") {
+		return nil, fmt.Errorf("actor url must be https")
+	}
+
+	var slug, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT slug, federation_public_key, federation_private_key FROM pages WHERE id = $1`, pageID).
+		Scan(&slug, &pubPEM, &privPEM); err != nil {
+		return nil, err
+	}
+	_, _, privKey, err := s.getOrCreatePageKeyPair(pageID, pubPEM, privPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	return signedActorProfileFetch(actorURL, s.pageActorKeyID(slug), privKey)
+}
+
+// signedActorProfileFetch is the key-agnostic signing+fetch body shared by
+// fetchActorProfileSigned and fetchActorProfileSignedAsPage. An empty-body
+// GET still needs a Digest header for our own signedHeaderList to be
+// self-consistent; SHA-256 of the empty string is the standard value
+// fediverse verifiers expect here.
+func signedActorProfileFetch(actorURL, keyID string, privKey *rsa.PrivateKey) (*remoteActorProfile, error) {
 	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/activity+json")
-	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+	if err := signRequest(req, keyID, privKey, []byte{}); err != nil {
 		return nil, err
 	}
 	return doActorProfileFetch(req)
@@ -1486,7 +1499,7 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 // our own local actors; this one queries a REMOTE instance's WebFinger
 // endpoint to turn "user@instance.tld" into that user's actor URL, the first
 // hop of resolving a typed-in fediverse handle (the second hop is
-// fetchActorProfile, above).
+// fetchActorProfileSigned, above).
 func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
 	if !isValidInstanceHost(domain) {
 		return "", fmt.Errorf("invalid instance host")
@@ -1831,7 +1844,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		if !list[i].Accepted || list[i].UserID != "" {
 			continue
 		}
-		uid, err := s.getOrCreateRemoteAPUser(list[i].ActorURL)
+		uid, err := s.getOrCreateRemoteAPUser(list[i].ActorURL, userID)
 		if err != nil || uid == "" {
 			continue
 		}

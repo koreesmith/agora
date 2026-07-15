@@ -697,6 +697,8 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			s.handleInboundUndoLike(verifiedActor, inner.Object)
 		case "Announce":
 			s.handleInboundUndoAnnounce(verifiedActor, inner.Object)
+		case "Block":
+			s.handleInboundUndoBlock(verifiedActor, inner.Object)
 		}
 	case "Create":
 		s.handleInboundCreate(verifiedActor, a.Object)
@@ -708,6 +710,8 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
 		s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+	case "Block":
+		s.handleInboundBlock(verifiedActor, a.Object)
 	case "Accept":
 		s.handleInboundAcceptFollow(verifiedActor, a.Object)
 	case "Reject":
@@ -837,6 +841,63 @@ func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.R
 		}
 		s.db.Exec(`DELETE FROM page_remote_subscribers WHERE page_id = $1 AND follower_actor_url = $2`, pageID, followerActor)
 	}
+}
+
+// ── Inbound Block/Undo(Block) (AGORA-170) ─────────────────────────────────────
+//
+// Recorded per local user (only — page actors have no blocking concept in
+// this ticket's scope), keyed by inbox URL so enqueueAPDelivery can filter
+// every outbound path from one place rather than needing a guard at each of
+// its call sites. Mirrors handleInboundFollowUser's own inbox resolution.
+
+func (s *Service) handleInboundBlock(blockerActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain)
+	if username == "" {
+		return
+	}
+	var userID string
+	s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
+	if userID == "" {
+		return
+	}
+
+	var blockerInbox string
+	if profile, err := s.fetchActorProfileSigned(userID, blockerActor); err == nil {
+		blockerInbox = profile.Inbox
+	}
+
+	s.db.Exec(`
+		INSERT INTO ap_blocked_by (local_user_id, blocker_actor_url, blocker_inbox_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (local_user_id, blocker_actor_url) DO UPDATE SET blocker_inbox_url = $3
+	`, userID, blockerActor, blockerInbox)
+
+	// Mirrors what a local block already does (auto-unfriend) — if the local
+	// user follows the actor who just blocked them, that follow is now
+	// pointless (the blocker will never accept/keep serving them) and worth
+	// clearing so it doesn't linger as a dead entry in "Your follows".
+	s.db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, blockerActor)
+}
+
+func (s *Service) handleInboundUndoBlock(blockerActor string, objectRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain)
+	if username == "" {
+		return
+	}
+	var userID string
+	s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
+	if userID == "" {
+		return
+	}
+	s.db.Exec(`DELETE FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_actor_url = $2`, userID, blockerActor)
 }
 
 // ── Inbound Accept/Reject(Follow) — outbound-follow confirmation (AGORA-146) ──
@@ -2574,6 +2635,18 @@ func (s *Service) deliverToFollowers(userID string, activity map[string]any) {
 }
 
 func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
+	// AGORA-170: a single central guard for every outbound delivery path
+	// (followers broadcast, direct replies, mentions, likes, announces) —
+	// skip an inbox belonging to an actor who has blocked this local user,
+	// rather than needing the same check at each of this function's many
+	// call sites.
+	var blocked bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_inbox_url = $2 AND blocker_inbox_url != '')`,
+		userID, inboxURL).Scan(&blocked)
+	if blocked {
+		return
+	}
+
 	payload, err := json.Marshal(activity)
 	if err != nil {
 		return

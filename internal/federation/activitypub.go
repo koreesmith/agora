@@ -702,6 +702,8 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		s.handleInboundCreate(verifiedActor, a.Object)
 	case "Update":
 		s.handleInboundUpdate(verifiedActor, a.Object)
+	case "Delete":
+		s.handleInboundAPDelete(verifiedActor, a.Object)
 	case "Like":
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
@@ -1047,6 +1049,44 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+}
+
+// handleInboundAPDelete is handleInboundCreate's removal-time counterpart
+// (AGORA-169) — a followed account has deleted a post Agora already
+// ingested (top-level, or a reply into a local thread), and it shouldn't
+// keep showing up here indefinitely just because the origin took it down.
+// A Delete's object is either a bare object-id string or a Tombstone
+// ({"id": ..., "type": "Tombstone"}) — both are handled. Named distinctly
+// from federation.go's handleInboundDelete, which is the older custom
+// pre-ActivityPub protocol's own unrelated delete handler.
+func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.RawMessage) {
+	var objectID string
+	if err := json.Unmarshal(objectRaw, &objectID); err != nil || objectID == "" {
+		var tombstone struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(objectRaw, &tombstone); err != nil || tombstone.ID == "" {
+			return
+		}
+		objectID = tombstone.ID
+	}
+
+	domain := domainFromURL(objectID)
+	// Scoped to the post's author actually being verifiedActor — the same
+	// ownership check handleInboundUpdate uses, so one remote actor can't
+	// delete a post ingested from someone else.
+	res, err := s.db.Exec(`
+		UPDATE posts p SET deleted_at = NOW()
+		FROM users u
+		WHERE p.author_id = u.id AND p.remote_post_id = $1 AND p.remote_instance = $2
+		  AND u.ap_actor_url = $3 AND p.deleted_at IS NULL
+	`, objectID, domain, verifiedActor)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return // never ingested, already deleted, or actor mismatch — safe no-op
+	}
 }
 
 // ingestFollowedPost handles a followed account's own top-level post

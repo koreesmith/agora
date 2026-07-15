@@ -44,6 +44,16 @@ type fedSender interface {
 	// broadcast to page_remote_subscribers, not the member's ap_followers.
 	BroadcastPagePostUpdate(pageID, postID string)
 	BroadcastPagePostDelete(pageID, postID string)
+	// DeliverLike/DeliverUnlike (AGORA-158): outbound Like/Undo(Like) when
+	// liking/unliking a remote post — the reverse of handleInboundLike
+	// (AGORA-153), which only ever handled a remote actor liking one of ours.
+	DeliverLike(userID, postID string)
+	DeliverUnlike(userID, postID string)
+	// DeliverAnnounce/DeliverUnannounce (AGORA-159): outbound Announce/
+	// Undo(Announce) when reposting/un-reposting a remote post — the reverse
+	// of handleInboundAnnounce (AGORA-153).
+	DeliverAnnounce(userID, repostID, originalPostID string)
+	DeliverUnannounce(userID, repostID, originalPostID string)
 }
 
 type Service struct {
@@ -1126,8 +1136,9 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var authorID string
-	var wallUserID, pageID *string
-	s.db.QueryRow(`SELECT author_id, wall_user_id, page_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID, &wallUserID, &pageID)
+	var wallUserID, pageID, repostOfID *string
+	s.db.QueryRow(`SELECT author_id, wall_user_id, page_id, repost_of_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&authorID, &wallUserID, &pageID, &repostOfID)
 	if authorID == "" {
 		writeError(w, 404, "post not found")
 		return
@@ -1145,6 +1156,12 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 		if pageID != nil {
 			// AGORA-115: a page post federates under the page's own actor.
 			go s.fed.BroadcastPagePostDelete(*pageID, id)
+		} else if repostOfID != nil {
+			// AGORA-159: a repost was never its own Create — undo the
+			// Announce instead of sending a Delete/Tombstone nobody
+			// remote has a matching Create for. DeliverUnannounce itself
+			// no-ops if the original post isn't remote.
+			go s.fed.DeliverUnannounce(authorID, id, *repostOfID)
 		} else {
 			var username string
 			s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
@@ -1181,6 +1198,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
+	// AGORA-158: federate the like if the target is a remote post.
+	if s.fed != nil {
+		go s.fed.DeliverLike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "liked"})
 }
 
@@ -1188,6 +1209,9 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	if s.fed != nil {
+		go s.fed.DeliverUnlike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unliked"})
 }
 
@@ -1242,6 +1266,13 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
+	// AGORA-158: standard ActivityPub only has a plain Like, no concept of
+	// emoji reaction types — federate only when the reaction is exactly
+	// "like", the same restriction Mastodon's own favourite maps to.
+	if s.fed != nil && req.Type == "like" {
+		go s.fed.DeliverLike(userID, postID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
 }
 
@@ -1250,6 +1281,11 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	// AGORA-158: DeliverUnlike itself no-ops safely if there was never a
+	// federated like to undo (e.g. the reaction was "love", not "like").
+	if s.fed != nil {
+		go s.fed.DeliverUnlike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
 }
 
@@ -1796,6 +1832,11 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 
 	if origAuthorID != "" && origAuthorID != userID {
 		go s.notif.Create(origAuthorID, userID, "post_repost", repostOfID, "")
+	}
+
+	// AGORA-159: federate as an Announce if the original post is remote.
+	if s.fed != nil {
+		go s.fed.DeliverAnnounce(userID, id, repostOfID)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})

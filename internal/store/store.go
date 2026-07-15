@@ -551,10 +551,14 @@ var schema = []string{
 		value       TEXT        NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
-	// AGORA-111: add page filter types
-	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
-	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page'))`,
+	// AGORA-111/AGORA-146: filter_type's allowed set is defined once, further
+	// down (search custom_feed_filters_filter_type_check) — it must stay a
+	// single statement covering every currently-valid value. This migration
+	// runner re-executes the whole schema list on every startup with no
+	// "already applied" tracking, so an earlier, narrower version of this
+	// same ALTER TABLE...ADD CONSTRAINT would permanently fail once any row
+	// used a value only the later version allows (exactly what happened when
+	// AGORA-146 added a second such statement instead of widening this one).
 	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
 
 	// ── Multi-photo posts (AGORA-93) ───────────────────────────────────────

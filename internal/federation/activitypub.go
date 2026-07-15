@@ -1012,16 +1012,19 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	}
 	s.storeInboundImages(postID, imageURLs)
 
-	// AGORA-160/AGORA-164: notify every local user who actively follows this
-	// actor and hasn't opted out of fediverse-post notifications
-	// specifically — a single ingested post is shared by all of them (per
+	// AGORA-160/164/166: notify local users who actively follow this actor,
+	// have the global fediverse-notifications toggle on, AND have
+	// specifically opted into notifications for this account (af.notify) —
+	// following alone no longer implies notification, same as local
+	// profiles. A single ingested post is shared by all of them (per
 	// AGORA-146's design), so this is a loop over followers, not a single
 	// notif.Create.
 	if s.notif != nil {
 		rows, err := s.db.Query(`
 			SELECT af.follower_user_id
 			FROM ap_following af JOIN users u ON u.id = af.follower_user_id
-			WHERE af.followed_actor_url = $1 AND af.accepted = true AND u.fediverse_notifications_enabled = true
+			WHERE af.followed_actor_url = $1 AND af.accepted = true
+			  AND af.notify = true AND u.fediverse_notifications_enabled = true
 		`, actorURL)
 		if err == nil {
 			defer rows.Close()
@@ -1725,6 +1728,32 @@ func (s *Service) UnfollowFediverseAccount(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, 200, map[string]string{"message": "unfollowed"})
 }
 
+// ToggleFollowNotify flips whether the caller gets fediverse_post
+// notifications for a specific followed account's posts (AGORA-166) —
+// independent of the global fediverse_notifications_enabled setting, which
+// stays the all-accounts kill switch checked alongside this one.
+func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Notify bool `json:"notify"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid body")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE ap_following SET notify = $1 WHERE id = $2 AND follower_user_id = $3`, req.Notify, id, userID)
+	if err != nil {
+		writeError(w, 500, "could not update")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"notify": req.Notify})
+}
+
 // ListFollowing returns the caller's fediverse follows, joined with the
 // cached remote-actor profile (populated by getOrCreateRemoteAPUser the
 // first time that actor's posts are ingested) for display and for the
@@ -1732,7 +1761,7 @@ func (s *Service) UnfollowFediverseAccount(w http.ResponseWriter, r *http.Reques
 func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
-		SELECT af.id, af.followed_actor_url, af.accepted, af.created_at,
+		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.created_at,
 		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
 		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
 		FROM ap_following af
@@ -1750,6 +1779,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		ID          string `json:"id"`
 		ActorURL    string `json:"actor_url"`
 		Accepted    bool   `json:"accepted"`
+		Notify      bool   `json:"notify"`
 		CreatedAt   string `json:"created_at"`
 		UserID      string `json:"user_id,omitempty"`
 		Username    string `json:"username,omitempty"`
@@ -1761,7 +1791,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var f followingEntry
 		var createdAt time.Time
-		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &createdAt,
+		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &createdAt,
 			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance); err != nil {
 			continue
 		}

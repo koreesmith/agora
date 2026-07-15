@@ -265,6 +265,7 @@ export const federationApi = {
   followFediverseAccount:   (actorUrl: string) => api.post('/federation/follow', { actor_url: actorUrl }),
   unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
   listFollowing:            ()                 => api.get('/federation/following'),
+  toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

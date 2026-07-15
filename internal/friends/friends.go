@@ -147,9 +147,18 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Check addressee exists
 	var exists bool
-	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, addresseeID).Scan(&exists)
+	var addresseeAPActorURL string
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1), COALESCE((SELECT ap_actor_url FROM users WHERE id = $1), '')`, addresseeID).
+		Scan(&exists, &addresseeAPActorURL)
 	if !exists {
 		writeError(w, 404, "user not found")
+		return
+	}
+	// AGORA-167: a genuine ActivityPub actor has no concept of friending —
+	// only following (federation.FollowFediverseAccount) — so a friend
+	// request here would insert a pending row that can never be accepted.
+	if addresseeAPActorURL != "" {
+		writeError(w, 400, "fediverse accounts can't be added as friends — follow them instead")
 		return
 	}
 

@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { federationApi } from '../api'
+import { federationApi, usersApi } from '../api'
+import { useAuthStore } from '../store/auth'
 import { Search, UserPlus, UserMinus, Clock } from 'lucide-react'
 
 export default function FediversePage() {
   const qc = useQueryClient()
+  const { user, updateUser } = useAuthStore()
   const [handle, setHandle] = useState('')
   const [preview, setPreview] = useState<any>(null)
   const [searchError, setSearchError] = useState('')
@@ -14,6 +16,14 @@ export default function FediversePage() {
     queryFn: () => federationApi.listFollowing().then(r => r.data),
   })
   const following: any[] = followingData?.following ?? []
+
+  const toggleActivityPub = useMutation({
+    mutationFn: () => {
+      const newVal = !user?.activitypub_enabled
+      return usersApi.updateProfile({ activitypub_enabled: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => updateUser({ activitypub_enabled: newVal }),
+  })
 
   const resolve = useMutation({
     mutationFn: (h: string) => federationApi.resolveFediverseHandle(h).then(r => r.data),
@@ -46,6 +56,19 @@ export default function FediversePage() {
   return (
     <div className="max-w-xl mx-auto space-y-6">
       <h1 className="text-xl font-bold">Fediverse</h1>
+
+      <div className="card p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+            <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts. Only applies to public posts — private and friends-only posts are never federated.</p>
+          </div>
+          <button onClick={() => toggleActivityPub.mutate()}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.activitypub_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+      </div>
 
       <div className="card p-5 space-y-4">
         <div>

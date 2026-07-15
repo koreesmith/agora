@@ -182,6 +182,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		DmPrivacy            *string `json:"dm_privacy"`
 		ExpoPushToken        *string `json:"expo_push_token"`
 		ActivityPubEnabled   *bool   `json:"activitypub_enabled"`
+		FediverseNotificationsEnabled *bool `json:"fediverse_notifications_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -227,6 +228,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ActivityPubEnabled != nil {
 		sets = append(sets, fmt.Sprintf("activitypub_enabled = $%d", i)); args = append(args, *req.ActivityPubEnabled); i++
+	}
+	if req.FediverseNotificationsEnabled != nil {
+		sets = append(sets, fmt.Sprintf("fediverse_notifications_enabled = $%d", i)); args = append(args, *req.FediverseNotificationsEnabled); i++
 	}
 
 	args = append(args, userID)

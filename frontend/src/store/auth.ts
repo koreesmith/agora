@@ -16,6 +16,7 @@ export interface User {
   profile_private: boolean
   wall_approval_required: boolean
   activitypub_enabled: boolean
+  fediverse_notifications_enabled: boolean
 }
 
 interface AuthState {

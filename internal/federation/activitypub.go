@@ -1105,6 +1105,15 @@ func (s *Service) getOrCreateRemoteAPUser(actorURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return s.upsertRemoteAPUser(actorURL, profile)
+}
+
+// upsertRemoteAPUser is getOrCreateRemoteAPUser's cache-miss body, split out
+// so a caller that already has a freshly-fetched profile (e.g.
+// FollowFediverseAccount, which fetches it anyway to get the inbox URL)
+// doesn't need to fetch it again over the network a second time.
+func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfile) (string, error) {
+	var id string
 	domain := domainFromURL(actorURL)
 	handle := profile.PreferredUsername
 	if handle == "" {
@@ -1116,7 +1125,7 @@ func (s *Service) getOrCreateRemoteAPUser(actorURL string) (string, error) {
 	}
 	syntheticUsername := handle + "@" + domain
 
-	err = s.db.QueryRow(`
+	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
 		                   ap_actor_url, ap_inbox_url)
@@ -1519,6 +1528,13 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Eagerly create the local stub for this remote actor now, using the
+	// profile we already fetched above — otherwise it wouldn't exist until
+	// their first post arrives, leaving the fediverse_account custom-feed
+	// filter picker with nothing to offer for an account that's followed
+	// but hasn't posted anything new since.
+	s.upsertRemoteAPUser(req.ActorURL, profile)
+
 	actor := s.actorURL(username)
 	follow := map[string]any{
 		"@context": "https://www.w3.org/ns/activitystreams",
@@ -1576,7 +1592,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
 		SELECT af.id, af.followed_actor_url, af.accepted, af.created_at,
-		       COALESCE(u.id, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
 		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
 		FROM ap_following af
 		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
@@ -1611,6 +1627,25 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 		list = append(list, f)
 	}
+
+	// Backfill: a follow accepted before the stub-eager-creation fix (or one
+	// whose stub creation failed at follow time) has no matching users row
+	// yet, which would otherwise leave it permanently missing from the
+	// fediverse_account custom-feed filter picker. Self-healing — this only
+	// does real work once per such entry, since upsertRemoteAPUser caches.
+	for i := range list {
+		if !list[i].Accepted || list[i].UserID != "" {
+			continue
+		}
+		uid, err := s.getOrCreateRemoteAPUser(list[i].ActorURL)
+		if err != nil || uid == "" {
+			continue
+		}
+		list[i].UserID = uid
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance FROM users WHERE id = $1`, uid).
+			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance)
+	}
+
 	if list == nil {
 		list = []followingEntry{}
 	}

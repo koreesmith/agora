@@ -1012,11 +1012,17 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	}
 	s.storeInboundImages(postID, imageURLs)
 
-	// AGORA-160: notify every local user who actively follows this actor —
-	// a single ingested post is shared by all of them (per AGORA-146's
-	// design), so this is a loop over followers, not a single notif.Create.
+	// AGORA-160/AGORA-164: notify every local user who actively follows this
+	// actor and hasn't opted out of fediverse-post notifications
+	// specifically — a single ingested post is shared by all of them (per
+	// AGORA-146's design), so this is a loop over followers, not a single
+	// notif.Create.
 	if s.notif != nil {
-		rows, err := s.db.Query(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true`, actorURL)
+		rows, err := s.db.Query(`
+			SELECT af.follower_user_id
+			FROM ap_following af JOIN users u ON u.id = af.follower_user_id
+			WHERE af.followed_actor_url = $1 AND af.accepted = true AND u.fediverse_notifications_enabled = true
+		`, actorURL)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -1143,13 +1149,21 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	}
 	syntheticUsername := handle + "@" + domain
 
+	// AGORA-164: profile_private defaults to TRUE for any users row that
+	// doesn't explicitly set it, which meant every remote stub was
+	// unreachable via GetPost's non-author access check (a local viewer can
+	// never be "friends" with a remote stub) — the post rendered fine inside
+	// a custom feed (execCustomFeed doesn't check profile_private) but its
+	// permalink 403'd for everyone. A followed remote account's posts are
+	// public by definition (ingestFollowedPost only ever ingests public
+	// posts), so the stub itself has no reason to read as private.
 	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
-		                   ap_actor_url, ap_inbox_url)
-		VALUES ($1, $1, '', $2, $3, $4, true, true, $5, $6, NOW(), $7, $8)
+		                   ap_actor_url, ap_inbox_url, profile_private)
+		VALUES ($1, $1, '', $2, $3, $4, true, true, $5, $6, NOW(), $7, $8, false)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8
+		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
 		RETURNING id
 	`, syntheticUsername, displayName, profile.IconURL, profile.Summary,
 		handle, domain, actorURL, profile.Inbox,

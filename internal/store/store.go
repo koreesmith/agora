@@ -751,4 +751,19 @@ var schema = []string{
 	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
 	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
 		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all'))`,
+
+	// AGORA-164: remote-actor stubs (created by upsertRemoteAPUser) never
+	// explicitly set profile_private, which defaults to TRUE — every
+	// followed fediverse account's stub was created private, so GetPost's
+	// non-author access check 403'd its permalink for everyone (the post
+	// still rendered fine inside a custom feed, which doesn't check
+	// profile_private). upsertRemoteAPUser itself now sets it to false for
+	// new/updated stubs; this backfills rows created before that fix.
+	`UPDATE users SET profile_private = false WHERE is_remote = true AND ap_actor_url != '' AND profile_private = true`,
+
+	// AGORA-164: per-account opt-out for the fediverse_post notification
+	// specifically, distinct from activitypub_enabled (which controls
+	// whether YOUR OWN posts federate, not whether you're notified about
+	// accounts you follow).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS fediverse_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
 }

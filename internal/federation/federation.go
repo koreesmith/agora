@@ -37,6 +37,8 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// Standard ActivityPub discovery — what Mastodon/Pleroma/etc. actually query.
 	r.Get("/.well-known/webfinger", s.WebFinger)
 	r.Get("/.well-known/host-meta", s.HostMeta)
+	r.Get("/.well-known/nodeinfo", s.NodeInfoDiscovery)
+	r.Get("/nodeinfo/2.0",         s.NodeInfo)
 	r.Post("/federation/inbox",          s.Inbox)
 	r.Get("/federation/users/{handle}",  s.GetUser)
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
@@ -108,6 +110,51 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 		"user_count":  userCount,
 		"software":    "agora",
 		"rules":       rules,
+	})
+}
+
+// ── NodeInfo (AGORA-171) ───────────────────────────────────────────────────────
+//
+// The standard other fediverse software (Mastodon's own "About this server"
+// federation panel, instance directories, block-list tooling) uses to
+// discover basic facts about a remote instance — distinct from WebFinger
+// (resolves a single actor) and agora-instance (Agora's own bespoke, richer
+// instance-info endpoint predating this).
+
+func (s *Service) NodeInfoDiscovery(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"links": []map[string]string{
+			{
+				"rel":  "http://nodeinfo.diaspora.software/ns/schema/2.0",
+				"href": strings.TrimRight(s.cfg.InstanceDomain, "/") + "/nodeinfo/2.0",
+			},
+		},
+	})
+}
+
+func (s *Service) NodeInfo(w http.ResponseWriter, r *http.Request) {
+	var userCount int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false AND is_suspended = false`).Scan(&userCount)
+
+	writeJSON(w, 200, map[string]any{
+		"version": "2.0",
+		"software": map[string]string{
+			"name":    "agora",
+			"version": "2.0.0",
+		},
+		"protocols": []string{"activitypub"},
+		"services": map[string][]string{
+			"inbound":  {},
+			"outbound": {},
+		},
+		// Agora has no registration-closed/invite-only setting today —
+		// signup is always open, so this is unconditionally true rather
+		// than reading a config value that doesn't exist yet.
+		"openRegistrations": true,
+		"usage": map[string]any{
+			"users": map[string]int{"total": userCount},
+		},
+		"metadata": map[string]any{},
 	})
 }
 

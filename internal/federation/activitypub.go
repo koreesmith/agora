@@ -917,10 +917,19 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
+	// AGORA-161: video attachments reuse Agora's existing native video-post
+	// columns (video_url/video_thumb_url) — only the first one is kept,
+	// mirroring how Agora's own composer only supports a single video per
+	// post. Audio-only attachments have no Agora post-type equivalent yet
+	// and are intentionally dropped (tracked separately, not this ticket).
 	var imageURLs []string
+	var videoURL string
 	for _, a := range note.Attachment {
-		if strings.HasPrefix(a.MediaType, "image/") && a.URL != "" {
+		switch {
+		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
 			imageURLs = append(imageURLs, a.URL)
+		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
+			videoURL = a.URL
 		}
 	}
 
@@ -929,7 +938,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// followed account's own post (ingested), handled entirely separately
 	// from the reply-threading path below.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs)
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL)
 		return
 	}
 
@@ -965,6 +974,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 	s.storeInboundImages(commentID, imageURLs)
+	s.storeInboundVideo(commentID, videoURL)
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
@@ -981,7 +991,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string) {
 	var followed bool
 	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_following WHERE followed_actor_url = $1 AND accepted = true)`, actorURL).Scan(&followed)
 	if !followed {
@@ -1011,6 +1021,7 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 		return
 	}
 	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundVideo(postID, videoURL)
 
 	// AGORA-160/164/166: notify local users who actively follow this actor,
 	// have the global fediverse-notifications toggle on, AND have
@@ -1052,6 +1063,18 @@ func (s *Service) storeInboundImages(postID string, imageURLs []string) {
 			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
 		}
 	}
+}
+
+// storeInboundVideo persists a remote Note's video attachment into the same
+// video_url column Agora's own native video posts use (AGORA-161) — no
+// video_thumb_url equivalent exists in ActivityPub's Attachment shape, so
+// that column is left at its default empty string; PostCard already treats
+// video_thumb_url as optional.
+func (s *Service) storeInboundVideo(postID, videoURL string) {
+	if videoURL == "" {
+		return
+	}
+	s.db.Exec(`UPDATE posts SET video_url = $1 WHERE id = $2`, videoURL, postID)
 }
 
 // resolveReplyTarget resolves an inReplyTo URL to a local insertion point,

@@ -774,4 +774,21 @@ var schema = []string{
 	// remains the global kill switch; both must be true for a notification
 	// to fire.
 	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-170: records a remote actor's Block of a local user, keyed by
+	// inbox URL (not just actor URL) so enqueueAPDelivery — which only ever
+	// sees an inbox URL, not the actor behind it — can filter every outbound
+	// delivery path (followers broadcast, direct replies, mentions, likes,
+	// announces) from one central place, rather than needing a guard at each
+	// of its dozen-plus call sites. The fediverse-facing analog of the local
+	// blocks table, which only governs local-to-local visibility.
+	`CREATE TABLE IF NOT EXISTS ap_blocked_by (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		blocker_actor_url   TEXT        NOT NULL,
+		blocker_inbox_url   TEXT        NOT NULL DEFAULT '',
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, blocker_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_blocked_by_inbox ON ap_blocked_by(local_user_id, blocker_inbox_url)`,
 }

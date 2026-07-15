@@ -159,6 +159,11 @@ func main() {
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
 			pages.RegisterRoutes(r, pagesSvc)
 			interactions.RegisterRoutes(r, interactionsSvc)
+			// Only ever called by Agora's own authenticated frontend (SearchPage,
+			// FediversePage) — must live under /api like every other frontend
+			// call, not at the bare /federation/... path used by remote
+			// fediverse servers dereferencing our public actor/WebFinger URLs.
+			federation.RegisterAuthedRoutes(r, fedSvc)
 		})
 
 		// Moderator or admin — content moderation actions
@@ -177,12 +182,10 @@ func main() {
 		})
 	})
 
-	// Federation endpoints
+	// Federation endpoints — public, unprefixed: WebFinger/host-meta/actor
+	// docs/inbox are dereferenced directly by remote fediverse servers at
+	// well-known paths, not through /api.
 	federation.RegisterRoutes(r, fedSvc)
-	r.Group(func(r chi.Router) {
-		r.Use(authSvc.Middleware)
-		federation.RegisterAuthedRoutes(r, fedSvc)
-	})
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

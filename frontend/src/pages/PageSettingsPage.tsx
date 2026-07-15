@@ -25,6 +25,7 @@ export default function PageSettingsPage() {
   const [privacy, setPrivacy] = useState('public')
   const [avatarUrl, setAvatarUrl] = useState('')
   const [coverUrl, setCoverUrl] = useState('')
+  const [activityPubEnabled, setActivityPubEnabled] = useState(true)
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const [uploadingCover, setUploadingCover] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -43,6 +44,7 @@ export default function PageSettingsPage() {
       setPrivacy(page.privacy)
       setAvatarUrl(page.avatar_url || '')
       setCoverUrl(page.cover_url || '')
+      setActivityPubEnabled(page.activitypub_enabled ?? true)
     }
   }, [page])
 
@@ -54,6 +56,7 @@ export default function PageSettingsPage() {
       privacy,
       avatar_url: avatarUrl,
       cover_url: coverUrl,
+      activitypub_enabled: activityPubEnabled,
     }),
     onSuccess: () => {
       setSaved(true)
@@ -211,6 +214,21 @@ export default function PageSettingsPage() {
           <p className="text-xs text-agora-400 mt-1">
             {privacy === 'private' ? 'Only you can see this page.' : 'Anyone can find and subscribe to this page.'}
           </p>
+        </div>
+
+        {/* Fediverse (AGORA-115) */}
+        <div className="flex items-center justify-between py-2 border-t border-agora-100 dark:border-agora-700 pt-4">
+          <div>
+            <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+            <p className="text-xs text-agora-400">
+              Let Mastodon and other fediverse apps discover, follow, and see posts from this page.
+            </p>
+          </div>
+          <button
+            onClick={() => setActivityPubEnabled(v => !v)}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${activityPubEnabled ? 'bg-agora-700' : 'bg-agora-200'}`}>
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${activityPubEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
         </div>
 
         {/* Save */}

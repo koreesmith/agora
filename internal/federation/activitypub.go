@@ -11,11 +11,13 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/auth"
 )
 
 // Standard ActivityPub support — WebFinger, actor documents, HTTP-Signature
@@ -702,6 +704,10 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
 		s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+	case "Accept":
+		s.handleInboundAcceptFollow(verifiedActor, a.Object)
+	case "Reject":
+		s.handleInboundRejectFollow(verifiedActor, a.Object)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -829,12 +835,56 @@ func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.R
 	}
 }
 
-// ── Inbound Create (replies into threads we own) ──────────────────────────────
+// ── Inbound Accept/Reject(Follow) — outbound-follow confirmation (AGORA-146) ──
+//
+// The remote server echoes the original Follow's "actor" (us) and "object"
+// (them) back inside the Accept/Reject — no separately-stored follow ID is
+// needed to match it to the right ap_following row: follow.Actor tells us
+// which local user's Follow this confirms, and verifiedActor (the Accept's
+// own signer) is who's confirming it, which must be followed_actor_url.
 
-// handleInboundCreate ingests a reply from the fediverse into an existing
-// Agora-owned thread. Top-level remote posts (no inReplyTo, or inReplyTo not
-// resolving to something we own) are not ingested — that's AGORA-146's scope,
-// a general fediverse timeline, not this ticket's reply-threading.
+func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+	var follow struct {
+		Actor string `json:"actor"`
+	}
+	if err := json.Unmarshal(objectRaw, &follow); err != nil || follow.Actor == "" {
+		return
+	}
+	username := usernameFromActorURL(follow.Actor, s.cfg.InstanceDomain)
+	if username == "" {
+		return
+	}
+	var userID string
+	s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
+	if userID == "" {
+		return
+	}
+	s.db.Exec(`UPDATE ap_following SET accepted = true WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, verifiedActor)
+}
+
+// handleInboundRejectFollow removes the pending ap_following row so the UI
+// reverts to "not following" and the user can retry or give up.
+func (s *Service) handleInboundRejectFollow(verifiedActor string, objectRaw json.RawMessage) {
+	var follow struct {
+		Actor string `json:"actor"`
+	}
+	if err := json.Unmarshal(objectRaw, &follow); err != nil || follow.Actor == "" {
+		return
+	}
+	username := usernameFromActorURL(follow.Actor, s.cfg.InstanceDomain)
+	if username == "" {
+		return
+	}
+	var userID string
+	s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
+	if userID == "" {
+		return
+	}
+	s.db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, verifiedActor)
+}
+
+// ── Inbound Create (replies into threads we own, or a followed account's own
+//    top-level posts — AGORA-146) ─────────────────────────────────────────────
 func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
 		ID           string `json:"id"`
@@ -842,6 +892,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		Content      string `json:"content"`
 		InReplyTo    string `json:"inReplyTo"`
 		Summary      string `json:"summary"` // AGORA-154: content-warning text, if any
+		Attachment   []struct {
+			MediaType string `json:"mediaType"`
+			URL       string `json:"url"`
+		} `json:"attachment"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -851,7 +905,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	if note.AttributedTo == "" || note.AttributedTo != verifiedActor {
 		return
 	}
-	if note.ID == "" || note.InReplyTo == "" {
+	if note.ID == "" {
 		return
 	}
 
@@ -860,6 +914,22 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	var status string
 	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
 	if status == "blocked" {
+		return
+	}
+
+	var imageURLs []string
+	for _, a := range note.Attachment {
+		if strings.HasPrefix(a.MediaType, "image/") && a.URL != "" {
+			imageURLs = append(imageURLs, a.URL)
+		}
+	}
+
+	// AGORA-146: no inReplyTo means this isn't a reply into a thread we
+	// own — it's either unrelated top-level fediverse noise (dropped) or a
+	// followed account's own post (ingested), handled entirely separately
+	// from the reply-threading path below.
+	if note.InReplyTo == "" {
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs)
 		return
 	}
 
@@ -894,10 +964,65 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// when the row already existed — expected on redelivery, not an error.
 		return
 	}
+	s.storeInboundImages(commentID, imageURLs)
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
 			s.notif.Create(postAuthorID, remoteUserID, "post_comment", rootPostID, "")
+		}
+	}
+}
+
+// ingestFollowedPost handles a followed account's own top-level post
+// (AGORA-146) — distinct from the reply-threading path above, gated on
+// whether any local user actively follows this actor rather than on the
+// post being a reply into a thread Agora already owns. Ingested once
+// regardless of how many local users follow the actor (idempotent insert,
+// same redelivery-tolerant pattern as the reply path) — per-viewer
+// visibility is enforced later at custom-feed query time (execCustomFeed),
+// not here, since a single ingested post is shared by every local follower.
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string) {
+	var followed bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_following WHERE followed_actor_url = $1 AND accepted = true)`, actorURL).Scan(&followed)
+	if !followed {
+		return
+	}
+
+	remoteUserID, err := s.getOrCreateRemoteAPUser(actorURL)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+
+	domain := domainFromURL(noteID)
+	var postID string
+	err = s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, remoteUserID, htmlToPlainText(content), noteID, domain, htmlToPlainText(summary)).Scan(&postID)
+	if err != nil {
+		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
+		// redelivery (or a second local follower's copy of the same
+		// delivery, since Agora presents one shared inbox per actor with no
+		// sharedInbox optimization declared) — expected, not an error.
+		return
+	}
+	s.storeInboundImages(postID, imageURLs)
+}
+
+// storeInboundImages persists a remote Note's image attachments — a single
+// URL into posts.image_url, or all of them into post_photos plus the first
+// into image_url too, mirroring how pages.CreatePost and postImageURLs'
+// read-side already treat the multi-image case.
+func (s *Service) storeInboundImages(postID string, imageURLs []string) {
+	if len(imageURLs) == 0 {
+		return
+	}
+	s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, imageURLs[0], postID)
+	if len(imageURLs) > 1 {
+		for i, u := range imageURLs {
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
 		}
 	}
 }
@@ -1244,6 +1369,252 @@ func fetchActorProfile(actorURL string) (*remoteActorProfile, error) {
 		Summary:           actor.Summary,
 		IconURL:           actor.Icon.URL,
 	}, nil
+}
+
+// resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger
+// HTTP handler above (AGORA-146) — that one answers WebFinger queries about
+// our own local actors; this one queries a REMOTE instance's WebFinger
+// endpoint to turn "user@instance.tld" into that user's actor URL, the first
+// hop of resolving a typed-in fediverse handle (the second hop is
+// fetchActorProfile, above).
+func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
+	if !isValidInstanceHost(domain) {
+		return "", fmt.Errorf("invalid instance host")
+	}
+	resource := url.QueryEscape("acct:" + handle + "@" + domain)
+	req, err := http.NewRequest(http.MethodGet, "https://"+domain+"/.well-known/webfinger?resource="+resource, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/jrd+json, application/json")
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("webfinger returned %d", resp.StatusCode)
+	}
+	var jrd struct {
+		Links []struct {
+			Rel  string `json:"rel"`
+			Type string `json:"type"`
+			Href string `json:"href"`
+		} `json:"links"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&jrd); err != nil {
+		return "", err
+	}
+	for _, l := range jrd.Links {
+		if l.Rel == "self" && (l.Type == "application/activity+json" || l.Type == "application/ld+json") && l.Href != "" {
+			return l.Href, nil
+		}
+	}
+	return "", fmt.Errorf("no self link found for %s@%s", handle, domain)
+}
+
+// ── Search / resolve a fediverse handle (AGORA-146) ───────────────────────────
+
+// APLookup resolves a typed-in fediverse handle (user@instance.tld) or a
+// direct profile URL to a preview card — the "search" AGORA-146 actually
+// needs, since ActivityPub has no fediverse-wide search API. Authed-only
+// (registered via RegisterAuthedRoutes), matching LookupUser's rationale.
+func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(r.URL.Query().Get("handle"))
+	if raw == "" {
+		writeError(w, 400, "handle required")
+		return
+	}
+	raw = strings.TrimPrefix(raw, "@")
+
+	var actorURL string
+	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
+		actorURL = raw
+	} else {
+		parts := strings.SplitN(raw, "@", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			writeError(w, 400, "expected user@instance.tld or a profile URL")
+			return
+		}
+		var err error
+		actorURL, err = resolveActorURLViaWebFinger(parts[0], parts[1])
+		if err != nil {
+			writeError(w, 404, "could not resolve handle")
+			return
+		}
+	}
+
+	domain := domainFromURL(actorURL)
+	var status string
+	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
+	if status == "blocked" {
+		writeError(w, 404, "instance is blocked")
+		return
+	}
+
+	profile, err := fetchActorProfile(actorURL)
+	if err != nil {
+		writeError(w, 404, "could not resolve actor")
+		return
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"actor_url":          actorURL,
+		"preferred_username": profile.PreferredUsername,
+		"name":               profile.Name,
+		"summary":            profile.Summary,
+		"icon_url":           profile.IconURL,
+		"instance":           domain,
+	})
+}
+
+// ── Outbound Follow / Unfollow of a remote fediverse account (AGORA-146) ──────
+
+// FollowFediverseAccount sends a Follow from the caller's own actor to a
+// remote actor resolved via APLookup. The inbox is always re-derived
+// server-side (fetchActorProfile) rather than trusting a client-supplied
+// value, since a spoofed inbox URL would redirect delivery (and thus the
+// remote server's confirmation) wherever an attacker wants.
+func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	var req struct {
+		ActorURL string `json:"actor_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ActorURL == "" {
+		writeError(w, 400, "actor_url required")
+		return
+	}
+	if !strings.HasPrefix(req.ActorURL, "https://") {
+		writeError(w, 400, "actor_url must be https")
+		return
+	}
+
+	domain := domainFromURL(req.ActorURL)
+	var status string
+	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
+	if status == "blocked" {
+		writeError(w, 403, "instance is blocked")
+		return
+	}
+
+	profile, err := fetchActorProfile(req.ActorURL)
+	if err != nil || profile.Inbox == "" {
+		writeError(w, 404, "could not resolve actor")
+		return
+	}
+
+	var username string
+	s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+	if username == "" {
+		writeError(w, 404, "user not found")
+		return
+	}
+
+	if _, err := s.db.Exec(`
+		INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		VALUES ($1, $2, $3, false)
+		ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE SET followed_inbox_url = $3
+	`, userID, req.ActorURL, profile.Inbox); err != nil {
+		writeError(w, 500, "could not follow")
+		return
+	}
+
+	actor := s.actorURL(username)
+	follow := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + fmt.Sprintf("/follows/%d", time.Now().UnixNano()),
+		"type":     "Follow",
+		"actor":    actor,
+		"object":   req.ActorURL,
+	}
+	s.enqueueAPDelivery(userID, profile.Inbox, follow)
+
+	writeJSON(w, 201, map[string]string{"message": "follow requested"})
+}
+
+// UnfollowFediverseAccount deletes the local follow record and sends an
+// outbound Undo(Follow) so the remote server actually stops delivering.
+func (s *Service) UnfollowFediverseAccount(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var actorURL, inboxURL string
+	if err := s.db.QueryRow(`
+		SELECT followed_actor_url, followed_inbox_url FROM ap_following WHERE id = $1 AND follower_user_id = $2
+	`, id, userID).Scan(&actorURL, &inboxURL); err != nil {
+		writeError(w, 404, "not found")
+		return
+	}
+	s.db.Exec(`DELETE FROM ap_following WHERE id = $1 AND follower_user_id = $2`, id, userID)
+
+	var username string
+	s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+	if username != "" && inboxURL != "" {
+		actor := s.actorURL(username)
+		undo := map[string]any{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id":       actor + fmt.Sprintf("/undos/%d", time.Now().UnixNano()),
+			"type":     "Undo",
+			"actor":    actor,
+			"object": map[string]any{
+				"type":   "Follow",
+				"actor":  actor,
+				"object": actorURL,
+			},
+		}
+		s.enqueueAPDelivery(userID, inboxURL, undo)
+	}
+
+	writeJSON(w, 200, map[string]string{"message": "unfollowed"})
+}
+
+// ListFollowing returns the caller's fediverse follows, joined with the
+// cached remote-actor profile (populated by getOrCreateRemoteAPUser the
+// first time that actor's posts are ingested) for display and for the
+// FeedBuilderModal's fediverse_account picker.
+func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	rows, err := s.db.Query(`
+		SELECT af.id, af.followed_actor_url, af.accepted, af.created_at,
+		       COALESCE(u.id, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
+		FROM ap_following af
+		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
+		WHERE af.follower_user_id = $1
+		ORDER BY af.created_at DESC
+	`, userID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type followingEntry struct {
+		ID          string `json:"id"`
+		ActorURL    string `json:"actor_url"`
+		Accepted    bool   `json:"accepted"`
+		CreatedAt   string `json:"created_at"`
+		UserID      string `json:"user_id,omitempty"`
+		Username    string `json:"username,omitempty"`
+		DisplayName string `json:"display_name,omitempty"`
+		AvatarURL   string `json:"avatar_url,omitempty"`
+		Instance    string `json:"instance,omitempty"`
+	}
+	var list []followingEntry
+	for rows.Next() {
+		var f followingEntry
+		var createdAt time.Time
+		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &createdAt,
+			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance); err != nil {
+			continue
+		}
+		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		list = append(list, f)
+	}
+	if list == nil {
+		list = []followingEntry{}
+	}
+	writeJSON(w, 200, map[string]any{"following": list})
 }
 
 // ── Outbound: broadcast public posts to followers ─────────────────────────────

@@ -259,6 +259,12 @@ export const previewApi = {
 // ── Federation ────────────────────────────────────────────────────────────────
 export const federationApi = {
   lookupUser: (handle: string) => api.get('/federation/lookup', { params: { handle } }),
+  // AGORA-146: resolve a fediverse handle/URL to a preview (search), follow/
+  // unfollow a remote account, and list current follows.
+  resolveFediverseHandle:   (handle: string)   => api.get('/federation/ap-lookup', { params: { handle } }),
+  followFediverseAccount:   (actorUrl: string) => api.post('/federation/follow', { actor_url: actorUrl }),
+  unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
+  listFollowing:            ()                 => api.get('/federation/following'),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

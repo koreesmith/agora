@@ -700,6 +700,8 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		}
 	case "Create":
 		s.handleInboundCreate(verifiedActor, a.Object)
+	case "Update":
+		s.handleInboundUpdate(verifiedActor, a.Object)
 	case "Like":
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
@@ -981,6 +983,70 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 			s.notif.Create(postAuthorID, remoteUserID, "post_comment", rootPostID, "")
 		}
 	}
+}
+
+// handleInboundUpdate is handleInboundCreate's edit-time counterpart
+// (AGORA-168) — a followed account's own post or a remote reply we already
+// ingested has been edited on its origin server, and should stop being
+// stale. Deliberately does not fall back to inserting a new row on a
+// cache miss (unlike Create's ON CONFLICT DO NOTHING dance): an Update for a
+// post Agora never ingested in the first place is a safe no-op, not a
+// reason to retroactively ingest it now.
+func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage) {
+	var note struct {
+		ID           string `json:"id"`
+		AttributedTo string `json:"attributedTo"`
+		Content      string `json:"content"`
+		Summary      string `json:"summary"`
+		Attachment   []struct {
+			MediaType string `json:"mediaType"`
+			URL       string `json:"url"`
+		} `json:"attachment"`
+	}
+	if err := json.Unmarshal(objectRaw, &note); err != nil {
+		return
+	}
+	// Same cryptographic tie-back handleInboundCreate does — an edit can only
+	// be applied by the same actor whose signature we already verified.
+	if note.AttributedTo == "" || note.AttributedTo != verifiedActor || note.ID == "" {
+		return
+	}
+
+	domain := domainFromURL(note.ID)
+	var postID string
+	// Scoped to the actor's own remote_post_id/remote_instance pair, joined
+	// through the post's author actually being verifiedActor — a different
+	// remote actor sending an Update can't touch a post they don't own, the
+	// same defense-in-depth resolveFederatableTarget's callers already rely
+	// on for Like/Announce.
+	if err := s.db.QueryRow(`
+		SELECT p.id FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.remote_post_id = $1 AND p.remote_instance = $2 AND u.ap_actor_url = $3 AND p.deleted_at IS NULL
+	`, note.ID, domain, verifiedActor).Scan(&postID); err != nil {
+		return // never ingested, or actor mismatch — safe no-op
+	}
+
+	var imageURLs []string
+	var videoURL string
+	for _, a := range note.Attachment {
+		switch {
+		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
+			imageURLs = append(imageURLs, a.URL)
+		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
+			videoURL = a.URL
+		}
+	}
+
+	s.db.Exec(`
+		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
+		WHERE id = $3
+	`, htmlToPlainText(note.Content), htmlToPlainText(note.Summary), postID)
+	// Attachments are fully replaced, not merged — clear the old multi-image
+	// rows before reapplying whatever the edit currently carries, mirroring
+	// EditPost's own replace-not-append handling of image_urls.
+	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
+	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundVideo(postID, videoURL)
 }
 
 // ingestFollowedPost handles a followed account's own top-level post

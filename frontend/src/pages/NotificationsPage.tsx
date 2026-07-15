@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 const typeIcon: Record<string, React.ReactNode> = {
@@ -30,6 +30,7 @@ const typeIcon: Record<string, React.ReactNode> = {
   page_post:             <BookOpen size={16} className="text-purple-500" />,
   group_tag:             <Users size={16} className="text-agora-500" />,
   page_member_invite:    <UserPlus size={16} className="text-agora-500" />,
+  fediverse_post:        <Globe size={16} className="text-sky-500" />,
 }
 
 const REACTION_EMOJIS: Record<string, string> = {
@@ -61,6 +62,7 @@ const notifText: Record<string, string> = {
   page_post:             'published a new post on a page you follow',
   group_tag:             'tagged your group in a post',
   page_member_invite:    'invited you to join a page as a team member',
+  fediverse_post:        'posted something new on the fediverse',
 }
 
 function notifTarget(n: any): string | null {
@@ -89,6 +91,7 @@ function notifTarget(n: any): string | null {
     case 'group_tag':
       return n.post_id ? `/post/${n.post_id}` : null
     case 'page_post':
+    case 'fediverse_post':
       return n.post_id ? `/post/${n.post_id}` : null
     case 'page_member_invite':
       return n.data ? `/pages/${n.data}/settings` : '/pages'

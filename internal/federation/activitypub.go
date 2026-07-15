@@ -1005,10 +1005,28 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
 		// delivery, since Agora presents one shared inbox per actor with no
-		// sharedInbox optimization declared) — expected, not an error.
+		// sharedInbox optimization declared) — expected, not an error. Also
+		// means the notification loop below only ever runs on the actual
+		// first insert, never on a redelivery/duplicate no-op.
 		return
 	}
 	s.storeInboundImages(postID, imageURLs)
+
+	// AGORA-160: notify every local user who actively follows this actor —
+	// a single ingested post is shared by all of them (per AGORA-146's
+	// design), so this is a loop over followers, not a single notif.Create.
+	if s.notif != nil {
+		rows, err := s.db.Query(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true`, actorURL)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var followerID string
+				if rows.Scan(&followerID) == nil {
+					s.notif.Create(followerID, remoteUserID, "fediverse_post", postID, "")
+				}
+			}
+		}
+	}
 }
 
 // storeInboundImages persists a remote Note's image attachments — a single
@@ -1822,6 +1840,159 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	}
 	activity["to"] = []string{targetActorURL}
 
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// ── Outbound Like / Undo(Like) (AGORA-158) ────────────────────────────────────
+//
+// The reverse of handleInboundLike (AGORA-153), which only ever handled a
+// remote actor liking one of our posts. lookupRemoteTarget is shared by
+// DeliverLike/DeliverUnlike/DeliverAnnounce/DeliverUnannounce — same
+// defense-in-depth remoteness re-check DeliverReply does for its target.
+
+func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remotePostID string, ok bool) {
+	var isRemote bool
+	err := s.db.QueryRow(`
+		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1
+	`, postID).Scan(&isRemote, &actorURL, &inboxURL, &remotePostID)
+	if err != nil || !isRemote || actorURL == "" || inboxURL == "" || remotePostID == "" {
+		return "", "", "", false
+	}
+	return actorURL, inboxURL, remotePostID, true
+}
+
+func (s *Service) DeliverLike(userID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
+	if !ok {
+		return
+	}
+
+	var username string
+	var apEnabled bool
+	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
+		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		return
+	}
+
+	actor := s.actorURL(username)
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + "/likes/" + postID,
+		"type":     "Like",
+		"actor":    actor,
+		"object":   targetRemotePostID,
+	}
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// DeliverUnlike sends the corresponding Undo(Like). Deliberately does not
+// gate on the liker's own activitypub_enabled the way DeliverLike does for
+// the original Like — cleaning up a previously-sent action should still be
+// allowed to propagate even if the user has since opted out, the same way
+// UnfollowFediverseAccount always sends its Undo(Follow) unconditionally.
+func (s *Service) DeliverUnlike(userID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
+	if !ok {
+		return
+	}
+
+	var username string
+	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		return
+	}
+
+	actor := s.actorURL(username)
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + fmt.Sprintf("/undos/%d", time.Now().UnixNano()),
+		"type":     "Undo",
+		"actor":    actor,
+		"object": map[string]any{
+			"type":   "Like",
+			"actor":  actor,
+			"object": targetRemotePostID,
+		},
+	}
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// ── Outbound Announce / Undo(Announce) (AGORA-159) ────────────────────────────
+//
+// The reverse of handleInboundAnnounce (AGORA-153), which only ever handled a
+// remote actor boosting one of our posts.
+
+func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
+	if !ok {
+		return
+	}
+
+	var username string
+	var apEnabled bool
+	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
+		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		return
+	}
+
+	actor := s.actorURL(username)
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + "/announces/" + repostID,
+		"type":     "Announce",
+		"actor":    actor,
+		"object":   targetRemotePostID,
+		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
+		"cc":       []string{actor + "/followers"},
+	}
+	// Fan out to the reposting user's own followers (so the boost shows up
+	// in their timelines, same as any other outbound activity) and also
+	// deliver directly to the original post's author — most Agora users
+	// won't yet have fediverse followers who'd otherwise relay it, and
+	// without a direct copy the origin server would never register the
+	// boost at all.
+	s.deliverToFollowers(userID, activity)
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
+	if !ok {
+		return
+	}
+
+	var username string
+	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		return
+	}
+
+	actor := s.actorURL(username)
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + fmt.Sprintf("/undos/%d", time.Now().UnixNano()),
+		"type":     "Undo",
+		"actor":    actor,
+		"object": map[string]any{
+			"id":     actor + "/announces/" + repostID,
+			"type":   "Announce",
+			"actor":  actor,
+			"object": targetRemotePostID,
+		},
+	}
+	s.deliverToFollowers(userID, activity)
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
 }
 

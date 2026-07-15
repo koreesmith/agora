@@ -74,6 +74,7 @@ func main() {
 	friendSvc.SetFed(fedSvc)
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
+	pagesSvc.SetFed(fedSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()

@@ -42,6 +42,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
 	r.Get("/federation/users/{handle}/followers", s.Followers)
 	r.Get("/federation/search",          s.Search)
+	// AGORA-115: page actors — always ActivityPub JSON, no legacy-protocol
+	// fallback needed since pages never had one.
+	r.Get("/federation/pages/{slug}",           s.GetPageActor)
+	r.Get("/federation/pages/{slug}/outbox",    s.PageOutbox)
+	r.Get("/federation/pages/{slug}/followers", s.PageFollowers)
 }
 
 // RegisterAuthedRoutes registers federation routes that require a valid Agora
@@ -785,6 +790,7 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	}
 	if s.activityPubEnabled() {
 		go s.drainAPQueue()
+		go s.drainPageAPQueue()
 	}
 
 	for {
@@ -798,6 +804,7 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 		case <-apQueueTicker.C:
 			if s.activityPubEnabled() {
 				go s.drainAPQueue()
+				go s.drainPageAPQueue()
 			}
 		case <-syncTicker.C:
 			if s.federationEnabled() {

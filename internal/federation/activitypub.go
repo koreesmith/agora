@@ -81,6 +81,51 @@ func (s *Service) actorKeyID(username string) string {
 	return s.actorURL(username) + "#main-key"
 }
 
+// ── Page actor identity (AGORA-115) ──────────────────────────────────────────
+//
+// A page gets its own ActivityPub actor, distinct from any of its members'
+// personal user actors, at a separate /federation/pages/{slug} path so
+// inbound object URLs are unambiguous about which kind of local actor they
+// name.
+
+type apPage struct {
+	ID          string
+	Slug        string
+	DisplayName string
+	Bio         string
+	AvatarURL   string
+	PubKeyPEM   string
+	PrivKeyPEM  string
+}
+
+// apEligiblePage mirrors apEligibleUser: requires the instance-wide
+// activityPubEnabled() toggle, the page to be public, and the page's own
+// activitypub_enabled opt-out (owner-controlled) to be true.
+func (s *Service) apEligiblePage(slug string) (*apPage, bool) {
+	if !s.activityPubEnabled() {
+		return nil, false
+	}
+	var p apPage
+	err := s.db.QueryRow(`
+		SELECT id, slug, display_name, bio, avatar_url,
+		       federation_public_key, federation_private_key
+		FROM pages
+		WHERE LOWER(slug) = LOWER($1) AND privacy = 'public' AND activitypub_enabled = true
+	`, slug).Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Bio, &p.AvatarURL, &p.PubKeyPEM, &p.PrivKeyPEM)
+	if err != nil {
+		return nil, false
+	}
+	return &p, true
+}
+
+func (s *Service) pageActorURL(slug string) string {
+	return strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/pages/" + slug
+}
+
+func (s *Service) pageActorKeyID(slug string) string {
+	return s.pageActorURL(slug) + "#main-key"
+}
+
 // ── Per-user RSA keys ─────────────────────────────────────────────────────────
 //
 // Standard HTTP Signatures (unlike the custom protocol's single instance-wide
@@ -96,22 +141,10 @@ func (s *Service) getOrCreateUserKeyPair(userID, pubPEM, privPEM string) (string
 		// Fall through and regenerate if the stored PEM is somehow unparseable.
 	}
 
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	pubPEMOut, privPEMOut, priv, err := generateRSAKeyPairPEM()
 	if err != nil {
 		return "", "", nil, err
 	}
-
-	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return "", "", nil, err
-	}
-	privPEMOut := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}))
-
-	pubBytes, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-	if err != nil {
-		return "", "", nil, err
-	}
-	pubPEMOut := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
 
 	if _, err := s.db.Exec(`
 		UPDATE users SET federation_public_key = $1, federation_private_key = $2 WHERE id = $3
@@ -120,6 +153,57 @@ func (s *Service) getOrCreateUserKeyPair(userID, pubPEM, privPEM string) (string
 	}
 
 	log.Printf("federation: generated new RSA keypair for user %s", userID)
+	return pubPEMOut, privPEMOut, priv, nil
+}
+
+// generateRSAKeyPairPEM generates a fresh RSA-2048 keypair, PEM-encoded —
+// the pure-crypto part shared by getOrCreateUserKeyPair and
+// getOrCreatePageKeyPair (AGORA-115), which differ only in which table they
+// persist the result to.
+func generateRSAKeyPairPEM() (pubPEM, privPEM string, priv *rsa.PrivateKey, err error) {
+	priv, err = rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", nil, err
+	}
+	privPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}))
+
+	pubBytes, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		return "", "", nil, err
+	}
+	pubPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
+
+	return pubPEM, privPEM, priv, nil
+}
+
+// getOrCreatePageKeyPair mirrors getOrCreateUserKeyPair but for a Page actor
+// (AGORA-115) — a page's federation identity is independent of any member's
+// personal user key, so it gets its own RSA-2048 keypair stored on the
+// pages row itself.
+func (s *Service) getOrCreatePageKeyPair(pageID, pubPEM, privPEM string) (string, string, *rsa.PrivateKey, error) {
+	if pubPEM != "" && privPEM != "" {
+		if priv, err := parseRSAPrivateKeyPEM(privPEM); err == nil {
+			return pubPEM, privPEM, priv, nil
+		}
+	}
+
+	pubPEMOut, privPEMOut, priv, err := generateRSAKeyPairPEM()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	if _, err := s.db.Exec(`
+		UPDATE pages SET federation_public_key = $1, federation_private_key = $2 WHERE id = $3
+	`, pubPEMOut, privPEMOut, pageID); err != nil {
+		return "", "", nil, err
+	}
+
+	log.Printf("federation: generated new RSA keypair for page %s", pageID)
 	return pubPEMOut, privPEMOut, priv, nil
 }
 
@@ -145,18 +229,37 @@ func (s *Service) WebFinger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, ok := s.apEligibleUser(username)
+	if u, ok := s.apEligibleUser(username); ok {
+		actor := s.actorURL(u.Username)
+		profile := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username
+
+		w.Header().Set("Content-Type", "application/jrd+json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"subject": "acct:" + u.Username + "@" + localDomain,
+			"aliases": []string{actor},
+			"links": []map[string]string{
+				{"rel": "http://webfinger.net/rel/profile-page", "type": "text/html", "href": profile},
+				{"rel": "self", "type": "application/activity+json", "href": actor},
+			},
+		})
+		return
+	}
+
+	// AGORA-115: fall back to a page if no user matches this handle. WebFinger's
+	// namespace doesn't distinguish "user" vs "page" — on a slug/username
+	// collision the user wins (checked first above), a documented edge case
+	// rather than one this endpoint tries to fully resolve.
+	p, ok := s.apEligiblePage(username)
 	if !ok {
 		writeError(w, 404, "not found")
 		return
 	}
-
-	actor := s.actorURL(u.Username)
-	profile := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username
+	actor := s.pageActorURL(p.Slug)
+	profile := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/pages/" + p.Slug
 
 	w.Header().Set("Content-Type", "application/jrd+json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"subject": "acct:" + u.Username + "@" + localDomain,
+		"subject": "acct:" + p.Slug + "@" + localDomain,
 		"aliases": []string{actor},
 		"links": []map[string]string{
 			{"rel": "http://webfinger.net/rel/profile-page", "type": "text/html", "href": profile},
@@ -431,6 +534,123 @@ func (s *Service) Followers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── Page actor document / outbox / followers (AGORA-115) ─────────────────────
+//
+// Unlike GetUser, there's no legacy custom-protocol JSON shape to fall back
+// to for pages — this endpoint always serves the ActivityPub actor document.
+
+func (s *Service) GetPageActor(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	p, ok := s.apEligiblePage(slug)
+	if !ok {
+		writeError(w, 404, "page not found")
+		return
+	}
+
+	pubPEM, _, _, err := s.getOrCreatePageKeyPair(p.ID, p.PubKeyPEM, p.PrivKeyPEM)
+	if err != nil {
+		writeError(w, 500, "key error")
+		return
+	}
+
+	actor := s.pageActorURL(p.Slug)
+	obj := map[string]any{
+		"@context": []string{
+			"https://www.w3.org/ns/activitystreams",
+			"https://w3id.org/security/v1",
+		},
+		"id":                actor,
+		"type":              "Organization",
+		"preferredUsername": p.Slug,
+		"name":              p.DisplayName,
+		"summary":           p.Bio,
+		"inbox":             strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
+		"outbox":            actor + "/outbox",
+		"followers":         actor + "/followers",
+		"url":               strings.TrimRight(s.cfg.InstanceDomain, "/") + "/pages/" + p.Slug,
+		"publicKey": map[string]string{
+			"id":           actor + "#main-key",
+			"owner":        actor,
+			"publicKeyPem": pubPEM,
+		},
+	}
+	if p.AvatarURL != "" {
+		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(p.AvatarURL)}
+	}
+
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(obj)
+}
+
+func (s *Service) PageOutbox(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	p, ok := s.apEligiblePage(slug)
+	if !ok {
+		writeError(w, 404, "page not found")
+		return
+	}
+	actor := s.pageActorURL(p.Slug)
+
+	// Page posts are always visibility='public' (enforced at creation in
+	// pages.CreatePost), so unlike the user outbox there's no per-post
+	// privacy check needed here.
+	rows, err := s.db.Query(`
+		SELECT id, content, content_warning, created_at
+		FROM posts
+		WHERE page_id = $1 AND parent_id IS NULL AND deleted_at IS NULL AND is_remote = false
+		ORDER BY created_at DESC
+		LIMIT 20
+	`, p.ID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	var items []map[string]any
+	for rows.Next() {
+		var id, content, contentWarning string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &content, &contentWarning, &createdAt); err != nil {
+			continue
+		}
+		items = append(items, s.buildCreateActivity(actor, id, content, createdAt, "", contentWarning))
+	}
+	if items == nil {
+		items = []map[string]any{}
+	}
+
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"@context":     "https://www.w3.org/ns/activitystreams",
+		"id":           actor + "/outbox",
+		"type":         "OrderedCollection",
+		"totalItems":   len(items),
+		"orderedItems": items,
+	})
+}
+
+func (s *Service) PageFollowers(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	p, ok := s.apEligiblePage(slug)
+	if !ok {
+		writeError(w, 404, "page not found")
+		return
+	}
+
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM page_remote_subscribers WHERE page_id = $1`, p.ID).Scan(&count)
+
+	actor := s.pageActorURL(p.Slug)
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"@context":   "https://www.w3.org/ns/activitystreams",
+		"id":         actor + "/followers",
+		"type":       "OrderedCollection",
+		"totalItems": count,
+	})
+}
+
 // ── Inbound Follow / Undo(Follow) ─────────────────────────────────────────────
 
 // handleStandardInbox is reached from Inbox (federation.go) once the payload
@@ -492,19 +712,26 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
 	}
-	username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain)
-	if username == "" {
-		return
-	}
-	u, ok := s.apEligibleUser(username)
-	if !ok {
-		return
-	}
 
 	domain := domainFromURL(followerActor)
 	var status string
 	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
 	if status == "blocked" {
+		return
+	}
+
+	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
+		s.handleInboundFollowUser(followID, followerActor, objectURL, username)
+		return
+	}
+	if slug := pageSlugFromActorURL(objectURL, s.cfg.InstanceDomain); slug != "" {
+		s.handleInboundFollowPage(followID, followerActor, objectURL, slug)
+	}
+}
+
+func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string) {
+	u, ok := s.apEligibleUser(username)
+	if !ok {
 		return
 	}
 
@@ -538,21 +765,68 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	s.enqueueAPDelivery(u.ID, followerInbox, accept)
 }
 
+// handleInboundFollowPage mirrors handleInboundFollowUser (AGORA-115), except
+// it records the subscription in page_remote_subscribers and signs the
+// Accept with the page's own key rather than any member's.
+func (s *Service) handleInboundFollowPage(followID, followerActor, objectURL, slug string) {
+	p, ok := s.apEligiblePage(slug)
+	if !ok {
+		return
+	}
+
+	profile, err := fetchActorProfile(followerActor)
+	if err != nil || profile.Inbox == "" {
+		return
+	}
+	followerInbox := profile.Inbox
+
+	s.db.Exec(`
+		INSERT INTO page_remote_subscribers (page_id, follower_actor_url, follower_inbox_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (page_id, follower_actor_url) DO UPDATE SET follower_inbox_url = $3
+	`, p.ID, followerActor, followerInbox)
+
+	followObj := map[string]any{
+		"type":   "Follow",
+		"actor":  followerActor,
+		"object": objectURL,
+	}
+	if followID != "" {
+		followObj["id"] = followID
+	}
+	actor := s.pageActorURL(p.Slug)
+	accept := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       actor + fmt.Sprintf("/accepts/%d", time.Now().UnixNano()),
+		"type":     "Accept",
+		"actor":    actor,
+		"object":   followObj,
+	}
+	s.enqueuePageAPDelivery(p.ID, followerInbox, accept)
+}
+
 func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.RawMessage) {
 	var objectURL string
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
 	}
-	username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain)
-	if username == "" {
+	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
+		var userID string
+		s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
+		if userID == "" {
+			return
+		}
+		s.db.Exec(`DELETE FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2`, userID, followerActor)
 		return
 	}
-	var userID string
-	s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)
-	if userID == "" {
-		return
+	if slug := pageSlugFromActorURL(objectURL, s.cfg.InstanceDomain); slug != "" {
+		var pageID string
+		s.db.QueryRow(`SELECT id FROM pages WHERE LOWER(slug) = LOWER($1)`, slug).Scan(&pageID)
+		if pageID == "" {
+			return
+		}
+		s.db.Exec(`DELETE FROM page_remote_subscribers WHERE page_id = $1 AND follower_actor_url = $2`, pageID, followerActor)
 	}
-	s.db.Exec(`DELETE FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2`, userID, followerActor)
 }
 
 // ── Inbound Create (replies into threads we own) ──────────────────────────────
@@ -671,18 +945,24 @@ func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, vi
 }
 
 // localPostIDFromURL extracts the trailing post/comment UUID from one of our
-// own AP object URLs (.../federation/users/{username}/posts/{id}[/activity]),
-// returning "" for anything that isn't ours.
+// own AP object URLs — either a user actor's
+// (.../federation/users/{username}/posts/{id}[/activity]) or a page actor's
+// (.../federation/pages/{slug}/posts/{id}[/activity]), added by AGORA-115 so
+// future inbound reply/like support for pages doesn't need to touch this
+// parsing again — returning "" for anything that isn't ours.
 func localPostIDFromURL(u, instanceDomain string) string {
-	base := strings.TrimRight(instanceDomain, "/") + "/federation/users/"
-	if !strings.HasPrefix(u, base) {
-		return ""
+	for _, prefix := range []string{"/federation/users/", "/federation/pages/"} {
+		base := strings.TrimRight(instanceDomain, "/") + prefix
+		if !strings.HasPrefix(u, base) {
+			continue
+		}
+		parts := strings.Split(strings.TrimPrefix(u, base), "/")
+		if len(parts) < 3 || parts[1] != "posts" {
+			return ""
+		}
+		return strings.SplitN(parts[2], "#", 2)[0]
 	}
-	parts := strings.Split(strings.TrimPrefix(u, base), "/")
-	if len(parts) < 3 || parts[1] != "posts" {
-		return ""
-	}
-	return strings.SplitN(parts[2], "#", 2)[0]
+	return ""
 }
 
 // getOrCreateRemoteAPUser returns the local stub user id for a remote AP
@@ -899,6 +1179,19 @@ func usernameFromActorURL(u, instanceDomain string) string {
 	return rest
 }
 
+// pageSlugFromActorURL mirrors usernameFromActorURL for page actors
+// (AGORA-115): (.../federation/pages/{slug}), rejecting anything that isn't ours.
+func pageSlugFromActorURL(u, instanceDomain string) string {
+	prefix := strings.TrimRight(instanceDomain, "/") + "/federation/pages/"
+	if !strings.HasPrefix(u, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(u, prefix)
+	rest = strings.SplitN(rest, "/", 2)[0]
+	rest = strings.SplitN(rest, "#", 2)[0]
+	return rest
+}
+
 // remoteActorProfile is what we need from a remote actor document, whether
 // we're just resolving their inbox (Follow accept) or creating a full
 // remote-user stub for them (inbound replies).
@@ -1075,6 +1368,194 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	activity["to"] = []string{targetActorURL}
 
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// ── Outbound: broadcast page posts to page followers (AGORA-115) ─────────────
+//
+// Mirrors BroadcastPublicPost/BroadcastUpdatePost/BroadcastDeletePost, but
+// attributed to the page's own actor rather than whichever member authored
+// the post, and delivered via the page-specific queue/followers tables.
+
+func (s *Service) BroadcastPagePost(pageID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var slug, content, contentWarning string
+	var apEnabled bool
+	var privacy string
+	var createdAt time.Time
+	err := s.db.QueryRow(`
+		SELECT pg.slug, pg.privacy, pg.activitypub_enabled, p.content, p.content_warning, p.created_at
+		FROM posts p JOIN pages pg ON pg.id = p.page_id
+		WHERE p.id = $1 AND p.page_id = $2 AND p.deleted_at IS NULL
+	`, postID, pageID).Scan(&slug, &privacy, &apEnabled, &content, &contentWarning, &createdAt)
+	if err != nil || privacy != "public" || !apEnabled {
+		return
+	}
+
+	activity := s.buildCreateActivity(s.pageActorURL(slug), postID, content, createdAt, "", contentWarning)
+	s.deliverToPageFollowers(pageID, activity)
+}
+
+func (s *Service) BroadcastPagePostUpdate(pageID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var slug, content, contentWarning string
+	var apEnabled bool
+	var privacy string
+	var createdAt time.Time
+	err := s.db.QueryRow(`
+		SELECT pg.slug, pg.privacy, pg.activitypub_enabled, p.content, p.content_warning, p.created_at
+		FROM posts p JOIN pages pg ON pg.id = p.page_id
+		WHERE p.id = $1 AND p.page_id = $2 AND p.deleted_at IS NULL
+	`, postID, pageID).Scan(&slug, &privacy, &apEnabled, &content, &contentWarning, &createdAt)
+	if err != nil || privacy != "public" || !apEnabled {
+		return
+	}
+
+	activity := s.buildUpdateActivity(s.pageActorURL(slug), postID, content, createdAt, "", contentWarning)
+	s.deliverToPageFollowers(pageID, activity)
+}
+
+func (s *Service) BroadcastPagePostDelete(pageID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var slug string
+	var apEnabled bool
+	if err := s.db.QueryRow(`SELECT slug, activitypub_enabled FROM pages WHERE id = $1`, pageID).
+		Scan(&slug, &apEnabled); err != nil || !apEnabled {
+		return
+	}
+
+	actor := s.pageActorURL(slug)
+	objID := actor + "/posts/" + postID
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       objID + "/delete",
+		"type":     "Delete",
+		"actor":    actor,
+		"object": map[string]any{
+			"id":   objID,
+			"type": "Tombstone",
+		},
+		"to": []string{"https://www.w3.org/ns/activitystreams#Public"},
+	}
+	s.deliverToPageFollowers(pageID, activity)
+}
+
+func (s *Service) deliverToPageFollowers(pageID string, activity map[string]any) {
+	rows, err := s.db.Query(`SELECT follower_inbox_url FROM page_remote_subscribers WHERE page_id = $1`, pageID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var inboxes []string
+	for rows.Next() {
+		var inbox string
+		if rows.Scan(&inbox) == nil {
+			inboxes = append(inboxes, inbox)
+		}
+	}
+	rows.Close()
+
+	for _, inbox := range inboxes {
+		s.enqueuePageAPDelivery(pageID, inbox, activity)
+	}
+}
+
+func (s *Service) enqueuePageAPDelivery(pageID, inboxURL string, activity any) {
+	payload, err := json.Marshal(activity)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`
+		INSERT INTO page_ap_delivery_queue (actor_page_id, inbox_url, activity, next_attempt)
+		VALUES ($1, $2, $3, NOW())
+	`, pageID, inboxURL, string(payload))
+}
+
+// drainPageAPQueue mirrors drainAPQueue for page-authored deliveries.
+func (s *Service) drainPageAPQueue() {
+	rows, err := s.db.Query(`
+		SELECT id, actor_page_id, inbox_url, activity
+		FROM page_ap_delivery_queue
+		WHERE attempts < 10 AND next_attempt <= NOW()
+		ORDER BY next_attempt ASC
+		LIMIT 20
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type job struct {
+		id, pageID, inboxURL string
+		activity             []byte
+	}
+	var jobs []job
+	for rows.Next() {
+		var j job
+		if rows.Scan(&j.id, &j.pageID, &j.inboxURL, &j.activity) == nil {
+			jobs = append(jobs, j)
+		}
+	}
+	rows.Close()
+
+	for _, j := range jobs {
+		sendErr := s.deliverPageAPActivity(j.pageID, j.inboxURL, j.activity)
+		if sendErr == nil {
+			s.db.Exec(`DELETE FROM page_ap_delivery_queue WHERE id = $1`, j.id)
+		} else {
+			s.db.Exec(`
+				UPDATE page_ap_delivery_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
+				WHERE id = $2
+			`, sendErr.Error(), j.id)
+		}
+	}
+}
+
+func (s *Service) deliverPageAPActivity(pageID, inboxURL string, activity []byte) error {
+	var slug, pubPEM, privPEM string
+	if err := s.db.QueryRow(`
+		SELECT slug, federation_public_key, federation_private_key FROM pages WHERE id = $1
+	`, pageID).Scan(&slug, &pubPEM, &privPEM); err != nil {
+		return err
+	}
+
+	_, _, privKey, err := s.getOrCreatePageKeyPair(pageID, pubPEM, privPEM)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, inboxURL, bytes.NewReader(activity))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/activity+json")
+	req.Header.Set("Accept", "application/activity+json")
+
+	if err := signRequest(req, s.pageActorKeyID(slug), privKey, activity); err != nil {
+		return err
+	}
+
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("remote inbox returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *Service) deliverToFollowers(userID string, activity map[string]any) {

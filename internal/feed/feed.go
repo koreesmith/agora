@@ -137,7 +137,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -185,7 +185,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -448,7 +448,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -567,7 +567,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -773,7 +773,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -1101,7 +1101,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -1490,7 +1490,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -1532,7 +1532,7 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -2299,6 +2299,7 @@ type Post struct {
 	RepostOfID     *string `json:"repost_of_id"`
 	IsRemote       bool    `json:"is_remote"`
 	RemoteInstance string  `json:"remote_instance,omitempty"`
+	RemotePostID   string  `json:"remote_url,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	EditedAt       *string `json:"edited_at,omitempty"`
@@ -2360,7 +2361,7 @@ func scanPosts(rows interface {
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
-			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
+			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
 			&p.LinkURL, &p.LinkTitle, &p.LinkDescription, &p.LinkImage, &p.LinkDomain,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,

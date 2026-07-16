@@ -966,19 +966,46 @@ func (s *Service) handleInboundRejectFollow(verifiedActor string, objectRaw json
 	s.db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, verifiedActor)
 }
 
+// apAttachment is a Note's "attachment" entry, shared by handleInboundCreate
+// and handleInboundUpdate.
+type apAttachment struct {
+	Type      string `json:"type"`
+	MediaType string `json:"mediaType"`
+	URL       string `json:"url"`
+}
+
+// matchAttachments sorts a Note's attachments into image URLs and (at most
+// one) video URL, reusing Agora's existing native video-post columns
+// (video_url/video_thumb_url) — only the first video is kept, mirroring how
+// Agora's own composer only supports a single video per post. Audio-only
+// attachments have no Agora post-type equivalent yet and are intentionally
+// dropped (tracked separately, not this ticket).
+//
+// AGORA-180: threads.net attachments have no "mediaType" at all — just
+// {"type":"Video","url":"...","width":...,"height":...} — so the
+// ActivityStreams "type" is checked as a fallback alongside mediaType.
+func matchAttachments(attachments []apAttachment) (imageURLs []string, videoURL string) {
+	for _, a := range attachments {
+		switch {
+		case (strings.HasPrefix(a.MediaType, "image/") || a.Type == "Image") && a.URL != "":
+			imageURLs = append(imageURLs, a.URL)
+		case (strings.HasPrefix(a.MediaType, "video/") || a.Type == "Video") && a.URL != "" && videoURL == "":
+			videoURL = a.URL
+		}
+	}
+	return imageURLs, videoURL
+}
+
 // ── Inbound Create (replies into threads we own, or a followed account's own
 //    top-level posts — AGORA-146) ─────────────────────────────────────────────
 func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
-		ID           string `json:"id"`
-		AttributedTo string `json:"attributedTo"`
-		Content      string `json:"content"`
-		InReplyTo    string `json:"inReplyTo"`
-		Summary      string `json:"summary"` // AGORA-154: content-warning text, if any
-		Attachment   []struct {
-			MediaType string `json:"mediaType"`
-			URL       string `json:"url"`
-		} `json:"attachment"`
+		ID           string         `json:"id"`
+		AttributedTo string         `json:"attributedTo"`
+		Content      string         `json:"content"`
+		InReplyTo    string         `json:"inReplyTo"`
+		Summary      string         `json:"summary"` // AGORA-154: content-warning text, if any
+		Attachment   []apAttachment `json:"attachment"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1000,21 +1027,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
-	// AGORA-161: video attachments reuse Agora's existing native video-post
-	// columns (video_url/video_thumb_url) — only the first one is kept,
-	// mirroring how Agora's own composer only supports a single video per
-	// post. Audio-only attachments have no Agora post-type equivalent yet
-	// and are intentionally dropped (tracked separately, not this ticket).
-	var imageURLs []string
-	var videoURL string
-	for _, a := range note.Attachment {
-		switch {
-		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
-			imageURLs = append(imageURLs, a.URL)
-		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
-			videoURL = a.URL
-		}
-	}
+	imageURLs, videoURL := matchAttachments(note.Attachment)
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	// AGORA-146: no inReplyTo means this isn't a reply into a thread we
@@ -1076,14 +1089,11 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // reason to retroactively ingest it now.
 func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
-		ID           string `json:"id"`
-		AttributedTo string `json:"attributedTo"`
-		Content      string `json:"content"`
-		Summary      string `json:"summary"`
-		Attachment   []struct {
-			MediaType string `json:"mediaType"`
-			URL       string `json:"url"`
-		} `json:"attachment"`
+		ID           string         `json:"id"`
+		AttributedTo string         `json:"attributedTo"`
+		Content      string         `json:"content"`
+		Summary      string         `json:"summary"`
+		Attachment   []apAttachment `json:"attachment"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1108,16 +1118,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 		return // never ingested, or actor mismatch — safe no-op
 	}
 
-	var imageURLs []string
-	var videoURL string
-	for _, a := range note.Attachment {
-		switch {
-		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
-			imageURLs = append(imageURLs, a.URL)
-		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
-			videoURL = a.URL
-		}
-	}
+	imageURLs, videoURL := matchAttachments(note.Attachment)
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
@@ -1139,10 +1140,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 // post's own canonical URL after the fact (same wall as AGORA-175), so this
 // is the only way to see the actual shape of an attachment we're failing to
 // capture, to fix the real cause instead of guessing at it.
-func logUnmatchedAttachments(actor string, objectRaw json.RawMessage, attachments []struct {
-	MediaType string `json:"mediaType"`
-	URL       string `json:"url"`
-}, imageURLs []string, videoURL string) {
+func logUnmatchedAttachments(actor string, objectRaw json.RawMessage, attachments []apAttachment, imageURLs []string, videoURL string) {
 	if len(attachments) == 0 || len(imageURLs) > 0 || videoURL != "" {
 		return
 	}

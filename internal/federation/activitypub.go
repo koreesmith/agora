@@ -1015,6 +1015,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 			videoURL = a.URL
 		}
 	}
+	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	// AGORA-146: no inReplyTo means this isn't a reply into a thread we
 	// own — it's either unrelated top-level fediverse noise (dropped) or a
@@ -1117,6 +1118,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 			videoURL = a.URL
 		}
 	}
+	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
 		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
@@ -1128,6 +1130,27 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+}
+
+// logUnmatchedAttachments logs the raw "attachment" JSON when an inbound
+// fediverse post carries attachments but none were recognized as an image
+// or video (AGORA-180) — e.g. a threads.net post whose video never showed
+// up in the feed. Authorized-fetch instances 404 an unsigned GET on the
+// post's own canonical URL after the fact (same wall as AGORA-175), so this
+// is the only way to see the actual shape of an attachment we're failing to
+// capture, to fix the real cause instead of guessing at it.
+func logUnmatchedAttachments(actor string, objectRaw json.RawMessage, attachments []struct {
+	MediaType string `json:"mediaType"`
+	URL       string `json:"url"`
+}, imageURLs []string, videoURL string) {
+	if len(attachments) == 0 || len(imageURLs) > 0 || videoURL != "" {
+		return
+	}
+	var raw struct {
+		Attachment json.RawMessage `json:"attachment"`
+	}
+	json.Unmarshal(objectRaw, &raw)
+	log.Printf("federation: AGORA-180 inbound post from %s has %d attachment(s) but none matched image/video — raw: %s", actor, len(attachments), raw.Attachment)
 }
 
 // handleInboundAPDelete is handleInboundCreate's removal-time counterpart

@@ -750,6 +750,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content     string   `json:"content"`
 		ImageURL    string   `json:"image_url"`
+		ImageURLs   []string `json:"image_urls"`
 		PollOptions []string `json:"poll_options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -765,6 +766,17 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(pollOpts) == 1 || len(pollOpts) > 6 {
 		writeError(w, 400, "polls require 2–6 options"); return
+	}
+
+	// Normalize: if image_urls provided, use those; fall back to image_url
+	// (AGORA-174, mirrors feed.CreatePost's handling)
+	if len(req.ImageURLs) > 0 {
+		if len(req.ImageURLs) > 10 {
+			req.ImageURLs = req.ImageURLs[:10]
+		}
+		req.ImageURL = req.ImageURLs[0]
+	} else if req.ImageURL != "" {
+		req.ImageURLs = []string{req.ImageURL}
 	}
 
 	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
@@ -783,6 +795,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// Insert poll options if provided
 	for i, opt := range pollOpts {
 		s.db.Exec(`INSERT INTO poll_options (post_id, text, position) VALUES ($1, $2, $3)`, postID, opt, i)
+	}
+
+	// Insert photos if multiple (AGORA-174)
+	if len(req.ImageURLs) > 1 {
+		for i, u := range req.ImageURLs {
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
+		}
 	}
 
 	s.db.Exec(`UPDATE community_groups SET post_count = post_count + 1 WHERE id = $1`, groupID)

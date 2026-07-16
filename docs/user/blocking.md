@@ -23,3 +23,7 @@ When you block someone:
 ---
 
 > **Tip:** Blocking is private — the blocked person is not notified.
+
+## Blocking a fediverse account
+
+Works the same way, from that account's profile page. If a Mastodon (or other fediverse) user blocks *you*, Agora stops sending them your posts, likes, and replies automatically — you don't need to do anything on your end.

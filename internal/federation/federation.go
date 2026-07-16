@@ -10,30 +10,61 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
 
 type Service struct {
-	db  *store.DB
-	cfg *config.Config
+	db    *store.DB
+	cfg   *config.Config
+	notif *notifications.Service
 }
 
-func NewService(db *store.DB, cfg *config.Config, _, _ any) *Service {
-	return &Service{db: db, cfg: cfg}
+func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
+	return &Service{db: db, cfg: cfg, notif: notif}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/agora-instance", s.InstanceInfo)
+	// Standard ActivityPub discovery — what Mastodon/Pleroma/etc. actually query.
+	r.Get("/.well-known/webfinger", s.WebFinger)
+	r.Get("/.well-known/host-meta", s.HostMeta)
+	r.Get("/.well-known/nodeinfo", s.NodeInfoDiscovery)
+	r.Get("/nodeinfo/2.0",         s.NodeInfo)
 	r.Post("/federation/inbox",          s.Inbox)
 	r.Get("/federation/users/{handle}",  s.GetUser)
+	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
+	r.Get("/federation/users/{handle}/followers", s.Followers)
 	r.Get("/federation/search",          s.Search)
-	r.Get("/federation/lookup",          s.LookupUser) // resolve user@instance.com
+	// AGORA-115: page actors — always ActivityPub JSON, no legacy-protocol
+	// fallback needed since pages never had one.
+	r.Get("/federation/pages/{slug}",           s.GetPageActor)
+	r.Get("/federation/pages/{slug}/outbox",    s.PageOutbox)
+	r.Get("/federation/pages/{slug}/followers", s.PageFollowers)
+}
+
+// RegisterAuthedRoutes registers federation routes that require a valid Agora
+// session. LookupUser (AGORA-139) is only ever called by Agora's own
+// authenticated frontend (SearchPage) — requiring auth removes it as an
+// anonymous-callable surface, on top of the SSRF protection fedHTTPClient's
+// dialer already provides on the outbound fetch it triggers.
+func RegisterAuthedRoutes(r chi.Router, s *Service) {
+	r.Get("/federation/lookup", s.LookupUser) // resolve user@instance.com
+	// AGORA-146: standard-AP handle/URL resolution (search), and following a
+	// remote fediverse account.
+	r.Get("/federation/ap-lookup",     s.APLookup)
+	r.Post("/federation/follow",        s.FollowFediverseAccount)
+	r.Delete("/federation/follow/{id}", s.UnfollowFediverseAccount)
+	r.Get("/federation/following",      s.ListFollowing)
+	r.Put("/federation/follow/{id}/notify", s.ToggleFollowNotify)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────
@@ -82,6 +113,51 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── NodeInfo (AGORA-171) ───────────────────────────────────────────────────────
+//
+// The standard other fediverse software (Mastodon's own "About this server"
+// federation panel, instance directories, block-list tooling) uses to
+// discover basic facts about a remote instance — distinct from WebFinger
+// (resolves a single actor) and agora-instance (Agora's own bespoke, richer
+// instance-info endpoint predating this).
+
+func (s *Service) NodeInfoDiscovery(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"links": []map[string]string{
+			{
+				"rel":  "http://nodeinfo.diaspora.software/ns/schema/2.0",
+				"href": strings.TrimRight(s.cfg.InstanceDomain, "/") + "/nodeinfo/2.0",
+			},
+		},
+	})
+}
+
+func (s *Service) NodeInfo(w http.ResponseWriter, r *http.Request) {
+	var userCount int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false AND is_suspended = false`).Scan(&userCount)
+
+	writeJSON(w, 200, map[string]any{
+		"version": "2.0",
+		"software": map[string]string{
+			"name":    "agora",
+			"version": "2.0.0",
+		},
+		"protocols": []string{"activitypub"},
+		"services": map[string][]string{
+			"inbound":  {},
+			"outbound": {},
+		},
+		// Agora has no registration-closed/invite-only setting today —
+		// signup is always open, so this is unconditionally true rather
+		// than reading a config value that doesn't exist yet.
+		"openRegistrations": true,
+		"usage": map[string]any{
+			"users": map[string]int{"total": userCount},
+		},
+		"metadata": map[string]any{},
+	})
+}
+
 // ── Inbox (receives activities from remote instances) ─────────────────────────
 
 type Activity struct {
@@ -94,7 +170,11 @@ type Activity struct {
 }
 
 func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
-	if !s.federationEnabled() {
+	// AGORA-156: the two protocols sharing this endpoint are gated
+	// independently — federation_enabled for the old custom Agora-to-Agora
+	// activities, activitypub_enabled for standard ActivityPub — so read the
+	// body and figure out which one this is before gating on either.
+	if !s.federationEnabled() && !s.activityPubEnabled() {
 		writeError(w, 404, "federation not enabled")
 		return
 	}
@@ -102,6 +182,30 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, 400, "could not read body")
+		return
+	}
+
+	// Standard ActivityPub activities (from Mastodon etc.) are verified via
+	// HTTP Signatures, not the custom protocol's embedded-JSON-field Ed25519
+	// signature below — detect and branch before the custom verification path
+	// ever runs, since a standard activity has no "signature"/"instance_id"
+	// fields and would otherwise always fail it.
+	var probe struct {
+		Context json.RawMessage `json:"@context"`
+		Type    string          `json:"type"`
+	}
+	json.Unmarshal(body, &probe)
+	if len(probe.Context) > 0 || probe.Type == "Follow" || probe.Type == "Undo" {
+		if !s.activityPubEnabled() {
+			writeError(w, 404, "federation not enabled")
+			return
+		}
+		s.handleStandardInbox(w, r, body)
+		return
+	}
+
+	if !s.federationEnabled() {
+		writeError(w, 404, "federation not enabled")
 		return
 	}
 
@@ -263,9 +367,11 @@ func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 // fetchRemoteProfile GETs /federation/users/{handle} on the remote instance.
 // Returns an empty map on any error (caller must handle gracefully).
 func (s *Service) fetchRemoteProfile(handle, instance string) map[string]string {
-	url := "https://" + instance + "/federation/users/" + handle
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+	if !isValidInstanceHost(instance) {
+		return map[string]string{}
+	}
+	reqURL := "https://" + instance + "/federation/users/" + url.PathEscape(handle)
+	resp, err := fedHTTPClient.Get(reqURL)
 	if err != nil || resp.StatusCode != 200 {
 		return map[string]string{}
 	}
@@ -313,6 +419,16 @@ func (s *Service) syncStaleRemoteUsers() {
 
 func (s *Service) GetUser(w http.ResponseWriter, r *http.Request) {
 	handle := chi.URLParam(r, "handle")
+
+	// Standard ActivityPub actor document — legacy flat-JSON response below is
+	// unchanged for the custom protocol's own requests (no Accept header, or
+	// a plain application/json Accept).
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "application/activity+json") || strings.Contains(accept, "application/ld+json") {
+		s.writeActorObject(w, handle)
+		return
+	}
+
 	var u struct {
 		Username    string `json:"username"`
 		DisplayName string `json:"display_name"`
@@ -382,6 +498,11 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 // remote instance and creating/updating the local stub. Returns the local profile.
 // Query param: handle=username@instance.com
 func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
+	if !s.federationEnabled() {
+		writeError(w, 404, "federation not enabled")
+		return
+	}
+
 	raw := r.URL.Query().Get("handle")
 	if raw == "" {
 		writeError(w, 400, "handle required — format: username@instance.com")
@@ -394,6 +515,11 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username, instance := parts[0], parts[1]
+
+	if !isValidInstanceHost(instance) {
+		writeError(w, 400, "invalid instance domain")
+		return
+	}
 
 	// Don't look up our own users this way
 	localDomain := domainFromURL(s.cfg.InstanceDomain)
@@ -592,8 +718,7 @@ func (s *Service) drainQueue() {
 }
 
 func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
+	resp, err := fedHTTPClient.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
 	if err != nil {
 		return err
 	}
@@ -636,8 +761,10 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(decoded), nil
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://" + domain + "/.well-known/agora-instance")
+	if !isValidInstanceHost(domain) {
+		return nil, fmt.Errorf("invalid instance domain")
+	}
+	resp, err := fedHTTPClient.Get("https://" + domain + "/.well-known/agora-instance")
 	if err != nil { return nil, fmt.Errorf("could not reach instance: %w", err) }
 	defer resp.Body.Close()
 
@@ -691,29 +818,56 @@ func (s *Service) getOrCreateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, e
 // ── Background sync ───────────────────────────────────────────────────────────
 
 func (s *Service) StartBackgroundSync(ctx context.Context) {
-	if !s.federationEnabled() { return }
-
+	// Deliberately does NOT gate the whole loop on federationEnabled() at
+	// startup — that was a bug: federation_enabled is an admin-toggleable
+	// runtime setting, but a one-time check here meant that if it happened to
+	// be off (or unset) at the exact moment the server process started, the
+	// delivery-queue drain loop would never run again for that process's
+	// lifetime, even after an admin turned federation back on — outbound
+	// activities would sit queued forever until the next restart. Instead the
+	// loop always runs, and each tick re-checks the current value.
 	queueTicker  := time.NewTicker(30 * time.Second)  // drain outbound queue
+	apQueueTicker := time.NewTicker(20 * time.Second) // drain standard-AP delivery queue
 	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
 	profileTicker := time.NewTicker(6 * time.Hour)    // sync stale remote profiles
 
 	defer queueTicker.Stop()
+	defer apQueueTicker.Stop()
 	defer syncTicker.Stop()
 	defer profileTicker.Stop()
 
-	// Run immediately on start
-	go s.drainQueue()
+	// Run immediately on start. drainAPQueue (standard ActivityPub) is gated
+	// by activityPubEnabled (AGORA-156); everything else is the old custom
+	// protocol and stays on federationEnabled.
+	if s.federationEnabled() {
+		go s.drainQueue()
+	}
+	if s.activityPubEnabled() {
+		go s.drainAPQueue()
+		go s.drainPageAPQueue()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-queueTicker.C:
-			go s.drainQueue()
+			if s.federationEnabled() {
+				go s.drainQueue()
+			}
+		case <-apQueueTicker.C:
+			if s.activityPubEnabled() {
+				go s.drainAPQueue()
+				go s.drainPageAPQueue()
+			}
 		case <-syncTicker.C:
-			go s.refreshInstances()
+			if s.federationEnabled() {
+				go s.refreshInstances()
+			}
 		case <-profileTicker.C:
-			go s.syncStaleRemoteUsers()
+			if s.federationEnabled() {
+				go s.syncStaleRemoteUsers()
+			}
 		}
 	}
 }
@@ -726,8 +880,8 @@ func (s *Service) refreshInstances() {
 		var domain string
 		rows.Scan(&domain)
 		go func(d string) {
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Get("https://" + d + "/.well-known/agora-instance")
+			if !isValidInstanceHost(d) { return }
+			resp, err := fedHTTPClient.Get("https://" + d + "/.well-known/agora-instance")
 			if err != nil { return }
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -745,10 +899,83 @@ func (s *Service) federationEnabled() bool {
 	return val == "true"
 }
 
+// activityPubEnabled is the instance-wide toggle for standard ActivityPub
+// (AGORA-156) — distinct from federationEnabled, which gates the older
+// custom Agora-to-Agora protocol. Defaults to on (unset != "false") so
+// existing instances that already have federation configured don't lose
+// fediverse discoverability the moment this ships; an admin can turn it off
+// explicitly in Admin > Settings.
+func (s *Service) activityPubEnabled() bool {
+	var val string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'activitypub_enabled'`).Scan(&val)
+	return val != "false"
+}
+
 func domainFromURL(u string) string {
 	u = strings.TrimPrefix(u, "https://")
 	u = strings.TrimPrefix(u, "http://")
 	return strings.Split(u, "/")[0]
+}
+
+// ── SSRF protection ─────────────────────────────────────────────────────────────
+//
+// All outbound federation requests go through fedHTTPClient, whose dialer refuses
+// to connect to non-public IP addresses. This prevents an attacker-supplied
+// instance host (e.g. via /federation/lookup) from making the server reach
+// internal services, cloud metadata endpoints (169.254.169.254), or loopback.
+
+var fedHTTPClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: &http.Transport{DialContext: safeDialContext},
+}
+
+// isPublicIP reports whether ip is a globally routable address we're willing to
+// connect to. Loopback, private, link-local, CGNAT, unspecified, and multicast
+// ranges are all rejected.
+func isPublicIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	// 100.64.0.0/10 — carrier-grade NAT (not covered by IsPrivate)
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return false
+	}
+	return true
+}
+
+// safeDialContext resolves the target host, verifies every resolved IP is public,
+// then dials a validated IP directly (closing the DNS-rebinding window between
+// the check and the connection).
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ipa := range ips {
+		if !isPublicIP(ipa.IP) {
+			return nil, fmt.Errorf("refusing to connect to non-public address %s", ipa.IP)
+		}
+	}
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// isValidInstanceHost performs cheap syntactic validation on a federation host
+// before it's ever placed into a URL. It rejects empty values, over-long names,
+// and anything containing characters that could alter the request target.
+func isValidInstanceHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	if strings.ContainsAny(h, "/\\?#@ \t\r\n") {
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

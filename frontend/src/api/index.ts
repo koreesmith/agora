@@ -14,7 +14,10 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    // Only treat a 401 as a session expiry (and bounce to /login) when a
+    // token actually existed — guests hitting public endpoints without a
+    // token should see the 401 rejected quietly, not get redirected.
+    if (err.response?.status === 401 && localStorage.getItem('agora_token')) {
       localStorage.removeItem('agora_token')
       localStorage.removeItem('agora_user')
       window.location.href = '/login'
@@ -41,6 +44,7 @@ export const authApi = {
 // ── Feed ──────────────────────────────────────────────────────────────────────
 export const feedApi = {
   getFeed:       (params?: { page?: number, offset?: number, limit?: number, list_id?: string, custom_feed_id?: string }) => api.get('/feed', { params }),
+  getPublicFeed: (params?: { offset?: number, limit?: number }) => api.get('/feed/public', { params }),
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
@@ -72,6 +76,8 @@ export const feedApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
+  // AGORA-137: poll async video transcode job status
+  getVideoJob:   (jobId: string) => api.get(`/media/jobs/${jobId}`),
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -253,6 +259,13 @@ export const previewApi = {
 // ── Federation ────────────────────────────────────────────────────────────────
 export const federationApi = {
   lookupUser: (handle: string) => api.get('/federation/lookup', { params: { handle } }),
+  // AGORA-146: resolve a fediverse handle/URL to a preview (search), follow/
+  // unfollow a remote account, and list current follows.
+  resolveFediverseHandle:   (handle: string)   => api.get('/federation/ap-lookup', { params: { handle } }),
+  followFediverseAccount:   (actorUrl: string) => api.post('/federation/follow', { actor_url: actorUrl }),
+  unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
+  listFollowing:            ()                 => api.get('/federation/following'),
+  toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

@@ -355,6 +355,34 @@ var schema = []string{
 	// Track when remote user profiles were last synced
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
 
+	// Standard ActivityPub followers — remote actors (e.g. Mastodon accounts)
+	// following a local user's public posts. Distinct from Agora's own
+	// friendships/federation_queue, which serve the older Agora-to-Agora protocol.
+	`CREATE TABLE IF NOT EXISTS ap_followers (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		followed_user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		follower_actor_url  TEXT        NOT NULL,
+		follower_inbox_url  TEXT        NOT NULL,
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (followed_user_id, follower_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_followers_user ON ap_followers(followed_user_id)`,
+
+	// Outbound ActivityPub delivery queue — separate from federation_queue
+	// because standard HTTP Signatures must be computed at send time (fresh
+	// Date header per attempt), not once at enqueue time.
+	`CREATE TABLE IF NOT EXISTS ap_delivery_queue (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		actor_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		inbox_url     TEXT        NOT NULL,
+		activity      JSONB       NOT NULL,
+		attempts      INT         NOT NULL DEFAULT 0,
+		last_error    TEXT        NOT NULL DEFAULT '',
+		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_delivery_next ON ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
 	`CREATE TABLE IF NOT EXISTS albums (
 		id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
 		owner_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -523,10 +551,14 @@ var schema = []string{
 		value       TEXT        NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
-	// AGORA-111: add page filter types
-	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
-	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page'))`,
+	// AGORA-111/AGORA-146: filter_type's allowed set is defined once, further
+	// down (search custom_feed_filters_filter_type_check) — it must stay a
+	// single statement covering every currently-valid value. This migration
+	// runner re-executes the whole schema list on every startup with no
+	// "already applied" tracking, so an earlier, narrower version of this
+	// same ALTER TABLE...ADD CONSTRAINT would permanently fail once any row
+	// used a value only the later version allows (exactly what happened when
+	// AGORA-146 added a second such statement instead of widening this one).
 	`CREATE INDEX IF NOT EXISTS idx_custom_feed_filters_feed ON custom_feed_filters(feed_id)`,
 
 	// ── Multi-photo posts (AGORA-93) ───────────────────────────────────────
@@ -607,4 +639,156 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_pae_page_time ON page_analytics_events(page_id, created_at DESC)`,
 	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS smart_ranking BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AGORA-137: async video transcoding jobs ───────────────────────────
+	`CREATE TABLE IF NOT EXISTS video_transcode_jobs (
+		id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		status          VARCHAR(20) NOT NULL DEFAULT 'processing'
+		                  CHECK (status IN ('processing','done','failed')),
+		video_url       TEXT        NOT NULL DEFAULT '',
+		video_thumb_url TEXT        NOT NULL DEFAULT '',
+		error           TEXT        NOT NULL DEFAULT '',
+		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_video_jobs_user ON video_transcode_jobs(user_id, created_at DESC)`,
+
+	// AGORA-145: per-account opt-out of standard ActivityPub federation,
+	// separate from the instance-wide federation_enabled toggle.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-147: remote-actor identity for standard-ActivityPub user stubs
+	// (distinct from remote_user_id/remote_instance, which the older custom
+	// protocol's stubs use), plus idempotency for inbound remote posts/replies.
+	// The posts unique index also fixes a pre-existing bug in the old custom
+	// protocol's handleInboundPost, whose bare ON CONFLICT DO NOTHING had no
+	// matching constraint to target — Postgres's bare ON CONFLICT DO NOTHING
+	// applies to any unique-constraint violation on the table, so this index
+	// makes that existing code correctly dedupe too.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ap_actor_url TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS ap_inbox_url TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ap_actor_url ON users(ap_actor_url) WHERE ap_actor_url != ''`,
+	// Defensive cleanup before adding the constraint below: the old protocol's
+	// dedup bug means duplicate (remote_post_id, remote_instance) rows may
+	// already exist. Keep the earliest row per pair, drop the rest. No-op if
+	// there are no duplicates (idempotent, safe to run on every startup).
+	`DELETE FROM posts a USING posts b
+	 WHERE a.is_remote = true AND a.remote_post_id != ''
+	   AND b.is_remote = true AND b.remote_post_id != ''
+	   AND a.remote_post_id = b.remote_post_id AND a.remote_instance = b.remote_instance
+	   AND a.id > b.id`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_remote_unique ON posts(remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != ''`,
+
+	// AGORA-115: standard ActivityPub federation for Pages. Each page gets
+	// its own actor identity and keypair, independent of any member's
+	// personal user actor. Followers/delivery queue are separate tables from
+	// ap_followers/ap_delivery_queue (both NOT NULL FKs to users) rather than
+	// widening those constraints on a live, populated table.
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS federation_public_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS federation_private_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	`CREATE TABLE IF NOT EXISTS page_remote_subscribers (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		page_id            UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		follower_actor_url TEXT        NOT NULL,
+		follower_inbox_url TEXT        NOT NULL,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (page_id, follower_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_remote_subs_page ON page_remote_subscribers(page_id)`,
+
+	`CREATE TABLE IF NOT EXISTS page_ap_delivery_queue (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		actor_page_id UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		inbox_url     TEXT        NOT NULL,
+		activity      JSONB       NOT NULL,
+		attempts      INT         NOT NULL DEFAULT 0,
+		last_error    TEXT        NOT NULL DEFAULT '',
+		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_ap_delivery_next ON page_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
+	// AGORA-112: page team membership/roles. Referenced extensively by
+	// internal/pages/pages.go (ListMembers, InviteMember, AcceptInvite,
+	// SetMemberRole, RemoveMember, hasRole) but had no migration anywhere in
+	// this file — every one of those handlers has been failing at runtime
+	// with a "relation page_members does not exist" error. The page owner
+	// itself is tracked via pages.owner_id, not a row here; only invited
+	// admin/editor members get a page_members row (accepted=false until the
+	// invite is accepted).
+	`CREATE TABLE IF NOT EXISTS page_members (
+		page_id    UUID        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		role       VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'editor')),
+		accepted   BOOLEAN     NOT NULL DEFAULT false,
+		joined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (page_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_page_members_user ON page_members(user_id)`,
+
+	// AGORA-146: outbound fediverse follows — the reverse of ap_followers
+	// ("who follows me"), this is "who I follow" on the fediverse. accepted
+	// stays false until the remote instance's Accept arrives (async, unlike
+	// ap_followers which only ever records already-confirmed followers).
+	`CREATE TABLE IF NOT EXISTS ap_following (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		follower_user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		followed_actor_url TEXT        NOT NULL,
+		followed_inbox_url TEXT        NOT NULL,
+		accepted           BOOLEAN     NOT NULL DEFAULT false,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (follower_user_id, followed_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_following_actor ON ap_following(followed_actor_url)`,
+
+	// AGORA-146: two new custom-feed filter types surface followed fediverse
+	// accounts through the existing custom-feeds engine rather than a new
+	// timeline UI — same drop-and-readd pattern AGORA-111 used to add
+	// include_page/exclude_page.
+	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
+	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all'))`,
+
+	// AGORA-164: remote-actor stubs (created by upsertRemoteAPUser) never
+	// explicitly set profile_private, which defaults to TRUE — every
+	// followed fediverse account's stub was created private, so GetPost's
+	// non-author access check 403'd its permalink for everyone (the post
+	// still rendered fine inside a custom feed, which doesn't check
+	// profile_private). upsertRemoteAPUser itself now sets it to false for
+	// new/updated stubs; this backfills rows created before that fix.
+	`UPDATE users SET profile_private = false WHERE is_remote = true AND ap_actor_url != '' AND profile_private = true`,
+
+	// AGORA-164: per-account opt-out for the fediverse_post notification
+	// specifically, distinct from activitypub_enabled (which controls
+	// whether YOUR OWN posts federate, not whether you're notified about
+	// accounts you follow).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS fediverse_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-166: per-followed-account notification opt-in. Defaults false —
+	// following a fediverse account should not, by itself, start notifying
+	// you of their posts, mirroring how following a local profile doesn't
+	// either. fediverse_notifications_enabled above is still checked too and
+	// remains the global kill switch; both must be true for a notification
+	// to fire.
+	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-170: records a remote actor's Block of a local user, keyed by
+	// inbox URL (not just actor URL) so enqueueAPDelivery — which only ever
+	// sees an inbox URL, not the actor behind it — can filter every outbound
+	// delivery path (followers broadcast, direct replies, mentions, likes,
+	// announces) from one central place, rather than needing a guard at each
+	// of its dozen-plus call sites. The fediverse-facing analog of the local
+	// blocks table, which only governs local-to-local visibility.
+	`CREATE TABLE IF NOT EXISTS ap_blocked_by (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		blocker_actor_url   TEXT        NOT NULL,
+		blocker_inbox_url   TEXT        NOT NULL DEFAULT '',
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, blocker_actor_url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ap_blocked_by_inbox ON ap_blocked_by(local_user_id, blocker_inbox_url)`,
 }

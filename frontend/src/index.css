@@ -53,3 +53,14 @@
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #9fb3c8; border-radius: 3px; }
 .dark ::-webkit-scrollbar-thumb { background: #334e68; }
+
+/* scrollbar-none: used by FeedSwitcher's horizontally-scrolling feed tab
+   row, which is meant to scroll invisibly (drag/swipe) rather than show a
+   track — this class name was referenced but never actually defined. */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

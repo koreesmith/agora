@@ -14,14 +14,26 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
+// fedSender is the subset of federation.Service used here to broadcast page
+// posts over standard ActivityPub (AGORA-115) — a page's federation identity
+// is independent of any member's personal user actor.
+type fedSender interface {
+	BroadcastPagePost(pageID, postID string)
+	BroadcastPagePostUpdate(pageID, postID string)
+	BroadcastPagePostDelete(pageID, postID string)
+}
+
 type Service struct {
 	db    *store.DB
 	notif *notifications.Service
+	fed   fedSender
 }
 
 func NewService(db *store.DB, notif *notifications.Service) *Service {
 	return &Service{db: db, notif: notif}
 }
+
+func (s *Service) SetFed(f fedSender) { s.fed = f }
 
 var slugRe = regexp.MustCompile(`[^a-z0-9_]+`)
 
@@ -82,6 +94,7 @@ type Page struct {
 	UpdatedAt       string `json:"updated_at"`
 	IsSubscribed    bool   `json:"is_subscribed"`
 	IsOwner         bool   `json:"is_owner"`
+	ActivityPubEnabled bool `json:"activitypub_enabled"`
 }
 
 type PagePost struct {
@@ -205,14 +218,14 @@ func (s *Service) GetPage(w http.ResponseWriter, r *http.Request) {
 		       p.cover_position, p.page_type, p.owner_id, p.privacy,
 		       p.subscriber_count, p.post_count, p.created_at, p.updated_at,
 		       EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.id AND ps.user_id = $1),
-		       (p.owner_id = $1)
+		       (p.owner_id = $1), p.activitypub_enabled
 		FROM pages p
 		WHERE p.slug = $2
 	`, userID, slug).Scan(
 		&p.ID, &p.Slug, &p.DisplayName, &p.Bio, &p.AvatarURL, &p.CoverURL,
 		&p.CoverPosition, &p.PageType, &p.OwnerID, &p.Privacy,
 		&p.SubscriberCount, &p.PostCount, &p.CreatedAt, &p.UpdatedAt,
-		&p.IsSubscribed, &p.IsOwner,
+		&p.IsSubscribed, &p.IsOwner, &p.ActivityPubEnabled,
 	)
 	if err != nil {
 		writeError(w, 404, "page not found"); return
@@ -280,13 +293,14 @@ func (s *Service) UpdatePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		DisplayName   *string `json:"display_name"`
-		Bio           *string `json:"bio"`
-		PageType      *string `json:"page_type"`
-		Privacy       *string `json:"privacy"`
-		AvatarURL     *string `json:"avatar_url"`
-		CoverURL      *string `json:"cover_url"`
-		CoverPosition *string `json:"cover_position"`
+		DisplayName        *string `json:"display_name"`
+		Bio                *string `json:"bio"`
+		PageType           *string `json:"page_type"`
+		Privacy            *string `json:"privacy"`
+		AvatarURL          *string `json:"avatar_url"`
+		CoverURL           *string `json:"cover_url"`
+		CoverPosition      *string `json:"cover_position"`
+		ActivityPubEnabled *bool   `json:"activitypub_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
@@ -319,6 +333,7 @@ func (s *Service) UpdatePage(w http.ResponseWriter, r *http.Request) {
 		if p != "private" { p = "public" }
 		add("privacy", p)
 	}
+	if req.ActivityPubEnabled != nil { add("activitypub_enabled", *req.ActivityPubEnabled) }
 	if len(sets) == 0 {
 		writeJSON(w, 200, map[string]string{"message": "nothing to update"}); return
 	}
@@ -483,6 +498,10 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// Notify all subscribers
 	go s.notifySubscribers(pageID, userID, postID)
+
+	// AGORA-115: federate to the page's own fediverse followers, attributed
+	// to the page's actor — independent of which member posted it.
+	go s.fed.BroadcastPagePost(pageID, postID)
 
 	writeJSON(w, 201, map[string]string{"id": postID})
 }

@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { useAuthStore } from './store/auth'
 import api from './api'
 import Layout from './components/layout/Layout'
+import PublicLayout from './components/layout/PublicLayout'
 
 import SetupPage          from './pages/SetupPage'
 import LandingPage        from './pages/LandingPage'
@@ -39,6 +40,8 @@ import CreatePagePage     from './pages/CreatePagePage'
 import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
 import PageSettingsPage  from './pages/PageSettingsPage'
+import ExplorePage       from './pages/ExplorePage'
+import FediversePage     from './pages/FediversePage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -59,6 +62,14 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 function GuestOnly({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
   return isAuthenticated ? <Navigate to="/feed" replace /> : <>{children}</>
+}
+
+// Renders the full member Layout when signed in, or the minimal PublicLayout
+// for guests — used by routes reachable both logged in and logged out
+// (public profiles, post permalinks, explore).
+function AuthAwareLayout() {
+  const { isAuthenticated } = useAuthStore()
+  return isAuthenticated ? <Layout /> : <PublicLayout />
 }
 
 function AppRoutes() {
@@ -91,15 +102,22 @@ function AppRoutes() {
       <Route path="/privacy"        element={<PrivacyPage />} />
       <Route path="/terms"          element={<TermsPage />} />
       <Route path="/support"        element={<SupportPage />} />
+      {/* Guest-accessible: public profiles, post permalinks, and the explore
+          feed render with the full member Layout when signed in, or the
+          minimal PublicLayout for guests. */}
+      <Route element={<AuthAwareLayout />}>
+        <Route path="/profile/:username"       element={<ProfilePage />} />
+        <Route path="/post/:id"                element={<PostPage />} />
+        <Route path="/explore"                 element={<ExplorePage />} />
+      </Route>
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
         <Route path="/feed"                    element={<FeedPage />} />
-        <Route path="/profile/:username"       element={<ProfilePage />} />
         <Route path="/friends"                 element={<FriendsPage />} />
         <Route path="/search"                  element={<SearchPage />} />
         <Route path="/notifications"           element={<NotificationsPage />} />
         <Route path="/settings"                element={<SettingsPage />} />
+        <Route path="/fediverse"               element={<FediversePage />} />
         <Route path="/admin"                   element={<RequireAdmin><AdminPage /></RequireAdmin>} />
-        <Route path="/post/:id"                element={<PostPage />} />
         <Route path="/discover"                element={<DiscoverPage />} />
         <Route path="/lists/:id"               element={<ListFeedPage />} />
         <Route path="/groups"                  element={<GroupsPage />} />

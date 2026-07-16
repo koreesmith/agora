@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
@@ -356,6 +356,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [lightboxPhotos, setLightboxPhotos] = useState<string[] | null>(null)
   const [lightboxIdx, setLightboxIdx] = useState(0)
   const [twExpanded, setTwExpanded] = useState(false)
+  const navigate = useNavigate()
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [showComments, setShowComments] = useState(false)
@@ -514,12 +515,9 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
       {/* Repost header */}
       {post.repost_of_id && (
-        <div className="flex items-center gap-1.5 text-xs text-agora-500 dark:text-agora-400 mb-3">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-agora-500 dark:text-agora-400 mb-3">
           <Repeat2 size={13} />
-          <Link to={`/profile/${post.author_username}`} className="font-medium hover:underline">
-            {post.author_display_name || post.author_username}
-          </Link>
-          <span>reposted</span>
+          <span>Reposted</span>
         </div>
       )}
 
@@ -540,14 +538,14 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
       {/* Author row */}
       <div className="flex items-start gap-3">
         {/* Avatar — shows page avatar for page posts */}
-        <Link to={post.page_id && post.page_slug ? `/pages/${post.page_slug}` : `/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`} className="flex-shrink-0">
+        <Link to={post.page_id && post.page_slug ? `/pages/${post.page_slug}` : `/profile/${post.author_username}`} className="flex-shrink-0">
           <div className={`w-10 h-10 ${post.page_id ? 'rounded-xl' : 'rounded-full'} bg-agora-200 dark:bg-agora-700 overflow-hidden`}>
             {post.page_id && post.page_avatar_url
               ? <img src={post.page_avatar_url} alt="" className="w-full h-full object-cover" />
-              : post.author_avatar_url && !post.repost_of_id
+              : post.author_avatar_url
               ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
               : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 dark:text-agora-300">
-                  {(post.page_id ? post.page_name : post.repost_of_id ? post.repost_author_display_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
+                  {(post.page_id ? post.page_name : post.author_display_name)?.[0]?.toUpperCase() || '?'}
                 </span>
             }
           </div>
@@ -566,25 +564,21 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   <span className="text-agora-400 text-xs">@{post.page_slug}</span>
                 </>
               ) : (
-                <Link to={`/profile/${post.repost_of_id ? post.repost_author_username : post.author_username}`}
+                <Link to={`/profile/${post.author_username}`}
                   className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
-                  {post.repost_of_id ? post.repost_author_display_name : post.author_display_name}
+                  {post.author_display_name}
                 </Link>
               )}
-              {!post.page_id && (() => {
-                const pronouns = post.repost_of_id ? post.repost_author_pronouns : post.author_pronouns
-                return pronouns ? (
-                  <span className="text-agora-400 dark:text-agora-500 text-xs">({pronouns})</span>
-                ) : null
-              })()}
+              {!post.page_id && post.author_pronouns && (
+                <span className="text-agora-400 dark:text-agora-500 text-xs">({post.author_pronouns})</span>
+              )}
               {!post.page_id && (
                 <span className="text-agora-400 text-xs">
-                  {handle(post.repost_of_id ? post.repost_author_username! : post.author_username,
-                    !post.repost_of_id && post.is_remote, !post.repost_of_id ? post.remote_instance : undefined)}
+                  {handle(post.author_username, post.is_remote, post.remote_instance)}
                 </span>
               )}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
-              <Link to={`/post/${post.repost_of_id ? post.repost_of_id : post.id}`}
+              <Link to={`/post/${post.id}`}
                 className="text-agora-400 text-xs hover:underline">
                 {formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}
               </Link>
@@ -593,35 +587,37 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               </span>
             </div>
 
-            {/* Menu */}
-            <div className="relative flex-shrink-0">
-              <button onClick={() => setShowMenu(m => !m)} className="btn-ghost p-1 text-agora-400">
-                <MoreHorizontal size={16} />
-              </button>
-              {showMenu && (
-                <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
-                  onBlur={() => setShowMenu(false)}>
-                  {isOwn && !post.repost_of_id && (
-                    <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
-                      <Pencil size={14} /> Edit
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
-                      <Trash2 size={14} /> Delete
-                    </button>
-                  )}
-                  {!isOwn && (
-                    <button onClick={() => { setShowReport(true); setShowMenu(false) }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
-                      <Flag size={14} /> Report
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Menu — edit/delete/report all require auth */}
+            {user && (
+              <div className="relative flex-shrink-0">
+                <button onClick={() => setShowMenu(m => !m)} className="btn-ghost p-1 text-agora-400">
+                  <MoreHorizontal size={16} />
+                </button>
+                {showMenu && (
+                  <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
+                    onBlur={() => setShowMenu(false)}>
+                    {isOwn && !post.repost_of_id && (
+                      <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <Pencil size={14} /> Edit
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                    {!isOwn && (
+                      <button onClick={() => { setShowReport(true); setShowMenu(false) }}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <Flag size={14} /> Report
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Trigger warning banner — shown when post has a content warning and not yet expanded */}
@@ -745,18 +741,46 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Content — hidden behind TW gate until expanded */}
               {(!post.content_warning || twExpanded) && (
                 <>
-              {/* Content */}
-              {(post.repost_of_id ? post.repost_content : post.content) && (
+              {/* Content — the author's own words (their commentary, when this is a repost) */}
+              {post.content && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-                  {renderContent(post.repost_of_id ? post.repost_content! : post.content)}
+                  {renderContent(post.content)}
                 </p>
               )}
 
-              {/* Reposter's comment */}
-              {post.repost_of_id && post.content && (
-                <p className="text-sm text-agora-500 dark:text-agora-400 mt-2 italic">
-                  "{renderContent(post.content)}"
-                </p>
+              {/* Quoted post — the original post being shared, visually nested so it reads as quoted material */}
+              {post.repost_of_id && (
+                <div
+                  onClick={e => {
+                    if ((e.target as HTMLElement).closest('a')) return
+                    navigate(`/post/${post.repost_of_id}`)
+                  }}
+                  className="mt-2 border border-agora-200 dark:border-agora-600 rounded-xl p-3 cursor-pointer hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="w-6 h-6 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                      <span className="w-full h-full flex items-center justify-center text-[10px] font-bold text-agora-600 dark:text-agora-300">
+                        {post.repost_author_display_name?.[0]?.toUpperCase() || '?'}
+                      </span>
+                    </div>
+                    <Link to={`/profile/${post.repost_author_username}`}
+                      className="font-semibold text-agora-800 dark:text-agora-200 hover:underline text-sm">
+                      {post.repost_author_display_name || post.repost_author_username}
+                    </Link>
+                    {post.repost_author_pronouns && (
+                      <span className="text-agora-400 dark:text-agora-500 text-xs">({post.repost_author_pronouns})</span>
+                    )}
+                    <span className="text-agora-400 text-xs">{handle(post.repost_author_username!)}</span>
+                  </div>
+                  {post.repost_content && (
+                    <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">
+                      {renderContent(post.repost_content)}
+                    </p>
+                  )}
+                  {post.repost_image_url && (
+                    <img src={post.repost_image_url} alt="" className="mt-2 rounded-lg max-h-64 object-cover w-full" />
+                  )}
+                </div>
               )}
 
               {/* Edited label */}
@@ -801,9 +825,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
               {/* Image(s) */}
               {(() => {
-                const photos: string[] = post.repost_of_id
-                  ? (post.repost_image_url ? [post.repost_image_url] : [])
-                  : (post.photo_urls && post.photo_urls.length > 0 ? post.photo_urls : post.image_url ? [post.image_url] : [])
+                const photos: string[] = post.photo_urls && post.photo_urls.length > 0 ? post.photo_urls : post.image_url ? [post.image_url] : []
                 if (photos.length === 0) return null
 
                 // Single GIF share-page link
@@ -928,54 +950,61 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
             </div>
           )}
 
-          {/* Poll */}
+          {/* Poll — guests can view results but voting requires auth */}
           {post.poll_options && post.poll_options.length >= 2 && (
-            <PollWidget post={post} onVote={pollVote.mutate} invalidate={invalidate} />
+            <PollWidget post={post} onVote={user ? pollVote.mutate : () => {}} invalidate={invalidate} />
           )}
 
           {/* Actions */}
           <div className="mt-3">
             <div className="flex items-center gap-4 text-agora-400 dark:text-agora-500">
-              {/* Reaction button + picker */}
-              <div className="relative">
-                <button
-                  onPointerDown={() => {
-                    inLongPressRef.current = false
-                    hoveredReactionRef.current = null
-                    longPressTimerRef.current = setTimeout(() => {
-                      inLongPressRef.current = true
-                      setShowReactionPicker(true)
-                    }, 400)
-                  }}
-                  onPointerUp={() => {
-                    if (longPressTimerRef.current) {
-                      clearTimeout(longPressTimerRef.current)
-                      longPressTimerRef.current = null
-                    }
-                    if (!inLongPressRef.current) {
-                      handleReactionPick('like')
-                    }
-                    // long-press release is handled by the document pointerup listener
-                  }}
-                  onPointerCancel={() => {
-                    if (longPressTimerRef.current) {
-                      clearTimeout(longPressTimerRef.current)
-                      longPressTimerRef.current = null
-                    }
-                  }}
-                  onContextMenu={e => e.preventDefault()}
-                  className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
-                  title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
-                >
-                  <span className="text-base leading-none" style={{lineHeight:1}}>
-                    {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
-                  </span>
+              {/* Reaction button + picker — guests get a read-only, inert icon */}
+              {user ? (
+                <div className="relative">
+                  <button
+                    onPointerDown={() => {
+                      inLongPressRef.current = false
+                      hoveredReactionRef.current = null
+                      longPressTimerRef.current = setTimeout(() => {
+                        inLongPressRef.current = true
+                        setShowReactionPicker(true)
+                      }, 400)
+                    }}
+                    onPointerUp={() => {
+                      if (longPressTimerRef.current) {
+                        clearTimeout(longPressTimerRef.current)
+                        longPressTimerRef.current = null
+                      }
+                      if (!inLongPressRef.current) {
+                        handleReactionPick('like')
+                      }
+                      // long-press release is handled by the document pointerup listener
+                    }}
+                    onPointerCancel={() => {
+                      if (longPressTimerRef.current) {
+                        clearTimeout(longPressTimerRef.current)
+                        longPressTimerRef.current = null
+                      }
+                    }}
+                    onContextMenu={e => e.preventDefault()}
+                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
+                    title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
+                  >
+                    <span className="text-base leading-none" style={{lineHeight:1}}>
+                      {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                    </span>
+                    <span className="text-sm">{post.reaction_count || ''}</span>
+                  </button>
+                  {showReactionPicker && (
+                    <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
+                  )}
+                </div>
+              ) : (
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to react">
+                  <span className="text-base leading-none" style={{lineHeight:1}}>🤍</span>
                   <span className="text-sm">{post.reaction_count || ''}</span>
-                </button>
-                {showReactionPicker && (
-                  <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
-                )}
-              </div>
+                </span>
+              )}
 
               <button
                 onClick={() => setShowComments(c => !c)}
@@ -984,16 +1013,23 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 <span>{post.comment_count}</span>
               </button>
 
-              <button
-                onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
-                disabled={post.visibility !== 'public'}
-                title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
-                className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
-                <Repeat2 size={16} />
-                {sharedConfirm
-                  ? <span className="text-xs">Shared!</span>
-                  : <span>{post.repost_count || ''}</span>}
-              </button>
+              {user ? (
+                <button
+                  onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
+                  disabled={post.visibility !== 'public'}
+                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
+                  className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
+                  <Repeat2 size={16} />
+                  {sharedConfirm
+                    ? <span className="text-xs">Shared!</span>
+                    : <span>{post.repost_count || ''}</span>}
+                </button>
+              ) : (
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to share">
+                  <Repeat2 size={16} />
+                  <span>{post.repost_count || ''}</span>
+                </span>
+              )}
             </div>
 
             {/* Reaction summary bar */}
@@ -1063,8 +1099,8 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         </div>
       )}
 
-      {/* AGORA-87: Inline quick-comment box */}
-      {!post.repost_of_id && (
+      {/* AGORA-87: Inline quick-comment box — guests use the sign-in prompt in CommentsSection instead */}
+      {!post.repost_of_id && user && (
         <div className="flex items-center gap-2 px-1 pt-1 pb-0.5">
           <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
             {useAuthStore.getState().user?.avatar_url

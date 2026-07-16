@@ -6,6 +6,13 @@ const SEEN_KEY = 'agora_seen_v2'
 
 const FEATURES = [
   {
+    emoji: '🌐',
+    title: 'Fediverse (ActivityPub)',
+    desc: "Your public posts are now discoverable and followable from Mastodon and other fediverse apps, and replies go both ways. Off by default for private posts, on by default for public ones — there's a toggle in Settings → Privacy if you'd rather opt out.",
+    link: '/fediverse',
+    linkText: 'Explore the Fediverse →',
+  },
+  {
     emoji: '📖',
     title: 'Pages',
     desc: 'Follow public Pages from bands, businesses, creators, and organisations. Their posts appear in your feed.',

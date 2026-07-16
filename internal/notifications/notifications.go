@@ -388,6 +388,8 @@ func pushNotifContent(t, actorName string) (title, body string) {
 		return "Wall post request", actorName + " wants to post on your wall"
 	case "user_post":
 		return "New post", actorName + " just posted something new"
+	case "fediverse_post":
+		return "New post from the fediverse", actorName + " posted something new"
 	case "group_join_request":
 		return "Join request", actorName + " wants to join your group"
 	case "group_join_approved":

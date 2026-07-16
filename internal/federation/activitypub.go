@@ -660,7 +660,7 @@ func (s *Service) PageFollowers(w http.ResponseWriter, r *http.Request) {
 // legacy custom-protocol shape. It verifies the HTTP Signature (not the old
 // embedded-JSON-field Ed25519 scheme) before doing anything else.
 func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, body []byte) {
-	verifiedActor, err := verifyInboundSignature(r, body)
+	verifiedActor, err := s.verifyInboundSignature(r, body)
 	if err != nil {
 		log.Printf("federation: ap signature verification failed: %v", err)
 		writeError(w, 401, "invalid signature")
@@ -1581,6 +1581,83 @@ type remoteActorProfile struct {
 	Name              string
 	Summary           string
 	IconURL           string
+}
+
+// fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
+// obtain its publicKeyPem, signed as a local user's own actor. Instances
+// that enforce "authorized fetch" (Threads chief among them) blanket-404
+// unsigned actor GETs — which used to break verifying the HTTP Signature on
+// every inbound activity they send us, including the Accept(Follow) that
+// confirms an outbound follow, leaving it stuck "Requested" forever
+// (AGORA-175). Prefers whichever local user has a pending follow of this
+// exact actor (the common case: verifying that follow's own Accept), falling
+// back to any local user with an existing keypair, then any local user at
+// all, so inbound activities from authorized-fetch instances still verify
+// even without a matching ap_following row.
+// signerUserIDForActorFetch picks which local user's key to sign an
+// authorized-fetch actor GET with: whichever local user has a pending (or
+// past) follow of actorURL, since we already have a legitimate reason to
+// query them; failing that, any local user with an existing keypair; failing
+// that, any local user at all (getOrCreateUserKeyPair lazily generates one).
+func (s *Service) signerUserIDForActorFetch(actorURL string) string {
+	var userID string
+	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
+	if userID == "" {
+		s.db.QueryRow(`SELECT id FROM users WHERE is_remote = false AND federation_private_key <> '' ORDER BY created_at LIMIT 1`).Scan(&userID)
+	}
+	if userID == "" {
+		s.db.QueryRow(`SELECT id FROM users WHERE is_remote = false ORDER BY created_at LIMIT 1`).Scan(&userID)
+	}
+	return userID
+}
+
+func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error) {
+	actorURL := strings.SplitN(keyID, "#", 2)[0]
+
+	userID := s.signerUserIDForActorFetch(actorURL)
+	if userID == "" {
+		return nil, fmt.Errorf("no local user available to sign actor fetch")
+	}
+
+	var username, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT username, federation_public_key, federation_private_key FROM users WHERE id = $1`, userID).
+		Scan(&username, &pubPEM, &privPEM); err != nil {
+		return nil, err
+	}
+	_, _, privKey, err := s.getOrCreateUserKeyPair(userID, pubPEM, privPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/activity+json")
+	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+		return nil, err
+	}
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("actor fetch returned %d", resp.StatusCode)
+	}
+
+	var actor struct {
+		PublicKey struct {
+			PublicKeyPem string `json:"publicKeyPem"`
+		} `json:"publicKey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
+		return nil, err
+	}
+	if actor.PublicKey.PublicKeyPem == "" {
+		return nil, fmt.Errorf("actor has no publicKeyPem")
+	}
+	return parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
 }
 
 // fetchActorProfileSigned dereferences a remote actor URL (via the SSRF-safe

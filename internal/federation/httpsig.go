@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -143,12 +142,13 @@ func splitSignatureFields(v string) []string {
 
 // verifyInboundSignature validates the HTTP Signature on an inbound
 // ActivityPub request. It dereferences the signer's actor document (via the
-// SSRF-safe fedHTTPClient) to obtain their public key, then verifies both
-// the signature and that the Digest header matches the actual body. On
-// success it returns the verified actor URL (the keyId with any #fragment
-// stripped) — callers must treat this, not any unsigned "actor"/"attributedTo"
-// field in the request body, as the trustworthy signer identity.
-func verifyInboundSignature(r *http.Request, body []byte) (string, error) {
+// SSRF-safe fedHTTPClient, itself signed — see fetchActorPublicKeySigned) to
+// obtain their public key, then verifies both the signature and that the
+// Digest header matches the actual body. On success it returns the verified
+// actor URL (the keyId with any #fragment stripped) — callers must treat
+// this, not any unsigned "actor"/"attributedTo" field in the request body,
+// as the trustworthy signer identity.
+func (s *Service) verifyInboundSignature(r *http.Request, body []byte) (string, error) {
 	sp, err := parseSignatureHeader(r.Header.Get("Signature"))
 	if err != nil {
 		return "", err
@@ -165,7 +165,7 @@ func verifyInboundSignature(r *http.Request, body []byte) (string, error) {
 		}
 	}
 
-	pubKey, err := fetchActorPublicKey(sp.keyID)
+	pubKey, err := s.fetchActorPublicKeySigned(sp.keyID)
 	if err != nil {
 		return "", fmt.Errorf("fetch actor public key: %w", err)
 	}
@@ -176,38 +176,6 @@ func verifyInboundSignature(r *http.Request, body []byte) (string, error) {
 		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
 	return strings.SplitN(sp.keyID, "#", 2)[0], nil
-}
-
-// fetchActorPublicKey dereferences an actor (or actor#key) URL and extracts
-// its publicKeyPem.
-func fetchActorPublicKey(keyID string) (*rsa.PublicKey, error) {
-	actorURL := strings.SplitN(keyID, "#", 2)[0]
-	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/activity+json")
-	resp, err := fedHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("actor fetch returned %d", resp.StatusCode)
-	}
-
-	var actor struct {
-		PublicKey struct {
-			PublicKeyPem string `json:"publicKeyPem"`
-		} `json:"publicKey"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
-		return nil, err
-	}
-	if actor.PublicKey.PublicKeyPem == "" {
-		return nil, errors.New("actor has no publicKeyPem")
-	}
-	return parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
 }
 
 func parseRSAPublicKeyPEM(pemStr string) (*rsa.PublicKey, error) {

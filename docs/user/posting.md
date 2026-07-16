@@ -34,8 +34,9 @@
 ## Tagging people and groups
 
 - Type **@username** to tag a friend — they'll receive a notification.
+- Type **@handle@instance.social** to tag a fediverse account — they'll get a real notification on their own server, whether or not you follow them or they follow you. See [The Fediverse](fediverse.md).
 - Type **+group-name** to tag a group — group admins will be notified.
-- An autocomplete dropdown appears as you type.
+- An autocomplete dropdown appears as you type (local users and groups only — a fediverse handle has no autocomplete, type the full handle).
 
 ## Adding a content warning
 

@@ -53,11 +53,51 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// OptionalMiddleware parses a bearer token if present and attaches the user
+// to the request context, but — unlike Middleware — allows the request
+// through with no user context when the token is missing or invalid. Used
+// for read routes that guests may access (public posts, profiles).
+func (s *Service) OptionalMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			header := r.Header.Get("Authorization")
+			if strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			}
+		}
+		if tokenStr != "" {
+			if claims, err := s.parseToken(tokenStr); err == nil {
+				ctx := context.WithValue(r.Context(), ctxkeys.UserID, claims.UserID)
+				ctx  = context.WithValue(ctx, ctxkeys.UserRole, claims.Role)
+				r = r.WithContext(ctx)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireAdmin gates routes that manage the instance itself — settings, SMTP
+// credentials, role assignment, user deletion, federation. These are admin-only:
+// moderators must NOT reach them (a moderator with admin-panel access could
+// promote themselves via the role endpoint).
 func (s *Service) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		role := ctxkeys.GetUserRole(r.Context())
-		if role != "admin" && role != "moderator" {
+		if role != "admin" {
 			writeError(w, http.StatusForbidden, "admin required"); return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireModerator gates content-moderation routes (reports, suspensions, bans).
+// Both moderators and admins qualify.
+func (s *Service) RequireModerator(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		role := ctxkeys.GetUserRole(r.Context())
+		if role != "admin" && role != "moderator" {
+			writeError(w, http.StatusForbidden, "moderator required"); return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -371,13 +411,17 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		ProfilePrivate       bool
 		HideTimeline         bool
 		WallApprovalRequired bool
+		ActivityPubEnabled   bool
+		FediverseNotificationsEnabled bool
 	}
 	err = s.db.QueryRow(`
 		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
-		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required
+		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required,
+		       activitypub_enabled, fediverse_notifications_enabled
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
-		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired)
+		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
+		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -390,6 +434,8 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"role": u.Role, "profile_private": u.ProfilePrivate,
 		"hide_timeline": u.HideTimeline,
 		"wall_approval_required": u.WallApprovalRequired,
+		"activitypub_enabled":    u.ActivityPubEnabled,
+		"fediverse_notifications_enabled": u.FediverseNotificationsEnabled,
 	})
 }
 

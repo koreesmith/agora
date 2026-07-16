@@ -26,6 +26,10 @@ Welcome to Agora — a private, federated social network built for the people yo
 - [Following Pages](pages.md)
 - [Creating a Page](creating-pages.md)
 
+## The Fediverse
+
+- [Following Mastodon and other fediverse accounts](fediverse.md)
+
 ## Messaging
 
 - [Direct messages](messages.md)

@@ -279,7 +279,7 @@ func (s *Service) fetchFeed(feedID, ownerID string) (Feed, bool) {
 func validFilterType(t string) bool {
 	switch t {
 	case "friend_group", "community_group", "exclude_friend", "exclude_group", "post_type",
-		"include_page", "exclude_page":
+		"include_page", "exclude_page", "fediverse_account", "fediverse_all":
 		return true
 	}
 	return false

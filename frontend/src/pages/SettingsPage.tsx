@@ -83,6 +83,24 @@ export default function SettingsPage() {
     onError: fail,
   })
 
+  const toggleActivityPub = useMutation({
+    mutationFn: () => {
+      const newVal = !user?.activitypub_enabled
+      return usersApi.updateProfile({ activitypub_enabled: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ activitypub_enabled: newVal }); ok('Fediverse setting updated') },
+    onError: fail,
+  })
+
+  const toggleFediverseNotifications = useMutation({
+    mutationFn: () => {
+      const newVal = !user?.fediverse_notifications_enabled
+      return usersApi.updateProfile({ fediverse_notifications_enabled: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ fediverse_notifications_enabled: newVal }); ok('Fediverse notification setting updated') },
+    onError: fail,
+  })
+
   const uploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return
     const res = await usersApi.uploadAvatar(f)
@@ -266,7 +284,7 @@ export default function SettingsPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.wall_approval_required ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
-          <div className="flex items-center justify-between py-2">
+          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Who can message you</p>
               <p className="text-xs text-agora-400">Control who can send you direct messages</p>
@@ -280,6 +298,16 @@ export default function SettingsPage() {
               <option value="friends">Friends only</option>
               <option value="nobody">Nobody</option>
             </select>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+              <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts. Only applies to public posts — private and friends-only posts are never federated.</p>
+            </div>
+            <button onClick={() => toggleActivityPub.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.activitypub_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
           </div>
         </div>
       )}
@@ -297,6 +325,18 @@ export default function SettingsPage() {
               disabled={toggleEmailNotifs.isPending}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${emailNotifsEnabled ? 'bg-agora-600' : 'bg-agora-200 dark:bg-agora-700'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${emailNotifsEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Fediverse post notifications</p>
+              <p className="text-xs text-agora-400">Get notified when a fediverse account you follow posts something new. Doesn't affect any other notification type.</p>
+            </div>
+            <button
+              onClick={() => toggleFediverseNotifications.mutate()}
+              disabled={toggleFediverseNotifications.isPending}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.fediverse_notifications_enabled ? 'bg-agora-600' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.fediverse_notifications_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
         </div>

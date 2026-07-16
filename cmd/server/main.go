@@ -52,7 +52,7 @@ func main() {
 	// ── Services ──────────────────────────────────────────────────────────
 	emailSvc  := notifications.NewEmailService(db, cfg)
 	notifSvc  := notifications.NewService(db, emailSvc)
-	mediaSvc  := media.NewService(cfg.UploadDir)
+	mediaSvc  := media.NewService(db, cfg.UploadDir)
 	userSvc   := users.NewService(db, mediaSvc)
 	authSvc   := auth.NewService(db, cfg, notifSvc)
 	friendSvc := friends.NewService(db, notifSvc)
@@ -63,7 +63,7 @@ func main() {
 	searchSvc := search.NewService(db)
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
-	fedSvc    := federation.NewService(db, cfg, feedSvc, userSvc)
+	fedSvc    := federation.NewService(db, cfg, notifSvc)
 	dmSvc          := dm.New(db)
 	blocksSvc      := blocks.New(db)
 	customFeedsSvc  := customfeeds.NewService(db)
@@ -74,6 +74,7 @@ func main() {
 	friendSvc.SetFed(fedSvc)
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
+	pagesSvc.SetFed(fedSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -131,6 +132,13 @@ func main() {
 		r.Post("/notifications/unsubscribe", notifSvc.OneClickUnsubscribe)
 		r.Get("/notifications/unsubscribe",  notifSvc.UnsubscribePage)
 
+		// Public reads (guests welcome) — optional auth still personalizes results
+		r.Group(func(r chi.Router) {
+			r.Use(authSvc.OptionalMiddleware)
+			feed.RegisterPublicRoutes(r, feedSvc)
+			users.RegisterPublicRoutes(r, userSvc)
+		})
+
 		// Authenticated
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)
@@ -151,6 +159,18 @@ func main() {
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
 			pages.RegisterRoutes(r, pagesSvc)
 			interactions.RegisterRoutes(r, interactionsSvc)
+			// Only ever called by Agora's own authenticated frontend (SearchPage,
+			// FediversePage) — must live under /api like every other frontend
+			// call, not at the bare /federation/... path used by remote
+			// fediverse servers dereferencing our public actor/WebFinger URLs.
+			federation.RegisterAuthedRoutes(r, fedSvc)
+		})
+
+		// Moderator or admin — content moderation actions
+		r.Group(func(r chi.Router) {
+			r.Use(authSvc.Middleware)
+			r.Use(authSvc.RequireModerator)
+			moderation.RegisterModeratorRoutes(r, modSvc)
 		})
 
 		// Admin only
@@ -162,7 +182,9 @@ func main() {
 		})
 	})
 
-	// Federation endpoints
+	// Federation endpoints — public, unprefixed: WebFinger/host-meta/actor
+	// docs/inbox are dereferenced directly by remote fediverse servers at
+	// well-known paths, not through /api.
 	federation.RegisterRoutes(r, fedSvc)
 
 	// Health check

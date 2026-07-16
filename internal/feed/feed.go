@@ -23,10 +23,46 @@ import (
 
 var mentionRe   = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
+// fediverseMentionRe (AGORA-163) matches a full @handle@instance.tld mention
+// shape, distinct from a bare local @username. Duplicated (not imported) in
+// internal/federation/activitypub.go, which does the actual resolve/deliver
+// work — this package only needs to know a match is fediverse-shaped so
+// notifyMentions doesn't also treat it as a (near-certainly wrong) local
+// mention. Keep both copies in sync if this pattern ever changes.
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
+	// BroadcastPublicPost/BroadcastDeletePost drive standard ActivityPub
+	// delivery to a user's fediverse followers (AGORA-145) — distinct from
+	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
+	BroadcastPublicPost(userID, postID string)
+	BroadcastDeletePost(userID, postID string)
+	// BroadcastUpdatePost delivers a signed Update when a federated post is
+	// edited (AGORA-150).
+	BroadcastUpdatePost(userID, postID string)
+	// DeliverReply drives outbound ActivityPub delivery for a comment that
+	// directly replies to a fediverse participant (AGORA-147).
+	DeliverReply(userID, commentID, replyToID string)
+	// DeliverReplyUpdate mirrors DeliverReply but for an edit (AGORA-162).
+	DeliverReplyUpdate(userID, commentID, replyToID string)
+	// BroadcastPagePostUpdate/Delete (AGORA-115): a page post's edit/delete
+	// goes through this same generic EditPost/DeletePost, but must federate
+	// under the page's own actor, not the posting member's — page posts are
+	// broadcast to page_remote_subscribers, not the member's ap_followers.
+	BroadcastPagePostUpdate(pageID, postID string)
+	BroadcastPagePostDelete(pageID, postID string)
+	// DeliverLike/DeliverUnlike (AGORA-158): outbound Like/Undo(Like) when
+	// liking/unliking a remote post — the reverse of handleInboundLike
+	// (AGORA-153), which only ever handled a remote actor liking one of ours.
+	DeliverLike(userID, postID string)
+	DeliverUnlike(userID, postID string)
+	// DeliverAnnounce/DeliverUnannounce (AGORA-159): outbound Announce/
+	// Undo(Announce) when reposting/un-reposting a remote post — the reverse
+	// of handleInboundAnnounce (AGORA-153).
+	DeliverAnnounce(userID, repostID, originalPostID string)
+	DeliverUnannounce(userID, repostID, originalPostID string)
 }
 
 type Service struct {
@@ -49,20 +85,16 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/groups/mention-search",              s.GroupMentionSearch) // AGORA-89
 	r.Get("/feed",                               s.GetFeed)
 	r.Post("/posts",                             s.CreatePost)
-	r.Get("/posts/{id}",                         s.GetPost)
 	r.Delete("/posts/{id}",                      s.DeletePost)
 	r.Patch("/posts/{id}",                       s.EditPost)
 	r.Post("/posts/{id}/like",                   s.LikePost)
 	r.Delete("/posts/{id}/like",                 s.UnlikePost)
 	r.Post("/posts/{id}/react",                  s.ReactPost)
 	r.Delete("/posts/{id}/react",                s.UnreactPost)
-	r.Get("/posts/{id}/reactions",               s.GetReactions)
 	r.Post("/posts/{id}/repost",                 s.Repost)
-	r.Get("/posts/{id}/comments",                s.GetComments)
-	r.Post("/posts/{id}/comments",               s.CreateComment)
+	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
-	r.Get("/users/{username}/posts",             s.GetUserPosts)
 	r.Post("/posts/{id}/poll/vote",              s.PollVote)
 	r.Delete("/posts/{id}/poll/vote",            s.PollUnvote)
 	r.Post("/posts/{id}/poll/options",           s.PollAddOption)
@@ -71,6 +103,17 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/users/me/wall-queue",                s.GetWallQueue)
 	r.Post("/posts/{id}/wall-approve",           s.WallApprove)
 	r.Post("/posts/{id}/wall-reject",            s.WallReject)
+}
+
+// RegisterPublicRoutes registers read-only routes reachable by guests
+// (no auth required, though a valid token — via OptionalMiddleware — still
+// personalizes results like/reaction state, blocks, etc).
+func RegisterPublicRoutes(r chi.Router, s *Service) {
+	r.Get("/feed/public",             s.PublicFeed)
+	r.Get("/posts/{id}",              s.GetPost)
+	r.Get("/posts/{id}/reactions",    s.GetReactions)
+	r.Get("/posts/{id}/comments",     s.GetComments)
+	r.Get("/users/{username}/posts",  s.GetUserPosts)
 }
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
@@ -94,7 +137,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -142,7 +185,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-			       p.repost_of_id, p.is_remote, p.remote_instance,
+			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -250,7 +293,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
-	var includePageIDs, excludePageIDs []string
+	var includePageIDs, excludePageIDs, fediverseAccountIDs []string
+	var fediverseAll bool
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -269,6 +313,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			includePageIDs = append(includePageIDs, val)
 		case "exclude_page":
 			excludePageIDs = append(excludePageIDs, val)
+		case "fediverse_account":
+			fediverseAccountIDs = append(fediverseAccountIDs, val)
+		case "fediverse_all":
+			fediverseAll = true
 		}
 	}
 	filterRows.Close()
@@ -286,7 +334,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	var extraClauses []string
 
 	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
-	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 {
+	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 ||
+		len(fediverseAccountIDs) > 0 || fediverseAll {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -316,6 +365,29 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			}
 			inclParts = append(inclParts, fmt.Sprintf(
 				`p.page_id IN (%s)`, strings.Join(phs, ",")))
+		}
+		// AGORA-146: a specific followed fediverse account. The EXISTS check
+		// re-verifies the viewer actually follows that account (not just
+		// that the stored filter value names it) so a filter's value can't
+		// be used to see an account the viewer doesn't follow.
+		if len(fediverseAccountIDs) > 0 {
+			phs := make([]string, len(fediverseAccountIDs))
+			for i, id := range fediverseAccountIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`(p.author_id IN (%s) AND EXISTS(
+				  SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+				))`, strings.Join(phs, ",")))
+		}
+		// AGORA-146: every fediverse account the viewer follows.
+		if fediverseAll {
+			inclParts = append(inclParts,
+				`(p.is_remote = true AND EXISTS(
+				  SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+				))`)
 		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
@@ -376,7 +448,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -415,6 +487,14 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		        AND ((f.requester_id = $1 AND f.addressee_id = p.wall_user_id)
 		          OR (f.addressee_id = $1 AND f.requester_id = p.wall_user_id))
 		      AND f.status = 'accepted'
+		    )
+		    -- AGORA-146: a remote followed account has no friendships row —
+		    -- scoped to custom feeds only (not the main feed query), matching
+		    -- the ticket's design that fediverse follows surface only through
+		    -- an explicit custom-feed filter, never the public instance feed.
+		    OR EXISTS(
+		      SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+		      WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
 		    )
 		  )
 		  AND (
@@ -459,6 +539,75 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	if smartRanking && len(posts) > 1 {
 		posts = s.rankPosts(posts, userID)
 	}
+
+	writeJSON(w, 200, map[string]any{"posts": posts})
+}
+
+// PublicFeed serves a chronological, instance-wide feed of public posts for
+// guests and members alike: authored by non-profile_private users, top-level
+// (no comments), and not scoped to a wall/group/page. Unlike GetFeed this is
+// not personalized to a friend graph.
+func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
+	viewerID := auth.UserIDFromCtx(r.Context())
+	limit, offset := pageParams(r)
+
+	// viewerID feeds a uuid column below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
+	blockClause := ""
+	if viewerID != "" {
+		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))`
+	}
+
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
+		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
+		       cg.name, cg.slug,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
+		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
+		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
+		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
+		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
+		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at,
+		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
+		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
+		       p.video_url, p.video_thumb_url
+		FROM posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
+		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
+		LEFT JOIN users wu ON wu.id = p.wall_user_id
+		LEFT JOIN pages pg ON pg.id = p.page_id
+		WHERE p.parent_id IS NULL
+		  AND p.deleted_at IS NULL
+		  AND p.visibility = 'public'
+		  AND NOT u.profile_private
+		  AND u.deletion_scheduled_at IS NULL
+		  AND p.wall_user_id IS NULL
+		  AND p.community_group_id IS NULL
+		  AND p.page_id IS NULL
+		  %s
+		ORDER BY p.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, blockClause), viewerParam, limit, offset)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	posts := scanPosts(rows)
+	s.enrichReactions(posts, viewerID)
+	s.enrichPolls(posts, viewerID)
+	s.enrichPhotos(posts)
 
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
@@ -612,11 +761,19 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		visFilter = `p.visibility = 'public'`
 	}
 
+	// viewerID is compared against uuid columns; an empty string (guest) is
+	// invalid input for the uuid type, so pass NULL instead — comparisons
+	// against NULL correctly evaluate to false/no-match.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -635,7 +792,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
 		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
-	`, viewerID, authorID, limit, offset)
+	`, viewerParam, authorID, limit, offset)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -832,6 +989,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 				"created_at":    timeNow(),
 			},
 		})
+		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
+		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -858,6 +1017,29 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	if parentID != nil {
 		writeJSON(w, 200, map[string]any{"redirect_to_post": *parentID})
 		return
+	}
+
+	// Author's profile-private gate applies regardless of the individual
+	// post's own visibility, consistent with GetUserPosts's timeline gate.
+	if authorID != viewerID {
+		var authorProfilePrivate bool
+		s.db.QueryRow(`SELECT profile_private FROM users WHERE id = $1`, authorID).Scan(&authorProfilePrivate)
+		if authorProfilePrivate {
+			var isFriend bool
+			if viewerID != "" {
+				s.db.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM friendships
+						WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+						AND status = 'accepted'
+					)
+				`, viewerID, authorID).Scan(&isFriend)
+			}
+			if !isFriend {
+				writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private_profile"})
+				return
+			}
+		}
 	}
 
 	// Access control
@@ -907,12 +1089,19 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// viewerID feeds uuid columns below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
+
 	// Access granted — run the full query
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
@@ -932,7 +1121,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
-	`, id, viewerID)
+	`, id, viewerParam)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -956,8 +1145,9 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var authorID string
-	var wallUserID *string
-	s.db.QueryRow(`SELECT author_id, wall_user_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&authorID, &wallUserID)
+	var wallUserID, pageID, repostOfID *string
+	s.db.QueryRow(`SELECT author_id, wall_user_id, page_id, repost_of_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&authorID, &wallUserID, &pageID, &repostOfID)
 	if authorID == "" {
 		writeError(w, 404, "post not found")
 		return
@@ -972,13 +1162,28 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast deletion to federated instances
 	if s.fed != nil {
-		var username string
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "delete_post",
-			"actor": username,
-			"object": map[string]string{"id": id},
-		})
+		if pageID != nil {
+			// AGORA-115: a page post federates under the page's own actor.
+			go s.fed.BroadcastPagePostDelete(*pageID, id)
+		} else if repostOfID != nil {
+			// AGORA-159: a repost was never its own Create — undo the
+			// Announce instead of sending a Delete/Tombstone nobody
+			// remote has a matching Create for. DeliverUnannounce itself
+			// no-ops if the original post isn't remote.
+			go s.fed.DeliverUnannounce(authorID, id, *repostOfID)
+		} else {
+			var username string
+			s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+			go s.fed.BroadcastToFriendInstances(userID, map[string]any{
+				"type":  "delete_post",
+				"actor": username,
+				"object": map[string]string{"id": id},
+			})
+			// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
+			// not the deleter (userID may be an admin/moderator), since the Delete
+			// must come from the same actor that federated the original post.
+			go s.fed.BroadcastDeletePost(authorID, id)
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
@@ -1002,6 +1207,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
+	// AGORA-158: federate the like if the target is a remote post.
+	if s.fed != nil {
+		go s.fed.DeliverLike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "liked"})
 }
 
@@ -1009,6 +1218,9 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	if s.fed != nil {
+		go s.fed.DeliverUnlike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unliked"})
 }
 
@@ -1063,6 +1275,13 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
+	// AGORA-158: standard ActivityPub only has a plain Like, no concept of
+	// emoji reaction types — federate only when the reaction is exactly
+	// "like", the same restriction Mastodon's own favourite maps to.
+	if s.fed != nil && req.Type == "like" {
+		go s.fed.DeliverLike(userID, postID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
 }
 
@@ -1071,6 +1290,11 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	// AGORA-158: DeliverUnlike itself no-ops safely if there was never a
+	// federated like to undo (e.g. the reaction was "love", not "like").
+	if s.fed != nil {
+		go s.fed.DeliverUnlike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
 }
 
@@ -1266,7 +1490,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -1308,7 +1532,7 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
-		       p.repost_of_id, p.is_remote, p.remote_instance,
+		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
 		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
@@ -1619,6 +1843,11 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(origAuthorID, userID, "post_repost", repostOfID, "")
 	}
 
+	// AGORA-159: federate as an Announce if the original post is remote.
+	if s.fed != nil {
+		go s.fed.DeliverAnnounce(userID, id, repostOfID)
+	}
+
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
@@ -1627,6 +1856,12 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
+	// viewerID feeds a uuid column below; an empty string (guest) is invalid
+	// input for the uuid type, so use NULL instead.
+	var viewerParam any = viewerID
+	if viewerID == "" {
+		viewerParam = nil
+	}
 
 	type Comment struct {
 		ID             string         `json:"id"`
@@ -1673,7 +1908,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	`
 
 	// Top-level comments
-	rows, err := s.db.Query(commentSQL, viewerID, postID)
+	rows, err := s.db.Query(commentSQL, viewerParam, postID)
 	if err != nil {
 		writeError(w, 500, "db error"); return
 	}
@@ -1691,12 +1926,12 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 
 	// Replies for each top-level comment, and depth-2 replies for each depth-1 reply
 	for i, c := range comments {
-		rrows, err := s.db.Query(commentSQL, viewerID, c.ID)
+		rrows, err := s.db.Query(commentSQL, viewerParam, c.ID)
 		if err != nil { continue }
 		for rrows.Next() {
 			reply := scanComment(rrows)
 			// Fetch depth-2 replies for this depth-1 reply
-			rrrows, err2 := s.db.Query(commentSQL, viewerID, reply.ID)
+			rrrows, err2 := s.db.Query(commentSQL, viewerParam, reply.ID)
 			if err2 == nil {
 				for rrrows.Next() {
 					reply.Replies = append(reply.Replies, scanComment(rrrows))
@@ -1846,6 +2081,16 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	go s.notifyMentions(req.Content, userID, postID)
 
+	// AGORA-147/AGORA-146: deliver to the fediverse if the immediate parent
+	// — either a specific remote comment (req.ReplyToID) or, just as often,
+	// a remote account's own top-level post pulled in via a fediverse
+	// custom feed — is itself remote-authored. DeliverReply already checks
+	// remoteness generically for whatever post/comment id it's given, so
+	// this doesn't need to special-case which kind of parent it is.
+	if s.fed != nil {
+		go s.fed.DeliverReply(userID, id, parentID)
+	}
+
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
@@ -1856,7 +2101,15 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	commentID := chi.URLParam(r, "commentID")
 
 	var commentAuthor, parentAuthor string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`, commentID, postID).Scan(&commentAuthor)
+	// Match direct children of the post (depth-0 comments) or children of
+	// those (depth-1 replies-to-a-reply) — the full 2-level depth Agora
+	// supports. Previously only depth-0 matched, so a reply-to-a-reply could
+	// never be deleted through this endpoint at all.
+	s.db.QueryRow(`
+		SELECT author_id FROM posts
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND (parent_id = $2 OR parent_id IN (SELECT id FROM posts WHERE parent_id = $2))
+	`, commentID, postID).Scan(&commentAuthor)
 	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1`, postID).Scan(&parentAuthor)
 
 	if commentAuthor == "" {
@@ -1869,6 +2122,12 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, commentID)
+
+	// AGORA-151: notify fediverse participants a federated reply was removed
+	if s.fed != nil {
+		go s.fed.BroadcastDeletePost(commentAuthor, commentID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -1880,8 +2139,9 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 
 	var authorID string
 	var repostOfID *string
-	s.db.QueryRow(`SELECT author_id, repost_of_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
-		Scan(&authorID, &repostOfID)
+	var pageID *string
+	s.db.QueryRow(`SELECT author_id, repost_of_id, page_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, id).
+		Scan(&authorID, &repostOfID, &pageID)
 	if authorID == "" {
 		writeError(w, 404, "post not found"); return
 	}
@@ -1969,6 +2229,16 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AGORA-150: notify fediverse followers a federated post was edited
+	if s.fed != nil {
+		if pageID != nil {
+			// AGORA-115: a page post federates under the page's own actor.
+			go s.fed.BroadcastPagePostUpdate(*pageID, id)
+		} else {
+			go s.fed.BroadcastUpdatePost(userID, id)
+		}
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "updated"})
 }
 
@@ -1977,9 +2247,14 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	commentID := chi.URLParam(r, "commentID")
 
-	var authorID string
-	s.db.QueryRow(`SELECT author_id FROM posts WHERE id = $1 AND parent_id = $2 AND deleted_at IS NULL`,
-		commentID, postID).Scan(&authorID)
+	var authorID, parentID string
+	// Same fix as DeleteComment: match depth-0 comments or depth-1 replies-to-
+	// a-reply, not just direct children of the post.
+	s.db.QueryRow(`
+		SELECT author_id, parent_id FROM posts
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND (parent_id = $2 OR parent_id IN (SELECT id FROM posts WHERE parent_id = $2))
+	`, commentID, postID).Scan(&authorID, &parentID)
 	if authorID == "" {
 		writeError(w, 404, "comment not found"); return
 	}
@@ -1995,6 +2270,13 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET content = $1, edited_at = NOW() WHERE id = $2`, req.Content, commentID)
+
+	// AGORA-162: mirror EditPost's federation hook — a previously-federated
+	// reply must send an Update, not go stale on the remote side forever.
+	if s.fed != nil {
+		go s.fed.DeliverReplyUpdate(userID, commentID, parentID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "updated"})
 }
 
@@ -2017,6 +2299,7 @@ type Post struct {
 	RepostOfID     *string `json:"repost_of_id"`
 	IsRemote       bool    `json:"is_remote"`
 	RemoteInstance string  `json:"remote_instance,omitempty"`
+	RemotePostID   string  `json:"remote_url,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	EditedAt       *string `json:"edited_at,omitempty"`
@@ -2078,7 +2361,7 @@ func scanPosts(rows interface {
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
-			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance,
+			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
 			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
 			&p.LinkURL, &p.LinkTitle, &p.LinkDescription, &p.LinkImage, &p.LinkDomain,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
@@ -2627,10 +2910,29 @@ func (s *Service) GroupMentionSearch(w http.ResponseWriter, r *http.Request) {
 // ── Mention helpers ───────────────────────────────────────────────────────────
 
 func (s *Service) notifyMentions(content, authorID, postID string) {
-	matches := mentionRe.FindAllStringSubmatch(content, -1)
+	// AGORA-163: a fediverse mention (@handle@instance.tld) must not also be
+	// treated as a local mention — @([a-zA-Z0-9_-]+) alone would otherwise
+	// match just the "handle" portion and look up a local user by that name,
+	// almost always resolving to nobody or, worse, an unrelated local user
+	// who happens to share the name. Skip any local match whose start index
+	// falls inside a fediverse match's span.
+	fediverseSpans := fediverseMentionRe.FindAllStringIndex(content, -1)
+	inFediverseSpan := func(idx int) bool {
+		for _, sp := range fediverseSpans {
+			if idx >= sp[0] && idx < sp[1] {
+				return true
+			}
+		}
+		return false
+	}
+
+	matches := mentionRe.FindAllStringSubmatchIndex(content, -1)
 	seen := map[string]bool{}
 	for _, m := range matches {
-		username := strings.ToLower(m[1])
+		if inFediverseSpan(m[0]) {
+			continue
+		}
+		username := strings.ToLower(content[m[2]:m[3]])
 		if seen[username] { continue }
 		seen[username] = true
 

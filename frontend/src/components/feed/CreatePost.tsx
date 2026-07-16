@@ -33,6 +33,9 @@ export default function CreatePost() {
   const [videoUrl, setVideoUrl] = useState('')
   const [videoThumbUrl, setVideoThumbUrl] = useState('')
   const [uploadingVideo, setUploadingVideo] = useState(false)
+  // AGORA-137: async transcode — video is processed in the background; poll until ready
+  const [videoProcessing, setVideoProcessing] = useState(false)
+  const videoPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // AGORA-89: group tag autocomplete
   const [groupSuggestions, setGroupSuggestions] = useState<any[]>([])
   const [showGroupSuggestions, setShowGroupSuggestions] = useState(false)
@@ -172,7 +175,9 @@ export default function CreatePost() {
       })
     },
     onSuccess: () => {
-      setContent(''); setImageUrls([]); setFriendListId(''); setVideoUrl(''); setVideoThumbUrl('')
+      setContent(''); setImageUrls([]); setFriendListId('')
+      stopVideoPolling(); localStorage.removeItem('agora_pending_video_job')
+      setVideoUrl(''); setVideoThumbUrl(''); setVideoProcessing(false)
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
@@ -218,16 +223,78 @@ export default function CreatePost() {
     // Non-image pastes (text, links) fall through to default behaviour
   }
 
-  // AGORA-119: video upload
+  // AGORA-137: transcoding runs in the background. Poll the job until it is
+  // done, then attach the resulting video. The job id is persisted so the user
+  // can navigate away and the poll resumes when they return.
+  const PENDING_VIDEO_KEY = 'agora_pending_video_job'
+
+  const stopVideoPolling = () => {
+    if (videoPollRef.current) {
+      clearInterval(videoPollRef.current)
+      videoPollRef.current = null
+    }
+  }
+
+  const startVideoPolling = (jobId: string) => {
+    stopVideoPolling()
+    localStorage.setItem(PENDING_VIDEO_KEY, jobId)
+    setVideoProcessing(true)
+    videoPollRef.current = setInterval(async () => {
+      try {
+        const { data } = await feedApi.getVideoJob(jobId)
+        if (data.status === 'done') {
+          stopVideoPolling()
+          localStorage.removeItem(PENDING_VIDEO_KEY)
+          setVideoProcessing(false)
+          setImageUrls([]) // video and photos are mutually exclusive
+          setVideoUrl(data.url)
+          setVideoThumbUrl(data.thumb_url || '')
+        } else if (data.status === 'failed') {
+          stopVideoPolling()
+          localStorage.removeItem(PENDING_VIDEO_KEY)
+          setVideoProcessing(false)
+          alert(data.error || 'Video processing failed. Please try a different file.')
+        }
+        // status 'processing' → keep polling
+      } catch (err: any) {
+        // A 404 means the job no longer exists — stop polling. Transient network
+        // errors are ignored so a brief blip doesn't abort a valid job.
+        if (err?.response?.status === 404) {
+          stopVideoPolling()
+          localStorage.removeItem(PENDING_VIDEO_KEY)
+          setVideoProcessing(false)
+        }
+      }
+    }, 3000)
+  }
+
+  const removeVideo = () => {
+    stopVideoPolling()
+    localStorage.removeItem(PENDING_VIDEO_KEY)
+    setVideoUrl('')
+    setVideoThumbUrl('')
+    setVideoProcessing(false)
+  }
+
+  // Resume a pending transcode after navigating away and back; clean up on unmount.
+  useEffect(() => {
+    const pending = localStorage.getItem(PENDING_VIDEO_KEY)
+    if (pending) startVideoPolling(pending)
+    return () => stopVideoPolling()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // AGORA-119 / AGORA-137: video upload — returns a job id, then we poll for the transcode
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     setUploadingVideo(true)
     try {
       const res = await feedApi.uploadMedia(file, 'videos')
-      setVideoUrl((res as any).data.url)
-      setVideoThumbUrl((res as any).data.thumb_url || '')
+      const jobId = (res as any).data.job_id
+      if (!jobId) throw new Error('missing job id')
       setImageUrls([]) // video and photos are mutually exclusive
+      startVideoPolling(jobId)
     } catch (err: any) {
       alert(err?.response?.data?.error || 'Video upload failed. Make sure it is under 2 minutes.')
     } finally {
@@ -244,7 +311,8 @@ export default function CreatePost() {
 
   const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
   const canPost = (content.trim() || imageUrls.length > 0 || videoUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
-    && !create.isPending && !uploading && (!twEnabled || twLabel.trim()) && validPoll
+    && !create.isPending && !uploading && !uploadingVideo && !videoProcessing
+    && (!twEnabled || twLabel.trim()) && validPoll
 
   return (
     <>
@@ -385,11 +453,25 @@ export default function CreatePost() {
         </div>
       </div>
 
+      {/* Video processing indicator (AGORA-137) */}
+      {videoProcessing && !videoUrl && (
+        <div className="ml-13 rounded-xl border border-agora-200 dark:border-agora-700 bg-agora-50 dark:bg-agora-800 px-4 py-3 flex items-center gap-3">
+          <span className="inline-block w-4 h-4 border-2 border-agora-400 border-t-transparent rounded-full animate-spin" />
+          <div className="flex-1 text-sm text-agora-600 dark:text-agora-300">
+            Processing video… this can take a minute. You can keep typing or come back later.
+          </div>
+          <button onClick={removeVideo}
+            className="text-agora-400 hover:text-red-500 p-1 rounded" title="Cancel video">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* Video preview (AGORA-119) */}
       {videoUrl && (
         <div className="ml-13 relative rounded-xl overflow-hidden bg-black">
           <video src={videoUrl} poster={videoThumbUrl || undefined} controls className="w-full max-h-72 rounded-xl" />
-          <button onClick={() => { setVideoUrl(''); setVideoThumbUrl('') }}
+          <button onClick={removeVideo}
             className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-black/80">
             <X size={12} />
           </button>
@@ -556,18 +638,18 @@ export default function CreatePost() {
       <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
         {/* Image upload */}
         {/* Image upload */}
-        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length >= 10 || !!videoUrl) ? 'opacity-40 pointer-events-none' : ''}`} title={videoUrl ? 'Remove video to add photos' : imageUrls.length >= 10 ? 'Maximum 10 photos' : 'Add photos'}>
+        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length >= 10 || !!videoUrl || uploadingVideo || videoProcessing) ? 'opacity-40 pointer-events-none' : ''}`} title={videoUrl || uploadingVideo || videoProcessing ? 'Remove video to add photos' : imageUrls.length >= 10 ? 'Maximum 10 photos' : 'Add photos'}>
           <Image size={18} />
           {imageUrls.length > 0 && <span className="text-xs font-medium text-agora-500">{imageUrls.length}/10</span>}
-          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 10 || !!videoUrl} />
+          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} disabled={uploading || imageUrls.length >= 10 || !!videoUrl || uploadingVideo || videoProcessing} />
         </label>
 
-        {/* Video upload (AGORA-119) */}
-        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length > 0 || !!videoUrl || uploadingVideo) ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length > 0 ? 'Remove photos to add a video' : videoUrl ? 'Video already attached' : 'Add video (max 2 min)'}>
+        {/* Video upload (AGORA-119 / AGORA-137) */}
+        <label className={`btn-ghost p-2 cursor-pointer flex items-center gap-1 ${(imageUrls.length > 0 || !!videoUrl || uploadingVideo || videoProcessing) ? 'opacity-40 pointer-events-none' : ''}`} title={imageUrls.length > 0 ? 'Remove photos to add a video' : videoUrl ? 'Video already attached' : videoProcessing ? 'Video is still processing' : 'Add video (max 2 min)'}>
           {uploadingVideo
-            ? <span className="text-xs text-agora-400 animate-pulse">Processing…</span>
+            ? <span className="text-xs text-agora-400 animate-pulse">Uploading…</span>
             : <Video size={18} />}
-          <input type="file" accept="video/*" className="hidden" onChange={handleVideoUpload} disabled={imageUrls.length > 0 || !!videoUrl || uploadingVideo} />
+          <input type="file" accept="video/*" className="hidden" onChange={handleVideoUpload} disabled={imageUrls.length > 0 || !!videoUrl || uploadingVideo || videoProcessing} />
         </label>
 
         {/* Trigger warning toggle */}

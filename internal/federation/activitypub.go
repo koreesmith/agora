@@ -907,15 +907,33 @@ func (s *Service) handleInboundUndoBlock(blockerActor string, objectRaw json.Raw
 // needed to match it to the right ap_following row: follow.Actor tells us
 // which local user's Follow this confirms, and verifiedActor (the Accept's
 // own signer) is who's confirming it, which must be followed_actor_url.
+//
+// The spec also allows "object" to be a bare IRI string referencing the
+// original Follow's id instead of an embedded object (threads.net does this
+// — AGORA-175). Our own outbound Follow ids are shaped
+// {actor}/follows/{timestamp}, so usernameFromActorURL's prefix match still
+// recovers the right local user straight from that string.
 
-func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+// usernameFromAcceptObject extracts the local username an inbound
+// Accept(Follow)'s "object" refers to, whether the remote server sent it as
+// an embedded Follow object ({"actor": "..."}) or as a bare IRI string
+// referencing the original Follow's id (threads.net does this — AGORA-175).
+func usernameFromAcceptObject(objectRaw json.RawMessage, instanceDomain string) string {
 	var follow struct {
 		Actor string `json:"actor"`
 	}
-	if err := json.Unmarshal(objectRaw, &follow); err != nil || follow.Actor == "" {
-		return
+	if err := json.Unmarshal(objectRaw, &follow); err == nil && follow.Actor != "" {
+		return usernameFromActorURL(follow.Actor, instanceDomain)
 	}
-	username := usernameFromActorURL(follow.Actor, s.cfg.InstanceDomain)
+	var objectID string
+	if err := json.Unmarshal(objectRaw, &objectID); err != nil || objectID == "" {
+		return ""
+	}
+	return usernameFromActorURL(objectID, instanceDomain)
+}
+
+func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+	username := usernameFromAcceptObject(objectRaw, s.cfg.InstanceDomain)
 	if username == "" {
 		return
 	}

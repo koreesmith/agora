@@ -1090,7 +1090,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		VALUES ($1, $2, $3, $4, true, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain, htmlToPlainText(note.Summary)).Scan(&commentID)
+	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary)).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1150,7 +1150,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.db.Exec(`
 		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
 		WHERE id = $3
-	`, htmlToPlainText(note.Content), htmlToPlainText(note.Summary), postID)
+	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID)
 	// Attachments are fully replaced, not merged — clear the old multi-image
 	// rows before reapplying whatever the edit currently carries, mirroring
 	// EditPost's own replace-not-append handling of image_urls.
@@ -1242,7 +1242,7 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(content), noteID, domain, htmlToPlainText(summary)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary)).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -1426,7 +1426,7 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
 		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
 		RETURNING id
-	`, syntheticUsername, displayName, profile.IconURL, htmlToPlainText(profile.Summary),
+	`, syntheticUsername, displayName, profile.IconURL, HTMLToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox,
 	).Scan(&id)
 	if err != nil {
@@ -1435,16 +1435,39 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	return id, nil
 }
 
-// htmlToPlainText converts the (sanitized) HTML content fediverse software
+// HTMLToPlainText converts the (sanitized) HTML content fediverse software
 // sends in a Note's "content" field into plain text, consistent with how
 // Agora's own renderContent expects plain text and does its own @mention/URL
 // linkification. Good enough for the small tag set Mastodon etc. emit
 // (p, br, a, span, strong, em, ...); not a general HTML sanitizer.
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 var htmlBlockBreakRe = regexp.MustCompile(`(?i)<(br|/p|/li)\s*/?>`)
+var htmlATagRe = regexp.MustCompile(`(?is)<a\s[^>]*href=["']([^"']*)["'][^>]*>(.*?)</a>`)
 
-func htmlToPlainText(s string) string {
+func HTMLToPlainText(s string) string {
 	s = htmlBlockBreakRe.ReplaceAllString(s, "\n")
+	// Preserve <a> hrefs before the generic tag strip below discards them —
+	// Mastodon etc. wrap auto-linked URLs in nested <span>s (to CSS-truncate
+	// the visible portion), so link text is usually already the URL once its
+	// own tags are stripped; @mentions/#hashtags are likewise already
+	// meaningful as bare text. Only a manually authored link whose text
+	// differs from its href (e.g. "click here") needs the href appended so
+	// renderContent's bare-URL linkifier still picks it up.
+	s = htmlATagRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := htmlATagRe.FindStringSubmatch(m)
+		href := strings.TrimSpace(html.UnescapeString(parts[1]))
+		text := strings.TrimSpace(html.UnescapeString(htmlTagRe.ReplaceAllString(parts[2], "")))
+		switch {
+		case text == "":
+			return href
+		case strings.HasPrefix(text, "@"), strings.HasPrefix(text, "#"):
+			return text
+		case strings.Contains(strings.ToLower(href), strings.ToLower(text)), strings.HasPrefix(strings.ToLower(text), "http"):
+			return text
+		default:
+			return text + " (" + href + ")"
+		}
+	})
 	s = htmlTagRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(s))
 }
@@ -1967,7 +1990,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 		"actor_url":          actorURL,
 		"preferred_username": profile.PreferredUsername,
 		"name":               profile.Name,
-		"summary":            htmlToPlainText(profile.Summary),
+		"summary":            HTMLToPlainText(profile.Summary),
 		"icon_url":           profile.IconURL,
 		"instance":           domain,
 	})

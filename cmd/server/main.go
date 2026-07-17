@@ -78,6 +78,7 @@ func main() {
 	userSvc.SetFed(fedSvc)
 	pagesSvc.SetFed(fedSvc)
 	userSvc.SetAtproto(atprotoSvc)
+	feedSvc.SetAtproto(atprotoSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()

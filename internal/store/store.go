@@ -830,4 +830,20 @@ var schema = []string{
 		record_cid  TEXT NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// ── AT Proto firehose (AGORA-191) ─────────────────────────────────────────
+	// atproto_repo_rev tracks each repo's last-emitted rev string (distinct
+	// from atproto_repo_head, the commit *CID* used to reopen the MST) —
+	// firehose commit events carry a "since" field naming the *previous* rev,
+	// which nothing else persists. atproto_firehose_events is the durable,
+	// replayable event log a subscribeRepos client's cursor reconnects
+	// against — stored in Postgres rather than indigo's own disk/Pebble
+	// persister options, consistent with the rest of Agora's storage.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_repo_rev TEXT NOT NULL DEFAULT ''`,
+	`CREATE SEQUENCE IF NOT EXISTS atproto_firehose_seq`,
+	`CREATE TABLE IF NOT EXISTS atproto_firehose_events (
+		seq        BIGINT PRIMARY KEY,
+		data       BYTEA NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

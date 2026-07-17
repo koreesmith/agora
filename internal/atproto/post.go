@@ -5,7 +5,9 @@ import (
 	"log"
 	"time"
 
+	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
+	lexutil "github.com/bluesky-social/indigo/lex/util"
 )
 
 // BroadcastPost federates a new public post as an app.bsky.feed.post record
@@ -19,18 +21,18 @@ import (
 func (s *Service) BroadcastPost(userID, postID string) {
 	ctx := context.Background()
 
-	var username, content, did, storedPriv, repoHead string
+	var username, content, did, storedPriv, repoHead, repoRev string
 	var visibility string
 	var profilePrivate, isRemote bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote,
-		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head,
+		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
 		       p.visibility, p.content, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote,
-		&did, &storedPriv, &repoHead, &visibility, &content, &createdAt)
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt)
 	if err != nil || visibility != "public" || profilePrivate || isRemote {
 		return
 	}
@@ -41,7 +43,7 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		return
 	}
 
-	repo := s.getOrCreateRepo(ctx, userID, did, repoHead)
+	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
@@ -54,7 +56,10 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		return
 	}
 
-	if err := s.commitAndPersist(ctx, userID, repo, priv); err != nil {
+	path := "app.bsky.feed.post/" + rkey
+	link := lexutil.LexLink(recordCid)
+	ops := []*comatproto.SyncSubscribeRepos_RepoOp{{Action: "create", Path: path, Cid: &link}}
+	if err := s.commitAndPersist(ctx, userID, did, repo, bs, priv, repoRev, ops); err != nil {
 		log.Printf("atproto: could not commit post %s: %v", postID, err)
 		return
 	}
@@ -67,5 +72,5 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		return
 	}
 
-	log.Printf("atproto: federated post %s as %s/%s", postID, "app.bsky.feed.post", rkey)
+	log.Printf("atproto: federated post %s as %s", postID, path)
 }

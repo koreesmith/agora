@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 
+	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	lexutil "github.com/bluesky-social/indigo/lex/util"
 	arepo "github.com/bluesky-social/indigo/repo"
 	"github.com/ipfs/go-cid"
 )
@@ -16,32 +18,50 @@ import (
 // stored head that fails to open (corrupt row, block missing) falls back to
 // a fresh repo rather than hard-failing the caller; the next commit simply
 // starts a new history rather than resuming an unreadable one.
-func (s *Service) getOrCreateRepo(ctx context.Context, userID, did, repoHead string) *arepo.Repo {
+//
+// Returns the backing pgBlockstore alongside the repo so commitAndPersist can
+// read back exactly which blocks this commit's writes touched (AGORA-191),
+// via its recording mode.
+func (s *Service) getOrCreateRepo(ctx context.Context, userID, did, repoHead string) (*arepo.Repo, *pgBlockstore) {
 	bs := &pgBlockstore{db: s.db, userID: userID}
 	if repoHead != "" {
 		if root, err := cid.Decode(repoHead); err == nil {
 			if r, err := arepo.OpenRepo(ctx, bs, root); err == nil {
-				return r
+				return r, bs
 			}
 			log.Printf("atproto: could not reopen repo for user %s at %s, starting fresh: unreadable head", userID, repoHead)
 		}
 	}
-	return arepo.NewRepo(ctx, did, bs)
+	return arepo.NewRepo(ctx, did, bs), bs
 }
 
-// commitAndPersist signs the repo's pending writes and saves the resulting
-// commit CID as the user's new repo head — the AT Proto repo write path's
-// equivalent of a database transaction commit.
-func (s *Service) commitAndPersist(ctx context.Context, userID string, repo *arepo.Repo, priv *atcrypto.PrivateKeyK256) error {
+// commitAndPersist signs the repo's pending writes, saves the resulting
+// commit CID/rev as the user's new repo head, and emits the commit on the
+// firehose (AGORA-191) — the AT Proto repo write path's equivalent of a
+// database transaction commit plus a change-notification event.
+func (s *Service) commitAndPersist(
+	ctx context.Context, userID, did string, repo *arepo.Repo, bs *pgBlockstore,
+	priv *atcrypto.PrivateKeyK256, sinceRev string, ops []*comatproto.SyncSubscribeRepos_RepoOp,
+) error {
+	bs.startRecording()
 	signer := func(_ context.Context, _ string, data []byte) ([]byte, error) {
 		return priv.HashAndSign(data)
 	}
-	commitCid, _, err := repo.Commit(ctx, signer)
+	commitCid, rev, err := repo.Commit(ctx, signer)
 	if err != nil {
+		bs.stopRecording()
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE users SET atproto_repo_head = $1 WHERE id = $2`, commitCid.String(), userID)
-	return err
+	recorded := bs.stopRecording()
+
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE users SET atproto_repo_head = $1, atproto_repo_rev = $2 WHERE id = $3
+	`, commitCid.String(), rev, userID); err != nil {
+		return err
+	}
+
+	s.emitCommit(ctx, did, commitCid, rev, sinceRev, recorded, ops)
+	return nil
 }
 
 // SyncProfile writes (or rewrites) a user's app.bsky.actor.profile record
@@ -58,13 +78,14 @@ func (s *Service) commitAndPersist(ctx context.Context, userID string, repo *are
 func (s *Service) SyncProfile(userID string) {
 	ctx := context.Background()
 
-	var username, displayName, bio, did, storedPriv, repoHead string
+	var username, displayName, bio, did, storedPriv, repoHead, repoRev string
 	var isRemote, profilePrivate bool
 	err := s.db.QueryRowContext(ctx, `
-		SELECT username, display_name, bio, atproto_did, atproto_private_key, atproto_repo_head,
-		       is_remote, profile_private
+		SELECT username, display_name, bio, atproto_did, atproto_private_key,
+		       atproto_repo_head, atproto_repo_rev, is_remote, profile_private
 		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
-	`, userID).Scan(&username, &displayName, &bio, &did, &storedPriv, &repoHead, &isRemote, &profilePrivate)
+	`, userID).Scan(&username, &displayName, &bio, &did, &storedPriv,
+		&repoHead, &repoRev, &isRemote, &profilePrivate)
 	if err != nil || isRemote || profilePrivate {
 		return
 	}
@@ -75,7 +96,7 @@ func (s *Service) SyncProfile(userID string) {
 		return
 	}
 
-	repo := s.getOrCreateRepo(ctx, userID, did, repoHead)
+	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	rec := &bsky.ActorProfile{LexiconTypeID: "app.bsky.actor.profile"}
 	if displayName != "" {
@@ -94,16 +115,21 @@ func (s *Service) SyncProfile(userID string) {
 	// guessing from repoHead (a fresh repo could still already have a
 	// profile record if getOrCreateRepo fell back after a corrupt head).
 	const profilePath = "app.bsky.actor.profile/self"
+	action := "create"
 	writeRecord := repo.PutRecord
 	if _, _, err := repo.GetRecordBytes(ctx, profilePath); err == nil {
+		action = "update"
 		writeRecord = repo.UpdateRecord
 	}
-	if _, err := writeRecord(ctx, profilePath, rec); err != nil {
+	recordCid, err := writeRecord(ctx, profilePath, rec)
+	if err != nil {
 		log.Printf("atproto: could not write profile record for user %s: %v", userID, err)
 		return
 	}
 
-	if err := s.commitAndPersist(ctx, userID, repo, priv); err != nil {
+	link := lexutil.LexLink(recordCid)
+	ops := []*comatproto.SyncSubscribeRepos_RepoOp{{Action: action, Path: profilePath, Cid: &link}}
+	if err := s.commitAndPersist(ctx, userID, did, repo, bs, priv, repoRev, ops); err != nil {
 		log.Printf("atproto: could not commit profile sync for user %s: %v", userID, err)
 		return
 	}

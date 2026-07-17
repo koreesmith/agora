@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/bluesky-social/indigo/events"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/agora-social/agora/internal/config"
@@ -24,21 +25,23 @@ import (
 )
 
 type Service struct {
-	db  *store.DB
-	cfg *config.Config
+	db     *store.DB
+	cfg    *config.Config
+	events *events.EventManager
 }
 
 func NewService(db *store.DB, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg}
+	return &Service{db: db, cfg: cfg, events: events.NewEventManager(newPgEventPersister(db))}
 }
 
-// RegisterRoutes wires the public, unauthenticated AT Proto identity
-// endpoints — dereferenced directly by AT Proto clients/relays/AppViews at
-// well-known paths, mirroring how federation.RegisterRoutes exposes
+// RegisterRoutes wires the public, unauthenticated AT Proto identity and
+// sync endpoints — dereferenced directly by AT Proto clients/relays/AppViews
+// at well-known/XRPC paths, mirroring how federation.RegisterRoutes exposes
 // WebFinger/actor docs outside the /api prefix.
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/did.json", s.DIDDocument)
 	r.Get("/.well-known/atproto-did", s.AtprotoDIDText)
+	r.Get("/xrpc/com.atproto.sync.subscribeRepos", s.SubscribeRepos)
 }
 
 // domainFromURL strips the scheme from an instance URL, leaving the bare

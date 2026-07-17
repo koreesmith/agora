@@ -80,6 +80,22 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
         }
 
+        # ── AT Proto firehose (AGORA-186/191) ─────────────────────────────────
+        # subscribeRepos is a websocket — needs explicit Upgrade/Connection
+        # passthrough and a long read timeout (a subscription stays open
+        # indefinitely), unlike the plain HTTP proxying above.
+        location /xrpc/ {
+            limit_req zone=federation burst=20 nodelay;
+            proxy_pass http://frontend:80/xrpc/;
+            proxy_http_version 1.1;
+            proxy_set_header Host       $host;
+            proxy_set_header X-Real-IP  $remote_addr;
+            proxy_set_header Upgrade    $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 1h;
+            proxy_buffering off;
+        }
+
         location / {
             proxy_pass         http://frontend:80;
             proxy_http_version 1.1;

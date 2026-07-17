@@ -41,9 +41,49 @@ nginx (80 → 443 redirect, 443 TLS termination)
    ├── /uploads/*   →  disk
    ├── /docs/*      →  docs/ directory
    └── /*           →  frontend container
-                           ├── /api/*  →  backend :8080
-                           └── /*      →  React SPA
+                           ├── /api/*     →  backend :8080
+                           ├── /xrpc/*    →  backend :8080 (AT Proto firehose, websocket)
+                           └── /*         →  React SPA
 ```
+
+### AT Proto (Bluesky) wildcard subdomains
+
+Every local user's AT Proto identity is served on its own subdomain
+(`username.yourdomain.com`), so multi-tenant AT Proto support needs a
+**wildcard** DNS record and — depending on your setup — a wildcard TLS
+certificate. `setup-ssl.sh`'s certbot invocation only covers your bare
+domain (HTTP-01 challenge, which cannot issue wildcards at all), so this is
+an extra step beyond the base SSL setup above.
+
+1. **DNS**: add a `*.yourdomain.com` record pointing at the same target as
+   your existing domain record.
+2. **TLS**, which path you need depends on what's in front of your origin
+   server:
+   - **Behind Cloudflare (or a similar proxy), "Full" mode (not strict)**:
+     nothing else to do. Cloudflare's free Universal SSL automatically
+     covers the first-level wildcard once the DNS record above is proxied,
+     and in "Full" mode Cloudflare doesn't validate that your origin
+     certificate's hostname matches — your existing single-domain
+     certificate from `setup-ssl.sh` keeps working as-is.
+   - **Behind Cloudflare, "Full (strict)" mode**: your origin certificate's
+     hostname *is* validated, so it needs to cover the wildcard too. Either
+     generate a free Cloudflare Origin CA certificate for
+     `yourdomain.com` + `*.yourdomain.com` (SSL/TLS → Origin Server →
+     Create Certificate in the Cloudflare dashboard — not the "Edge
+     Certificates" or "Client Certificates" tabs, which are for different
+     purposes), or use the DNS-01 option below.
+   - **No CDN/proxy in front (serving browsers directly)**: you need a real
+     wildcard Let's Encrypt certificate, which requires the DNS-01
+     challenge type instead of `setup-ssl.sh`'s HTTP-01 — e.g. `certbot
+     certonly --dns-<your-provider-plugin> -d yourdomain.com -d
+     *.yourdomain.com`, using whichever certbot DNS plugin matches your DNS
+     host (Cloudflare, Route53, DigitalOcean, etc. — see [certbot's DNS
+     plugin list](https://eff-certbot.readthedocs.io/en/stable/using.html#dns-plugins)).
+     This isn't scripted in `setup-ssl.sh` since the right plugin/credentials
+     are specific to your DNS provider, and not every self-hoster uses the
+     same one. Requesting both names in one invocation lands the cert at the
+     same `data/certbot/conf/live/yourdomain.com/` path the nginx templates
+     already point at — no other config changes needed once it's issued.
 
 ## Production Checklist
 

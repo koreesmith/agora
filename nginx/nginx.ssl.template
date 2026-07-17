@@ -27,7 +27,16 @@ http {
     server {
         listen 443 ssl;
         http2 on;
-        server_name DOMAIN_PLACEHOLDER;
+        # *.DOMAIN_PLACEHOLDER (AGORA-186): per-user AT Proto handles/DID
+        # documents are served on a subdomain per user. Whether the cert at
+        # the paths below needs to actually cover the wildcard depends on
+        # what's in front of this server: behind Cloudflare in "Full" mode
+        # (not strict), Cloudflare's own edge cert covers the public wildcard
+        # and this origin cert's hostname is never checked, so the existing
+        # single-domain cert from setup-ssl.sh is enough. Serving browsers
+        # directly (no CDN) or Cloudflare "Full (strict)" does require a real
+        # wildcard cert here — see docs/deployment.md.
+        server_name DOMAIN_PLACEHOLDER *.DOMAIN_PLACEHOLDER;
 
         ssl_certificate     /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
         ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
@@ -120,6 +129,24 @@ http {
             proxy_http_version 1.1;
             proxy_set_header Host      $host;
             proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # ── AT Proto firehose (AGORA-186/191) ─────────────────────────────────
+        # subscribeRepos is a websocket, unlike every other federation/.well-known
+        # path here — needs explicit Upgrade/Connection passthrough, which plain
+        # HTTP proxying doesn't require. A long read timeout matters too: a
+        # relay's subscription is meant to stay open indefinitely, not time out
+        # like a normal request.
+        location /xrpc/ {
+            limit_req zone=federation burst=20 nodelay;
+            proxy_pass http://frontend:80/xrpc/;
+            proxy_http_version 1.1;
+            proxy_set_header Host       $host;
+            proxy_set_header X-Real-IP  $remote_addr;
+            proxy_set_header Upgrade    $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 1h;
+            proxy_buffering off;
         }
 
         # ── SPA ───────────────────────────────────────────────────────────────

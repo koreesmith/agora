@@ -5,7 +5,7 @@ import { pagesApi, feedApi, moderationApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import {
   Users, Settings, Flag, X, Heart, MessageCircle, Image,
-  CheckCircle, BookOpen, MoreHorizontal, PenLine,
+  CheckCircle, BookOpen, MoreHorizontal, PenLine, Pencil, Trash2,
 } from 'lucide-react'
 
 const PAGE_TYPE_LABELS: Record<string, string> = {
@@ -30,6 +30,9 @@ export default function PageProfilePage() {
   const [reportSent, setReportSent] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [feedPage, setFeedPage] = useState(0)
+  const [openPostMenuId, setOpenPostMenuId] = useState<string | null>(null)
+  const [editingPostId, setEditingPostId] = useState<string | null>(null)
+  const [editContent, setEditContent] = useState('')
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['page', slug],
@@ -63,6 +66,20 @@ export default function PageProfilePage() {
   const unlikePost = useMutation({
     mutationFn: (id: string) => feedApi.unlikePost(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['page-feed', slug] }),
+  })
+  const editPost = useMutation({
+    mutationFn: (id: string) => feedApi.editPost(id, { content: editContent }),
+    onSuccess: () => {
+      setEditingPostId(null)
+      qc.invalidateQueries({ queryKey: ['page-feed', slug] })
+    },
+  })
+  const deletePost = useMutation({
+    mutationFn: (id: string) => feedApi.deletePost(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['page-feed', slug] })
+      qc.invalidateQueries({ queryKey: ['page', slug] })
+    },
   })
   const submitReport = useMutation({
     mutationFn: () => moderationApi.createReport({
@@ -309,31 +326,83 @@ export default function PageProfilePage() {
           </div>
         ) : (
           <div className="space-y-3">
-            {posts.map((post: any) => (
+            {posts.map((post: any) => {
+              const isOwnPost = user?.id === post.author_id
+              const canDeletePost = isOwnPost || user?.role === 'admin' || user?.role === 'moderator'
+              return (
               <div key={post.id} className="card p-4 space-y-2">
                 {/* Post header */}
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                    {page.avatar_url
-                      ? <img src={page.avatar_url} alt="" className="w-full h-full object-cover" />
-                      : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">
-                          {page.display_name[0]}
-                        </span>}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                      {page.avatar_url
+                        ? <img src={page.avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">
+                            {page.display_name[0]}
+                          </span>}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold truncate">{page.display_name}</p>
+                      <p className="text-xs text-agora-400">
+                        {new Date(post.created_at).toLocaleDateString(undefined, {
+                          month: 'short', day: 'numeric', year: 'numeric',
+                        })}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold truncate">{page.display_name}</p>
-                    <p className="text-xs text-agora-400">
-                      {new Date(post.created_at).toLocaleDateString(undefined, {
-                        month: 'short', day: 'numeric', year: 'numeric',
-                      })}
-                    </p>
-                  </div>
+
+                  {/* Menu — edit/delete for the post's own author (or a site admin/mod) */}
+                  {(isOwnPost || canDeletePost) && (
+                    <div className="relative flex-shrink-0">
+                      <button onClick={() => setOpenPostMenuId(id => id === post.id ? null : post.id)}
+                        className="btn-ghost p-1 text-agora-400">
+                        <MoreHorizontal size={16} />
+                      </button>
+                      {openPostMenuId === post.id && (
+                        <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
+                          onBlur={() => setOpenPostMenuId(null)}>
+                          {isOwnPost && (
+                            <button onClick={() => { setEditingPostId(post.id); setEditContent(post.content || ''); setOpenPostMenuId(null) }}
+                              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
+                              <Pencil size={14} /> Edit
+                            </button>
+                          )}
+                          {canDeletePost && (
+                            <button onClick={() => { if (confirm('Delete post?')) deletePost.mutate(post.id); setOpenPostMenuId(null) }}
+                              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Content */}
-                {post.content && <p className="text-sm text-agora-800 dark:text-agora-200 whitespace-pre-wrap">{post.content}</p>}
-                {post.image_url && (
-                  <img src={post.image_url} alt="" className="rounded-lg w-full max-h-72 object-cover" />
+                {editingPostId === post.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editContent}
+                      onChange={e => setEditContent(e.target.value)}
+                      rows={3}
+                      className="w-full resize-none bg-transparent text-sm text-agora-800 dark:text-agora-200 border border-agora-200 dark:border-agora-700 rounded-lg p-2 focus:outline-none"
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button onClick={() => setEditingPostId(null)} className="btn-secondary text-sm">Cancel</button>
+                      <button onClick={() => editPost.mutate(post.id)} disabled={!editContent.trim() || editPost.isPending}
+                        className="btn-primary text-sm">
+                        {editPost.isPending ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {post.content && <p className="text-sm text-agora-800 dark:text-agora-200 whitespace-pre-wrap">{post.content}</p>}
+                    {post.image_url && (
+                      <img src={post.image_url} alt="" className="rounded-lg w-full max-h-72 object-cover" />
+                    )}
+                  </>
                 )}
 
                 {/* Actions */}
@@ -350,7 +419,8 @@ export default function PageProfilePage() {
                   </Link>
                 </div>
               </div>
-            ))}
+              )
+            })}
 
             {/* Pagination */}
             <div className="flex justify-center gap-2 pb-2">

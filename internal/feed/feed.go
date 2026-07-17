@@ -1161,6 +1161,11 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+	if pageID != nil {
+		// Mirrors CreatePost's post_count increment — without this, a page's
+		// displayed post count only ever grows, never reflecting deletions.
+		s.db.Exec(`UPDATE pages SET post_count = post_count - 1 WHERE id = $1`, *pageID)
+	}
 
 	// Broadcast deletion to federated instances
 	if s.fed != nil {

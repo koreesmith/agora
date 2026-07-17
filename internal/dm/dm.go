@@ -17,12 +17,35 @@ import (
 // ── Service ───────────────────────────────────────────────────────────────────
 
 type Service struct {
-	db  *store.DB
-	hub *Hub
+	db       *store.DB
+	hub      *Hub
+	upgrader websocket.Upgrader
 }
 
-func New(db *store.DB) *Service {
-	s := &Service{db: db, hub: newHub()}
+// New wires up the DM service. allowedOrigins pins the WebSocket upgrade's
+// CheckOrigin to the instance's own origin(s) (AGORA-144) — defense-in-depth
+// only, since the socket is actually authenticated via the ?token= query
+// param rather than an ambient cookie a cross-site page could ride on. A
+// missing Origin header (native app clients, non-browser callers) is let
+// through since it can't be spoofed by a browser-based attacker the way a
+// forged-but-wrong Origin could be.
+func New(db *store.DB, allowedOrigins []string) *Service {
+	origins := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		origins[o] = true
+	}
+	s := &Service{
+		db:  db,
+		hub: newHub(),
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				return origin == "" || origins[origin]
+			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
+	}
 	go s.hub.run()
 	return s
 }
@@ -583,17 +606,11 @@ func (h *Hub) broadcast(userID string, event WSEvent) {
 	}
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
 func (s *Service) WebSocket(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	if userID == "" { writeError(w, 401, "unauthorized"); return }
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil { return }
 
 	c := &Client{userID: userID, conn: conn, send: make(chan WSEvent, 32)}

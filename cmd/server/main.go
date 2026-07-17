@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 
 	"github.com/agora-social/agora/internal/admin"
 	"github.com/agora-social/agora/internal/albums"
@@ -64,7 +65,7 @@ func main() {
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
 	fedSvc    := federation.NewService(db, cfg, notifSvc)
-	dmSvc          := dm.New(db)
+	dmSvc          := dm.New(db, cfg.AllowedOrigins)
 	blocksSvc      := blocks.New(db)
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
@@ -144,7 +145,17 @@ func main() {
 			r.Use(authSvc.Middleware)
 			r.Post("/auth/change-password",       authSvc.ChangePassword)
 			r.Post("/auth/request-email-change",  authSvc.RequestEmailChange)
-			r.Post("/invites/send",               authSvc.SendUserInvite)
+			// AGORA-141: each invite sends an outbound email — throttle both by
+			// IP and by the inviting account (userID is already in context by
+			// here, set by authSvc.Middleware above) so one compromised/abusive
+			// account can't email-bomb via a botnet of IPs, nor a single IP churn
+			// through many accounts.
+			r.With(
+				httprate.LimitByIP(20, time.Hour),
+				httprate.Limit(5, time.Hour, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					return auth.UserIDFromCtx(r.Context()), nil
+				})),
+			).Post("/invites/send", authSvc.SendUserInvite)
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)

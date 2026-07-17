@@ -218,6 +218,15 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if !isValidUsername(req.Username) {
 		writeError(w, 400, "username may only contain letters, numbers, underscores, and hyphens"); return
 	}
+	// A username and a page slug share the same acct:name@instance namespace
+	// in ActivityPub/WebFinger — reject here too, symmetric with CreatePage's
+	// own check, so whichever is created second doesn't silently claim a name
+	// that's unreachable over AP because the other already has it.
+	var slugTaken bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pages WHERE LOWER(slug) = LOWER($1))`, req.Username).Scan(&slugTaken)
+	if slugTaken {
+		writeError(w, 409, "username already taken"); return
+	}
 	if len(req.Password) < 8 {
 		writeError(w, 400, "password must be at least 8 characters"); return
 	}

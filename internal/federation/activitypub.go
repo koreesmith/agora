@@ -510,6 +510,32 @@ func plainTextToHTML(s string) string {
 	return strings.ReplaceAll(html.EscapeString(s), "\n", "<br>")
 }
 
+// linkifyMentionTags rewrites each resolved fediverse mention's plain-text
+// occurrence in a Note's (already HTML-escaped) content into the standard
+// Mastodon-style mention anchor (h-card/u-url microformat real fediverse
+// software emits for its own mentions). The "tag" array alone is enough to
+// make a mention trigger a remote notification, but Mastodon and friends
+// render "content" close to verbatim rather than auto-linking @handle@domain
+// text themselves — without this, a mention notifies correctly but displays
+// as inert plain text, unlike every other mention in the same thread.
+func linkifyMentionTags(contentHTML string, tags []map[string]any) string {
+	for _, t := range tags {
+		name, _ := t["name"].(string)
+		href, _ := t["href"].(string)
+		if name == "" || href == "" {
+			continue
+		}
+		handle := strings.TrimPrefix(name, "@")
+		if at := strings.Index(handle, "@"); at != -1 {
+			handle = handle[:at]
+		}
+		anchor := fmt.Sprintf(`<span class="h-card" translate="no"><a href="%s" class="u-url mention">@<span>%s</span></a></span>`,
+			html.EscapeString(href), html.EscapeString(handle))
+		contentHTML = strings.ReplaceAll(contentHTML, name, anchor)
+	}
+	return contentHTML
+}
+
 // ── Followers collection ──────────────────────────────────────────────────────
 //
 // Exposes only totalItems, not the follower list itself — consistent with
@@ -2181,6 +2207,9 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	if len(tags) > 0 {
 		if note, ok := activity["object"].(map[string]any); ok {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
@@ -2219,6 +2248,9 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	if len(tags) > 0 {
 		if note, ok := activity["object"].(map[string]any); ok {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
@@ -2316,6 +2348,9 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		note["to"] = to
 		if len(tags) > 0 {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 		}
 	}
 	activity["to"] = to
@@ -2383,6 +2418,9 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 		note["to"] = to
 		if len(tags) > 0 {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 		}
 	}
 	activity["to"] = to

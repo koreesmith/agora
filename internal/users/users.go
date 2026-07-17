@@ -14,41 +14,51 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/store"
+	"github.com/go-chi/chi/v5"
 )
 
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
 }
 
+// atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
+// keeping a user's app.bsky.actor.profile record in sync with their Agora
+// profile is a repo write, not something implicit in a GET the way an AP
+// actor document already is, so it needs its own explicit trigger on edit.
+type atprotoSyncer interface {
+	SyncProfile(userID string)
+}
+
 type Service struct {
-	db    *store.DB
-	media *media.Service
-	fed   fedSender
+	db      *store.DB
+	media   *media.Service
+	fed     fedSender
+	atproto atprotoSyncer
 }
 
 func NewService(db *store.DB, media *media.Service) *Service {
 	return &Service{db: db, media: media}
 }
 
-func (s *Service) SetFed(f fedSender) { s.fed = f }
+func (s *Service) SetFed(f fedSender)         { s.fed = f }
+func (s *Service) SetAtproto(a atprotoSyncer) { s.atproto = a }
 
 func RegisterRoutes(r chi.Router, s *Service) {
-	r.Patch("/users/me",                s.UpdateProfile)
-	r.Post("/users/me/avatar",          s.UploadAvatar)
-	r.Post("/users/me/cover",           s.UploadCover)
-	r.Get("/users/me/export",           s.ExportData)
+	r.Patch("/users/me", s.UpdateProfile)
+	r.Post("/users/me/avatar", s.UploadAvatar)
+	r.Post("/users/me/cover", s.UploadCover)
+	r.Get("/users/me/export", s.ExportData)
 	r.Post("/users/me/request-deletion", s.RequestDeletion)
 	r.Delete("/users/me/request-deletion", s.CancelDeletion)
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
-	r.Get("/users/discover",              s.Discover)
-	r.Get("/users/mention-search",        s.MentionSearch)
-	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
-	r.Post("/users/{username}/notify",    s.EnablePostNotify)
-	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
+	r.Get("/users/discover", s.Discover)
+	r.Get("/users/mention-search", s.MentionSearch)
+	r.Get("/mention-search", s.UnifiedMentionSearch) // groups + pages + users
+	r.Post("/users/{username}/notify", s.EnablePostNotify)
+	r.Delete("/users/{username}/notify", s.DisablePostNotify)
 }
 
 // RegisterPublicRoutes registers read-only routes reachable by guests.
@@ -63,26 +73,26 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
 
 	var u struct {
-		ID             string  `json:"id"`
-		Username       string  `json:"username"`
-		DisplayName    string  `json:"display_name"`
-		Pronouns       string  `json:"pronouns"`
-		Bio            string  `json:"bio"`
-		AvatarURL      string  `json:"avatar_url"`
-		CoverURL       string  `json:"cover_url"`
-		CoverPosition  string  `json:"cover_position"`
-		Location       string  `json:"location"`
-		Website        string  `json:"website"`
-		ProfilePrivate bool    `json:"profile_private"`
-		HideTimeline   bool    `json:"hide_timeline"`
-		IsRemote       bool    `json:"is_remote"`
-		RemoteInstance string  `json:"remote_instance,omitempty"`
-		APActorURL     string  `json:"ap_actor_url,omitempty"`
-		CreatedAt      string  `json:"created_at"`
-		FriendStatus   string  `json:"friend_status"`
-		FriendCount    int     `json:"friend_count"`
-		PostNotify     bool    `json:"post_notifications_enabled"`
-		IsBlocked      bool    `json:"is_blocked"`
+		ID             string `json:"id"`
+		Username       string `json:"username"`
+		DisplayName    string `json:"display_name"`
+		Pronouns       string `json:"pronouns"`
+		Bio            string `json:"bio"`
+		AvatarURL      string `json:"avatar_url"`
+		CoverURL       string `json:"cover_url"`
+		CoverPosition  string `json:"cover_position"`
+		Location       string `json:"location"`
+		Website        string `json:"website"`
+		ProfilePrivate bool   `json:"profile_private"`
+		HideTimeline   bool   `json:"hide_timeline"`
+		IsRemote       bool   `json:"is_remote"`
+		RemoteInstance string `json:"remote_instance,omitempty"`
+		APActorURL     string `json:"ap_actor_url,omitempty"`
+		CreatedAt      string `json:"created_at"`
+		FriendStatus   string `json:"friend_status"`
+		FriendCount    int    `json:"friend_count"`
+		PostNotify     bool   `json:"post_notifications_enabled"`
+		IsBlocked      bool   `json:"is_blocked"`
 		// AGORA-167: fediverse-specific follow state, distinct from friending —
 		// there's no ActivityPub equivalent of an Agora friend request, only
 		// following, so the frontend uses ap_actor_url to tell a genuine
@@ -174,12 +184,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	// Enforce privacy
 	if u.ProfilePrivate && viewerID != u.ID && u.FriendStatus != "accepted" {
 		writeJSON(w, 200, map[string]any{
-			"id":           u.ID,
-			"username":     u.Username,
-			"display_name": u.DisplayName,
-			"avatar_url":   u.AvatarURL,
+			"id":              u.ID,
+			"username":        u.Username,
+			"display_name":    u.DisplayName,
+			"avatar_url":      u.AvatarURL,
 			"profile_private": true,
-			"friend_status": u.FriendStatus,
+			"friend_status":   u.FriendStatus,
 		})
 		return
 	}
@@ -190,19 +200,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	var req struct {
-		DisplayName          *string `json:"display_name"`
-		Pronouns             *string `json:"pronouns"`
-		Bio                  *string `json:"bio"`
-		Location             *string `json:"location"`
-		Website              *string `json:"website"`
-		ProfilePrivate       *bool   `json:"profile_private"`
-		HideTimeline         *bool   `json:"hide_timeline"`
-		CoverPosition        *string `json:"cover_position"`
-		WallApprovalRequired *bool   `json:"wall_approval_required"`
-		DmPrivacy            *string `json:"dm_privacy"`
-		ExpoPushToken        *string `json:"expo_push_token"`
-		ActivityPubEnabled   *bool   `json:"activitypub_enabled"`
-		FediverseNotificationsEnabled *bool `json:"fediverse_notifications_enabled"`
+		DisplayName                   *string `json:"display_name"`
+		Pronouns                      *string `json:"pronouns"`
+		Bio                           *string `json:"bio"`
+		Location                      *string `json:"location"`
+		Website                       *string `json:"website"`
+		ProfilePrivate                *bool   `json:"profile_private"`
+		HideTimeline                  *bool   `json:"hide_timeline"`
+		CoverPosition                 *string `json:"cover_position"`
+		WallApprovalRequired          *bool   `json:"wall_approval_required"`
+		DmPrivacy                     *string `json:"dm_privacy"`
+		ExpoPushToken                 *string `json:"expo_push_token"`
+		ActivityPubEnabled            *bool   `json:"activitypub_enabled"`
+		FediverseNotificationsEnabled *bool   `json:"fediverse_notifications_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -214,43 +224,69 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	i := 1
 
 	if req.DisplayName != nil {
-		sets = append(sets, fmt.Sprintf("display_name = $%d", i)); args = append(args, *req.DisplayName); i++
+		sets = append(sets, fmt.Sprintf("display_name = $%d", i))
+		args = append(args, *req.DisplayName)
+		i++
 	}
 	if req.Pronouns != nil {
-		sets = append(sets, fmt.Sprintf("pronouns = $%d", i)); args = append(args, *req.Pronouns); i++
+		sets = append(sets, fmt.Sprintf("pronouns = $%d", i))
+		args = append(args, *req.Pronouns)
+		i++
 	}
 	if req.Bio != nil {
-		sets = append(sets, fmt.Sprintf("bio = $%d", i)); args = append(args, *req.Bio); i++
+		sets = append(sets, fmt.Sprintf("bio = $%d", i))
+		args = append(args, *req.Bio)
+		i++
 	}
 	if req.Location != nil {
-		sets = append(sets, fmt.Sprintf("location = $%d", i)); args = append(args, *req.Location); i++
+		sets = append(sets, fmt.Sprintf("location = $%d", i))
+		args = append(args, *req.Location)
+		i++
 	}
 	if req.Website != nil {
-		sets = append(sets, fmt.Sprintf("website = $%d", i)); args = append(args, *req.Website); i++
+		sets = append(sets, fmt.Sprintf("website = $%d", i))
+		args = append(args, *req.Website)
+		i++
 	}
 	if req.ProfilePrivate != nil {
-		sets = append(sets, fmt.Sprintf("profile_private = $%d", i)); args = append(args, *req.ProfilePrivate); i++
+		sets = append(sets, fmt.Sprintf("profile_private = $%d", i))
+		args = append(args, *req.ProfilePrivate)
+		i++
 	}
 	if req.HideTimeline != nil {
-		sets = append(sets, fmt.Sprintf("hide_timeline = $%d", i)); args = append(args, *req.HideTimeline); i++
+		sets = append(sets, fmt.Sprintf("hide_timeline = $%d", i))
+		args = append(args, *req.HideTimeline)
+		i++
 	}
 	if req.CoverPosition != nil {
-		sets = append(sets, fmt.Sprintf("cover_position = $%d", i)); args = append(args, *req.CoverPosition); i++
+		sets = append(sets, fmt.Sprintf("cover_position = $%d", i))
+		args = append(args, *req.CoverPosition)
+		i++
 	}
 	if req.WallApprovalRequired != nil {
-		sets = append(sets, fmt.Sprintf("wall_approval_required = $%d", i)); args = append(args, *req.WallApprovalRequired); i++
+		sets = append(sets, fmt.Sprintf("wall_approval_required = $%d", i))
+		args = append(args, *req.WallApprovalRequired)
+		i++
 	}
 	if req.DmPrivacy != nil {
-		sets = append(sets, fmt.Sprintf("dm_privacy = $%d", i)); args = append(args, *req.DmPrivacy); i++
+		sets = append(sets, fmt.Sprintf("dm_privacy = $%d", i))
+		args = append(args, *req.DmPrivacy)
+		i++
 	}
 	if req.ExpoPushToken != nil {
-		sets = append(sets, fmt.Sprintf("expo_push_token = $%d", i)); args = append(args, *req.ExpoPushToken); i++
+		sets = append(sets, fmt.Sprintf("expo_push_token = $%d", i))
+		args = append(args, *req.ExpoPushToken)
+		i++
 	}
 	if req.ActivityPubEnabled != nil {
-		sets = append(sets, fmt.Sprintf("activitypub_enabled = $%d", i)); args = append(args, *req.ActivityPubEnabled); i++
+		sets = append(sets, fmt.Sprintf("activitypub_enabled = $%d", i))
+		args = append(args, *req.ActivityPubEnabled)
+		i++
 	}
 	if req.FediverseNotificationsEnabled != nil {
-		sets = append(sets, fmt.Sprintf("fediverse_notifications_enabled = $%d", i)); args = append(args, *req.FediverseNotificationsEnabled); i++
+		sets = append(sets, fmt.Sprintf("fediverse_notifications_enabled = $%d", i))
+		args = append(args, *req.FediverseNotificationsEnabled)
+		i++
 	}
 
 	args = append(args, userID)
@@ -280,6 +316,13 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Keep the AT Proto profile record in sync too (AGORA-189) — a repo
+	// write, unlike the AP actor document above which just reflects live DB
+	// state on every fetch with no explicit sync step of its own.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "profile updated"})
 }
 
@@ -296,8 +339,8 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		s.db.QueryRow(`SELECT username, display_name, avatar_url, bio FROM users WHERE id = $1`, userID).
 			Scan(&username, &displayName, &avatarURL, &bio)
 		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "profile_update",
-			"actor": username,
+			"type":   "profile_update",
+			"actor":  username,
 			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
 		})
 	}
@@ -314,7 +357,6 @@ func (s *Service) UploadCover(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`UPDATE users SET cover_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
 	writeJSON(w, 200, map[string]string{"cover_url": url})
 }
-
 
 // ── GDPR Export ───────────────────────────────────────────────────────────────
 
@@ -336,7 +378,9 @@ func (s *Service) ExportData(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			vals := make([]any, len(cols))
 			ptrs := make([]any, len(cols))
-			for i := range vals { ptrs[i] = &vals[i] }
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
 			rows.Scan(ptrs...)
 			row := map[string]any{}
 			for i, c := range cols {
@@ -464,14 +508,14 @@ var _ = sql.ErrNoRows
 // ── Discover ──────────────────────────────────────────────────────────────────
 
 type DiscoverUser struct {
-	ID             string   `json:"id"`
-	Username       string   `json:"username"`
-	DisplayName    string   `json:"display_name"`
-	AvatarURL      string   `json:"avatar_url"`
-	Bio            string   `json:"bio"`
-	MutualCount    int      `json:"mutual_count"`
-	MutualFriends  []string `json:"mutual_friends"`
-	FriendStatus   string   `json:"friend_status"` // "", "pending", "pending_incoming"
+	ID            string   `json:"id"`
+	Username      string   `json:"username"`
+	DisplayName   string   `json:"display_name"`
+	AvatarURL     string   `json:"avatar_url"`
+	Bio           string   `json:"bio"`
+	MutualCount   int      `json:"mutual_count"`
+	MutualFriends []string `json:"mutual_friends"`
+	FriendStatus  string   `json:"friend_status"` // "", "pending", "pending_incoming"
 }
 
 func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
@@ -665,11 +709,11 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 
 	var users []UserHit
 	var groups []GroupHit
-	var pages  []PageHit
+	var pages []PageHit
 
 	// ── Users ──────────────────────────────────────────────────────────────
 	var uRows *sql.Rows
-	var err   error
+	var err error
 	if q == "" {
 		uRows, err = s.db.Query(`
 			SELECT u.id, u.username, u.display_name, u.avatar_url, true
@@ -730,7 +774,9 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 			users = append(users, u)
 		}
 	}
-	if users == nil { users = []UserHit{} }
+	if users == nil {
+		users = []UserHit{}
+	}
 
 	// ── Groups ─────────────────────────────────────────────────────────────
 	if q != "" {
@@ -758,7 +804,9 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if groups == nil { groups = []GroupHit{} }
+	if groups == nil {
+		groups = []GroupHit{}
+	}
 
 	// ── Pages ──────────────────────────────────────────────────────────────
 	if q != "" {
@@ -776,7 +824,9 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if pages == nil { pages = []PageHit{} }
+	if pages == nil {
+		pages = []PageHit{}
+	}
 
 	writeJSON(w, 200, map[string]any{"users": users, "groups": groups, "pages": pages})
 }
@@ -785,15 +835,17 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) EnablePostNotify(w http.ResponseWriter, r *http.Request) {
 	followerID := auth.UserIDFromCtx(r.Context())
-	username   := chi.URLParam(r, "username")
+	username := chi.URLParam(r, "username")
 
 	var followedID string
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&followedID)
 	if followedID == "" {
-		writeError(w, 404, "user not found"); return
+		writeError(w, 404, "user not found")
+		return
 	}
 	if followerID == followedID {
-		writeError(w, 400, "cannot notify on your own posts"); return
+		writeError(w, 400, "cannot notify on your own posts")
+		return
 	}
 
 	s.db.Exec(`INSERT INTO post_notifications (follower_id, followed_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, followerID, followedID)
@@ -802,12 +854,13 @@ func (s *Service) EnablePostNotify(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) DisablePostNotify(w http.ResponseWriter, r *http.Request) {
 	followerID := auth.UserIDFromCtx(r.Context())
-	username   := chi.URLParam(r, "username")
+	username := chi.URLParam(r, "username")
 
 	var followedID string
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL`, username).Scan(&followedID)
 	if followedID == "" {
-		writeError(w, 404, "user not found"); return
+		writeError(w, 404, "user not found")
+		return
 	}
 
 	s.db.Exec(`DELETE FROM post_notifications WHERE follower_id = $1 AND followed_id = $2`, followerID, followedID)

@@ -29,7 +29,9 @@ var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 // work — this package only needs to know a match is fediverse-shaped so
 // notifyMentions doesn't also treat it as a (near-certainly wrong) local
 // mention. Keep both copies in sync if this pattern ever changes.
-var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+// Local part allows dots/hyphens — a Bridgy Fed bridged Bluesky actor's
+// "handle" is itself a dotted AT Proto handle, e.g. @jane.bsky.social@bsky.brid.gy.
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {

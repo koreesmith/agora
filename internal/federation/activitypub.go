@@ -1823,7 +1823,7 @@ func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
 // internal/feed/feed.go, which only needs to know a match is fediverse-shaped
 // (to avoid also treating it as a local mention); this package does the
 // actual resolution.
-var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
 // maxResolvedMentionsPerPost bounds worst-case latency/abuse surface — each
 // resolution is a live WebFinger + signed actor fetch, so an unbounded count

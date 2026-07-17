@@ -67,12 +67,20 @@ type fedSender interface {
 	DeliverUnannounce(userID, repostID, originalPostID string)
 }
 
+// atprotoSender is the AT Proto counterpart to fedSender (AGORA-190) — a
+// separate interface/field rather than folded into fedSender, since the two
+// protocols are independent opt-ins with no shared lifecycle.
+type atprotoSender interface {
+	BroadcastPost(userID, postID string)
+}
+
 type Service struct {
-	db     *store.DB
-	notif  *notifications.Service
-	media  *media.Service
-	albums *albums.Service
-	fed    fedSender
+	db      *store.DB
+	notif   *notifications.Service
+	media   *media.Service
+	albums  *albums.Service
+	fed     fedSender
+	atproto atprotoSender
 }
 
 func NewService(db *store.DB, notif *notifications.Service, media *media.Service) *Service {
@@ -81,6 +89,7 @@ func NewService(db *store.DB, notif *notifications.Service, media *media.Service
 
 func (s *Service) SetAlbums(a *albums.Service) { s.albums = a }
 func (s *Service) SetFed(f fedSender)          { s.fed = f }
+func (s *Service) SetAtproto(a atprotoSender)  { s.atproto = a }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/preview",                             s.GetLinkPreview)
@@ -993,6 +1002,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		})
 		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
 		go s.fed.BroadcastPublicPost(userID, id)
+	}
+
+	// AGORA-190: federate as an app.bsky.feed.post record, independent of
+	// the AP broadcast above — a separate protocol with its own opt-in.
+	if req.Visibility == "public" && s.atproto != nil {
+		go s.atproto.BroadcastPost(userID, id)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})

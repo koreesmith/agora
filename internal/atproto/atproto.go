@@ -1,0 +1,202 @@
+// Package atproto is Agora's native AT Protocol (Bluesky) layer — the v3.0.0
+// counterpart to internal/federation's ActivityPub layer (AGORA-184).
+//
+// This package is the only place in Agora that imports
+// github.com/bluesky-social/indigo directly (per the spike's recommendation,
+// AGORA-185): every other package deals in this package's own DID/key types,
+// never indigo's, so a future engine swap — if the dependency footprint or
+// upstream direction ever makes that necessary — is contained to this one
+// package plus a data migration, not a rewrite scattered across the app.
+package atproto
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/go-chi/chi/v5"
+
+	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/store"
+)
+
+type Service struct {
+	db  *store.DB
+	cfg *config.Config
+}
+
+func NewService(db *store.DB, cfg *config.Config) *Service {
+	return &Service{db: db, cfg: cfg}
+}
+
+// RegisterRoutes wires the public, unauthenticated AT Proto identity
+// endpoints — dereferenced directly by AT Proto clients/relays/AppViews at
+// well-known paths, mirroring how federation.RegisterRoutes exposes
+// WebFinger/actor docs outside the /api prefix.
+func RegisterRoutes(r chi.Router, s *Service) {
+	r.Get("/.well-known/did.json", s.DIDDocument)
+}
+
+// domainFromURL strips the scheme from an instance URL, leaving the bare
+// domain. Duplicated from internal/federation/federation.go rather than
+// imported — same tradeoff already made for fediverseMentionRe there: a
+// three-line pure function isn't worth a cross-package dependency.
+func domainFromURL(u string) string {
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	return strings.Split(u, "/")[0]
+}
+
+// didForUsername derives the did:web identifier for a local user, per the
+// per-user-subdomain scheme (AGORA-186): did:web encodes a domain directly,
+// with no path-segment colon-encoding needed since this isn't a path-based
+// did:web (contrast the epic's own initial sketch, which used a path — the
+// concrete infra tickets settled on subdomains instead).
+func didForUsername(instanceDomain, username string) string {
+	return "did:web:" + username + "." + domainFromURL(instanceDomain)
+}
+
+// eligibleUser mirrors apEligibleUser's shape (internal/federation/activitypub.go)
+// for the small set of columns this package needs. Deliberately does not yet
+// gate on an atproto_enabled flag — that's AGORA-193's job, layered on top
+// later the same way AGORA-156 added the AP instance toggle after AGORA-145
+// already shipped.
+type eligibleUser struct {
+	ID          string
+	Username    string
+	AtprotoDID  string
+	AtprotoPriv string
+}
+
+func (s *Service) eligibleUser(username string) (*eligibleUser, bool) {
+	var u eligibleUser
+	err := s.db.QueryRow(`
+		SELECT id, username, atproto_did, atproto_private_key
+		FROM users
+		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
+		  AND deletion_scheduled_at IS NULL
+	`, username).Scan(&u.ID, &u.Username, &u.AtprotoDID, &u.AtprotoPriv)
+	if err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// getOrCreateSigningKey mirrors getOrCreateUserKeyPair's lazy-generation
+// pattern (internal/federation/activitypub.go) — secp256k1 in place of RSA,
+// hex-encoded raw key bytes in place of PEM (AT Proto keys have no PEM
+// convention of their own; hex keeps the same "opaque text column" shape
+// the federation_public_key/federation_private_key columns already use).
+func (s *Service) getOrCreateSigningKey(userID, storedPriv string) (*atcrypto.PrivateKeyK256, error) {
+	if storedPriv != "" {
+		if raw, err := hex.DecodeString(storedPriv); err == nil {
+			if priv, err := atcrypto.ParsePrivateBytesK256(raw); err == nil {
+				return priv, nil
+			}
+		}
+		// Fall through and regenerate if the stored key is somehow unparseable.
+	}
+
+	priv, err := atcrypto.GeneratePrivateKeyK256()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.db.Exec(`
+		UPDATE users SET atproto_private_key = $1 WHERE id = $2
+	`, hex.EncodeToString(priv.Bytes()), userID); err != nil {
+		return nil, err
+	}
+
+	log.Printf("atproto: generated new secp256k1 signing key for user %s", userID)
+	return priv, nil
+}
+
+// DIDDocument serves GET /.well-known/did.json — resolved per-hostname per
+// the AT Proto handle-verification spec (AGORA-188 wires the actual
+// per-user-subdomain routing this depends on; until then this is reachable
+// directly by any Host header, real or spoofed in dev/test).
+func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if i := strings.IndexByte(host, ':'); i != -1 {
+		host = host[:i] // strip a port, if present (e.g. local dev on :8099)
+	}
+	username := strings.TrimSuffix(host, "."+domainFromURL(s.cfg.InstanceDomain))
+	if username == "" || username == host {
+		writeError(w, 404, "not found")
+		return
+	}
+
+	u, ok := s.eligibleUser(username)
+	if !ok {
+		writeError(w, 404, "not found")
+		return
+	}
+
+	did := u.AtprotoDID
+	if did == "" {
+		did = didForUsername(s.cfg.InstanceDomain, u.Username)
+	}
+	priv, err := s.getOrCreateSigningKey(u.ID, u.AtprotoPriv)
+	if err != nil {
+		writeError(w, 500, "could not resolve signing key")
+		return
+	}
+	if u.AtprotoDID == "" {
+		if _, err := s.db.Exec(`UPDATE users SET atproto_did = $1 WHERE id = $2`, did, u.ID); err != nil {
+			writeError(w, 500, "could not persist did")
+			return
+		}
+	}
+
+	pub, err := priv.PublicKey()
+	if err != nil {
+		writeError(w, 500, "could not derive public key")
+		return
+	}
+	pubK256, ok := pub.(*atcrypto.PublicKeyK256)
+	if !ok {
+		writeError(w, 500, "unexpected key type")
+		return
+	}
+
+	keyID := did + "#atproto"
+	doc := map[string]any{
+		"@context": []string{
+			"https://www.w3.org/ns/did/v1",
+			"https://w3id.org/security/multikey/v1",
+			"https://w3id.org/security/suites/secp256k1-2019/v1",
+		},
+		"id": did,
+		"verificationMethod": []map[string]any{{
+			"id":                 keyID,
+			"type":               "Multikey",
+			"controller":         did,
+			"publicKeyMultibase": pubK256.Multibase(),
+		}},
+		"authentication":  []string{keyID},
+		"assertionMethod": []string{keyID},
+		"service": []map[string]any{{
+			"id":              "#atproto_pds",
+			"type":            "AtprotoPersonalDataServer",
+			"serviceEndpoint": strings.TrimRight(s.cfg.InstanceDomain, "/"),
+		}},
+	}
+
+	w.Header().Set("Content-Type", "application/did+ld+json")
+	w.WriteHeader(200)
+	json.NewEncoder(w).Encode(doc)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}

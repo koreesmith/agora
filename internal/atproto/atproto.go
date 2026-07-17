@@ -38,6 +38,7 @@ func NewService(db *store.DB, cfg *config.Config) *Service {
 // WebFinger/actor docs outside the /api prefix.
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/did.json", s.DIDDocument)
+	r.Get("/.well-known/atproto-did", s.AtprotoDIDText)
 }
 
 // domainFromURL strips the scheme from an instance URL, leaving the bare
@@ -115,25 +116,34 @@ func (s *Service) getOrCreateSigningKey(userID, storedPriv string) (*atcrypto.Pr
 	return priv, nil
 }
 
-// DIDDocument serves GET /.well-known/did.json — resolved per-hostname per
-// the AT Proto handle-verification spec (AGORA-188 wires the actual
-// per-user-subdomain routing this depends on; until then this is reachable
-// directly by any Host header, real or spoofed in dev/test).
-func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
+// resolvedIdentity is what both well-known endpoints need: the requested
+// user, their DID, and their (lazily-generated, persisted) signing key.
+// Extracted so DIDDocument and AtprotoDIDText — the two directions AT
+// Proto's mutual handle/DID verification requires (AGORA-188) — resolve a
+// request identically rather than drifting apart.
+type resolvedIdentity struct {
+	Username string
+	DID      string
+	Priv     *atcrypto.PrivateKeyK256
+}
+
+// resolveFromHost extracts the username from the request's per-user-subdomain
+// Host header (AGORA-186's routing target; a spoofed Host header stands in
+// for it until that infra exists), and resolves the eligible user's DID and
+// signing key, persisting either if this is their first resolution.
+func (s *Service) resolveFromHost(r *http.Request) (*resolvedIdentity, bool) {
 	host := r.Host
 	if i := strings.IndexByte(host, ':'); i != -1 {
 		host = host[:i] // strip a port, if present (e.g. local dev on :8099)
 	}
 	username := strings.TrimSuffix(host, "."+domainFromURL(s.cfg.InstanceDomain))
 	if username == "" || username == host {
-		writeError(w, 404, "not found")
-		return
+		return nil, false
 	}
 
 	u, ok := s.eligibleUser(username)
 	if !ok {
-		writeError(w, 404, "not found")
-		return
+		return nil, false
 	}
 
 	did := u.AtprotoDID
@@ -142,17 +152,29 @@ func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	priv, err := s.getOrCreateSigningKey(u.ID, u.AtprotoPriv)
 	if err != nil {
-		writeError(w, 500, "could not resolve signing key")
-		return
+		return nil, false
 	}
 	if u.AtprotoDID == "" {
 		if _, err := s.db.Exec(`UPDATE users SET atproto_did = $1 WHERE id = $2`, did, u.ID); err != nil {
-			writeError(w, 500, "could not persist did")
-			return
+			return nil, false
 		}
 	}
 
-	pub, err := priv.PublicKey()
+	return &resolvedIdentity{Username: u.Username, DID: did, Priv: priv}, true
+}
+
+// DIDDocument serves GET /.well-known/did.json — resolved per-hostname per
+// the AT Proto handle-verification spec (AGORA-186 wires the actual
+// per-user-subdomain routing this depends on; until then this is reachable
+// directly by any Host header, real or spoofed in dev/test).
+func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.resolveFromHost(r)
+	if !ok {
+		writeError(w, 404, "not found")
+		return
+	}
+
+	pub, err := id.Priv.PublicKey()
 	if err != nil {
 		writeError(w, 500, "could not derive public key")
 		return
@@ -163,18 +185,25 @@ func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keyID := did + "#atproto"
+	keyID := id.DID + "#atproto"
+	// at:// handle URI, listed in alsoKnownAs so resolution is verifiable in
+	// both directions (AGORA-188): the DID document claims this handle, and
+	// AtprotoDIDText independently confirms the handle resolves back to this
+	// same DID — the same mutual-verification requirement WebFinger has for
+	// ActivityPub actors.
+	handle := id.Username + "." + domainFromURL(s.cfg.InstanceDomain)
 	doc := map[string]any{
 		"@context": []string{
 			"https://www.w3.org/ns/did/v1",
 			"https://w3id.org/security/multikey/v1",
 			"https://w3id.org/security/suites/secp256k1-2019/v1",
 		},
-		"id": did,
+		"id":          id.DID,
+		"alsoKnownAs": []string{"at://" + handle},
 		"verificationMethod": []map[string]any{{
 			"id":                 keyID,
 			"type":               "Multikey",
-			"controller":         did,
+			"controller":         id.DID,
 			"publicKeyMultibase": pubK256.Multibase(),
 		}},
 		"authentication":  []string{keyID},
@@ -189,6 +218,22 @@ func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/did+ld+json")
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(doc)
+}
+
+// AtprotoDIDText serves GET /.well-known/atproto-did — the plain-text
+// handle-to-DID resolution endpoint AT Proto clients/relays/AppViews use to
+// verify a handle (AGORA-188), the counterpart to DIDDocument's alsoKnownAs
+// entry. Unlike WebFinger's JRD/JSON response, this is just the bare DID
+// string as the response body — no wrapper, no content negotiation.
+func (s *Service) AtprotoDIDText(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.resolveFromHost(r)
+	if !ok {
+		writeError(w, 404, "not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write([]byte(id.DID))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

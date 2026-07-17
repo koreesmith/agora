@@ -815,4 +815,19 @@ var schema = []string{
 		data     BYTEA NOT NULL,
 		PRIMARY KEY (user_id, cid)
 	)`,
+
+	// ── AT Protocol post records (AGORA-190) ──────────────────────────────────
+	// Maps an Agora post to the repo record that federates it — the rkey
+	// (TID) CreateRecord mints is only ever produced at creation time, so it
+	// has to be persisted then or it's unrecoverable later. record_cid is
+	// stored alongside for AGORA-199/201's reply/like strong-refs, which
+	// need to point at a specific record version, not just "whatever's at
+	// this rkey right now."
+	`CREATE TABLE IF NOT EXISTS atproto_posts (
+		post_id     UUID PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+		user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		rkey        TEXT NOT NULL,
+		record_cid  TEXT NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

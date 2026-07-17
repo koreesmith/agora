@@ -12,3 +12,8 @@ require (
 	github.com/lib/pq v1.10.9
 	golang.org/x/crypto v0.24.0
 )
+
+require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/go-chi/httprate v0.14.1 // indirect
+)

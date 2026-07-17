@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"strconv"
 	"strings"
@@ -977,6 +978,15 @@ func (e *EmailService) Send(to, subject, plainBody, unsubToken string) error {
 
 // SendHTML sends a multipart/alternative email with plain-text and optional HTML parts.
 func (e *EmailService) SendHTML(to, subject, plainBody, htmlBody, unsubToken string) error {
+	// AGORA-142: `to` traces back to user-supplied addresses (registration,
+	// invites, email-change) that upstream validation only weakly checks for
+	// an "@". A raw CR/LF in the address would let it splice extra headers
+	// (Bcc, additional To, ...) into the message built below — reject
+	// anything that doesn't parse as a single well-formed address, which
+	// also rules out embedded control characters.
+	if _, err := mail.ParseAddress(to); err != nil {
+		return fmt.Errorf("invalid recipient address")
+	}
 	host, portStr, user, pass, from := e.smtpConfig()
 	log.Printf("email: sending to=%s subject=%q via %s", to, subject, host)
 	if host == "" {

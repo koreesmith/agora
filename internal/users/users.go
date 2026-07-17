@@ -644,11 +644,13 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimPrefix(r.URL.Query().Get("q"), "@")
 
 	type UserHit struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
-		IsFriend    bool   `json:"is_friend"`
+		ID             string `json:"id"`
+		Username       string `json:"username"`
+		DisplayName    string `json:"display_name"`
+		AvatarURL      string `json:"avatar_url"`
+		IsFriend       bool   `json:"is_friend"`
+		IsRemote       bool   `json:"is_remote,omitempty"`
+		RemoteInstance string `json:"remote_instance,omitempty"`
 	}
 	type GroupHit struct {
 		Slug      string `json:"slug"`
@@ -695,6 +697,36 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 		for uRows.Next() {
 			var u UserHit
 			uRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.IsFriend)
+			users = append(users, u)
+		}
+	}
+	// ── Fediverse follows (AGORA-163) ───────────────────────────────────────
+	// A mention only works if the poster can find the account to mention —
+	// surface accounts the caller already follows on the fediverse alongside
+	// local friends/matches, ordered by most recently followed. username is
+	// already the synthetic "handle@instance" form (upsertRemoteAPUser), so
+	// an ILIKE prefix match against it also matches as more of the domain is
+	// typed, and inserting "@" + username (MentionDropdown's onSelect) yields
+	// the exact @handle@instance.tld shape resolveFediverseMentions expects.
+	var qPattern string
+	if q != "" {
+		qPattern = q + "%"
+	}
+	rRows, rerr := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.remote_instance
+		FROM ap_following af
+		JOIN users u ON u.ap_actor_url = af.followed_actor_url
+		WHERE af.follower_user_id = $1
+		  AND ($2 = '' OR u.username ILIKE $2 OR u.display_name ILIKE $2)
+		ORDER BY af.created_at DESC
+		LIMIT 5
+	`, userID, qPattern)
+	if rerr == nil {
+		defer rRows.Close()
+		for rRows.Next() {
+			var u UserHit
+			u.IsRemote = true
+			rRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.RemoteInstance)
 			users = append(users, u)
 		}
 	}

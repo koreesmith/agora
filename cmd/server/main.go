@@ -15,6 +15,7 @@ import (
 
 	"github.com/agora-social/agora/internal/admin"
 	"github.com/agora-social/agora/internal/albums"
+	"github.com/agora-social/agora/internal/atproto"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/blocks"
 	"github.com/agora-social/agora/internal/config"
@@ -69,6 +70,7 @@ func main() {
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
+	atprotoSvc      := atproto.NewService(db, cfg)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
@@ -186,6 +188,11 @@ func main() {
 	// docs/inbox are dereferenced directly by remote fediverse servers at
 	// well-known paths, not through /api.
 	federation.RegisterRoutes(r, fedSvc)
+
+	// AT Proto identity endpoints (AGORA-187) — same public, unprefixed
+	// shape as federation's well-known paths, dereferenced directly by AT
+	// Proto clients/relays rather than through /api.
+	atproto.RegisterRoutes(r, atprotoSvc)
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

@@ -1426,7 +1426,7 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
 		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
 		RETURNING id
-	`, syntheticUsername, displayName, profile.IconURL, profile.Summary,
+	`, syntheticUsername, displayName, profile.IconURL, htmlToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox,
 	).Scan(&id)
 	if err != nil {
@@ -1967,7 +1967,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 		"actor_url":          actorURL,
 		"preferred_username": profile.PreferredUsername,
 		"name":               profile.Name,
-		"summary":            profile.Summary,
+		"summary":            htmlToPlainText(profile.Summary),
 		"icon_url":           profile.IconURL,
 		"instance":           domain,
 	})

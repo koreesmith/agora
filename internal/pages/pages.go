@@ -262,10 +262,20 @@ func (s *Service) CreatePage(w http.ResponseWriter, r *http.Request) {
 	if baseSlug == "" {
 		writeError(w, 400, "display_name produces empty slug"); return
 	}
+	// A page slug and a username share the same acct:name@instance namespace
+	// in ActivityPub/WebFinger (see WebFinger's user-wins fallback) — reject
+	// outright on a direct username match rather than silently auto-suffixing
+	// like the page-vs-page case below, so a page never quietly ends up
+	// unreachable over AP because its actual name was already a user's.
+	var usernameTaken bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))`, baseSlug).Scan(&usernameTaken)
+	if usernameTaken {
+		writeError(w, 409, "this page name conflicts with an existing account handle — please choose a different name"); return
+	}
 	slug := baseSlug
 	for i := 2; i <= 99; i++ {
 		var exists bool
-		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pages WHERE slug = $1)`, slug).Scan(&exists)
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pages WHERE slug = $1) OR EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))`, slug).Scan(&exists)
 		if !exists {
 			break
 		}

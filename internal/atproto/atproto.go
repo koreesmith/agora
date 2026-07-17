@@ -146,21 +146,35 @@ func (s *Service) resolveFromHost(r *http.Request) (*resolvedIdentity, bool) {
 		return nil, false
 	}
 
-	did := u.AtprotoDID
-	if did == "" {
-		did = didForUsername(s.cfg.InstanceDomain, u.Username)
-	}
-	priv, err := s.getOrCreateSigningKey(u.ID, u.AtprotoPriv)
+	did, priv, err := s.ensureIdentity(u.ID, u.Username, u.AtprotoDID, u.AtprotoPriv)
 	if err != nil {
 		return nil, false
 	}
-	if u.AtprotoDID == "" {
-		if _, err := s.db.Exec(`UPDATE users SET atproto_did = $1 WHERE id = $2`, did, u.ID); err != nil {
-			return nil, false
-		}
-	}
 
 	return &resolvedIdentity{Username: u.Username, DID: did, Priv: priv}, true
+}
+
+// ensureIdentity resolves (lazily generating/persisting if needed) a user's
+// DID and signing key from already-fetched column values — the userID-keyed
+// counterpart to resolveFromHost's Host-header-keyed lookup, shared so
+// event-triggered paths (profile sync, post federation) that already have a
+// user row in hand don't need to round-trip through a fake Host header to
+// reuse this logic.
+func (s *Service) ensureIdentity(userID, username, storedDID, storedPriv string) (did string, priv *atcrypto.PrivateKeyK256, err error) {
+	did = storedDID
+	if did == "" {
+		did = didForUsername(s.cfg.InstanceDomain, username)
+	}
+	priv, err = s.getOrCreateSigningKey(userID, storedPriv)
+	if err != nil {
+		return "", nil, err
+	}
+	if storedDID == "" {
+		if _, err := s.db.Exec(`UPDATE users SET atproto_did = $1 WHERE id = $2`, did, userID); err != nil {
+			return "", nil, err
+		}
+	}
+	return did, priv, nil
 }
 
 // DIDDocument serves GET /.well-known/did.json — resolved per-hostname per

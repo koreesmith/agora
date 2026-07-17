@@ -798,4 +798,21 @@ var schema = []string{
 	// convention of its own (stored as hex-encoded raw bytes instead).
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_did TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_private_key TEXT NOT NULL DEFAULT ''`,
+
+	// ── AT Protocol repo storage (AGORA-189) ──────────────────────────────────
+	// atproto_repo_head is the current signed commit CID (as text) — the
+	// entry point for reopening a user's repo/MST across requests, mirroring
+	// how a git ref points at a commit rather than the tree contents
+	// themselves. atproto_blocks is the content-addressed block store the MST
+	// and every record/commit object actually live in; scoped by user_id
+	// (rather than a single global cid-keyed table) so an account deletion
+	// can drop a user's entire repo with one DELETE, without having to walk
+	// the MST to figure out which blocks are reachable from their root.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_repo_head TEXT NOT NULL DEFAULT ''`,
+	`CREATE TABLE IF NOT EXISTS atproto_blocks (
+		user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		cid      TEXT NOT NULL,
+		data     BYTEA NOT NULL,
+		PRIMARY KEY (user_id, cid)
+	)`,
 }

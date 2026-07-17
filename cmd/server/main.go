@@ -21,12 +21,12 @@ import (
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/customfeeds"
 	"github.com/agora-social/agora/internal/dm"
-	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/federation"
+	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/friends"
 	"github.com/agora-social/agora/internal/groups"
-	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/interactions"
+	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/pages"
@@ -51,32 +51,33 @@ func main() {
 	}
 
 	// ── Services ──────────────────────────────────────────────────────────
-	emailSvc  := notifications.NewEmailService(db, cfg)
-	notifSvc  := notifications.NewService(db, emailSvc)
-	mediaSvc  := media.NewService(db, cfg.UploadDir)
-	userSvc   := users.NewService(db, mediaSvc)
-	authSvc   := auth.NewService(db, cfg, notifSvc)
+	emailSvc := notifications.NewEmailService(db, cfg)
+	notifSvc := notifications.NewService(db, emailSvc)
+	mediaSvc := media.NewService(db, cfg.UploadDir)
+	userSvc := users.NewService(db, mediaSvc)
+	authSvc := auth.NewService(db, cfg, notifSvc)
 	friendSvc := friends.NewService(db, notifSvc)
-	feedSvc   := feed.NewService(db, notifSvc, mediaSvc)
-	groupSvc  := groups.NewService(db, notifSvc)
+	feedSvc := feed.NewService(db, notifSvc, mediaSvc)
+	groupSvc := groups.NewService(db, notifSvc)
 	albumsSvc := albums.NewService(db, mediaSvc)
 	feedSvc.SetAlbums(albumsSvc)
 	searchSvc := search.NewService(db)
-	modSvc    := moderation.NewService(db, notifSvc)
-	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
-	fedSvc    := federation.NewService(db, cfg, notifSvc)
-	dmSvc          := dm.New(db)
-	blocksSvc      := blocks.New(db)
-	customFeedsSvc  := customfeeds.NewService(db)
-	pagesSvc        := pages.NewService(db, notifSvc)
+	modSvc := moderation.NewService(db, notifSvc)
+	adminSvc := admin.NewService(db, cfg, notifSvc, mediaSvc)
+	fedSvc := federation.NewService(db, cfg, notifSvc)
+	dmSvc := dm.New(db)
+	blocksSvc := blocks.New(db)
+	customFeedsSvc := customfeeds.NewService(db)
+	pagesSvc := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
-	atprotoSvc      := atproto.NewService(db, cfg)
+	atprotoSvc := atproto.NewService(db, cfg)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
 	pagesSvc.SetFed(fedSvc)
+	userSvc.SetAtproto(atprotoSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -132,7 +133,7 @@ func main() {
 		auth.RegisterInstanceRoute(r, authSvc)
 		// Public one-click unsubscribe (no auth required — linked from emails)
 		r.Post("/notifications/unsubscribe", notifSvc.OneClickUnsubscribe)
-		r.Get("/notifications/unsubscribe",  notifSvc.UnsubscribePage)
+		r.Get("/notifications/unsubscribe", notifSvc.UnsubscribePage)
 
 		// Public reads (guests welcome) — optional auth still personalizes results
 		r.Group(func(r chi.Router) {
@@ -144,9 +145,9 @@ func main() {
 		// Authenticated
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)
-			r.Post("/auth/change-password",       authSvc.ChangePassword)
-			r.Post("/auth/request-email-change",  authSvc.RequestEmailChange)
-			r.Post("/invites/send",               authSvc.SendUserInvite)
+			r.Post("/auth/change-password", authSvc.ChangePassword)
+			r.Post("/auth/request-email-change", authSvc.RequestEmailChange)
+			r.Post("/invites/send", authSvc.SendUserInvite)
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)

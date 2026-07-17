@@ -1856,15 +1856,22 @@ func (s *Service) resolveFediverseMentions(userID, content string) (tags []map[s
 		var status string
 		s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, strings.ToLower(domain)).Scan(&status)
 		if status == "blocked" {
+			log.Printf("federation: mention %s skipped — instance blocked", key)
 			continue
 		}
 
 		actorURL, err := resolveActorURLViaWebFinger(handle, domain)
 		if err != nil {
+			log.Printf("federation: mention %s webfinger resolution failed: %v", key, err)
 			continue
 		}
 		profile, err := s.fetchActorProfileSigned(userID, actorURL)
-		if err != nil || profile.Inbox == "" {
+		if err != nil {
+			log.Printf("federation: mention %s actor fetch failed: %v", key, err)
+			continue
+		}
+		if profile.Inbox == "" {
+			log.Printf("federation: mention %s actor has no inbox", key)
 			continue
 		}
 
@@ -2149,6 +2156,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 // a signed Create activity for each of the author's ActivityPub followers.
 func (s *Service) BroadcastPublicPost(userID, postID string) {
 	if !s.activityPubEnabled() {
+		log.Printf("federation: BroadcastPublicPost %s skipped — ActivityPub disabled instance-wide", postID)
 		return
 	}
 
@@ -2161,6 +2169,7 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
 		return
 	}
 
@@ -2168,6 +2177,7 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	// AGORA-163: a fediverse mention adds recipients on top of the normal
 	// Public/followers audience — it doesn't replace it.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	log.Printf("federation: BroadcastPublicPost %s resolved %d fediverse mention(s)", postID, len(tags))
 	if len(tags) > 0 {
 		if note, ok := activity["object"].(map[string]any); ok {
 			note["tag"] = tags

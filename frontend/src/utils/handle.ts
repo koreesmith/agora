@@ -4,7 +4,11 @@
  * Remote users: @username@instance.com
  */
 export function handle(username: string, isRemote?: boolean, remoteInstance?: string): string {
-  if (isRemote && remoteInstance) {
+  // Remote users' username column is already the full synthetic
+  // "handle@instance" form (see upsertRemoteAPUser/getOrCreateRemoteUser) —
+  // only append remoteInstance if username isn't already qualified, so a
+  // remote user doesn't end up doubled as "@handle@instance@instance".
+  if (isRemote && remoteInstance && !username.includes('@')) {
     return `@${username}@${remoteInstance}`
   }
   return `@${username}`

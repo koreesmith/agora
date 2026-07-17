@@ -791,4 +791,11 @@ var schema = []string{
 		UNIQUE (local_user_id, blocker_actor_url)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ap_blocked_by_inbox ON ap_blocked_by(local_user_id, blocker_inbox_url)`,
+
+	// ── AT Protocol / Bluesky identity (AGORA-187) ────────────────────────────
+	// Separate columns from federation_public_key/federation_private_key —
+	// AT Proto signs with secp256k1, not RSA, and the key material has no PEM
+	// convention of its own (stored as hex-encoded raw bytes instead).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_did TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_private_key TEXT NOT NULL DEFAULT ''`,
 }

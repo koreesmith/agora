@@ -5,6 +5,7 @@ import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationA
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
+import { renderContent } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
@@ -290,7 +291,7 @@ export default function ProfilePage() {
             )}
           </h1>
           <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
-          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300">{profile.bio}</p>}
+          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio)}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
             <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
             {profile.location && <span>{profile.location}</span>}

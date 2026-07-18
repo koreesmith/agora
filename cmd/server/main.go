@@ -195,6 +195,9 @@ func main() {
 			r.Use(authSvc.RequireAdmin)
 			admin.RegisterRoutes(r, adminSvc)
 			pages.RegisterAdminRoutes(r, pagesSvc)
+			// AGORA-220: relay management needs the instance actor's signing
+			// key (AGORA-219), which only exists in the federation package.
+			federation.RegisterAdminRoutes(r, fedSvc)
 		})
 	})
 

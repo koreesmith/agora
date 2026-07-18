@@ -53,6 +53,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Post("/atproto/follow", s.FollowBlueskyAccount)
 	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
 	r.Get("/atproto/following", s.ListBlueskyFollowing)
+	// AGORA-196: reconcile Bridgy-Fed-bridged Bluesky follows to native ones.
+	r.Get("/atproto/bridged-follows", s.ListBridgedBlueskyFollows)
+	r.Post("/atproto/bridged-follows/{id}/migrate", s.MigrateBridgedFollow)
 }
 
 // domainFromURL strips the scheme from an instance URL, leaving the bare

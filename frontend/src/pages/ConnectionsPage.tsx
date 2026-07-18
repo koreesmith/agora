@@ -3,8 +3,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { friendsApi, federationApi, atprotoApi } from '../api'
 import { handle } from '../utils/handle'
-import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home } from 'lucide-react'
+import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+
+// AGORA-196: a fediverse actor federated through Bridgy Fed's bsky.brid.gy
+// (or any *.brid.gy) is a Bluesky account, not a real fediverse one.
+function isBridgedBlueskyInstance(instance?: string): boolean {
+  return !!instance && /(^|\.)brid\.gy$/i.test(instance)
+}
 
 export default function ConnectionsPage() {
   const [searchParams] = useSearchParams()
@@ -57,6 +63,14 @@ export default function ConnectionsPage() {
   const toggleFediShowInFeed = useMutation({
     mutationFn: ({ id, showInFeed }: { id: string, showInFeed: boolean }) => federationApi.toggleShowInFeed(id, showInFeed),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
+  })
+  // AGORA-196: reconcile a Bridgy-Fed-bridged Bluesky follow to a native one.
+  const migrateBridged = useMutation({
+    mutationFn: (id: string) => atprotoApi.migrateBridgedFollow(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fediverse-following'] })
+      qc.invalidateQueries({ queryKey: ['bluesky-following'] })
+    },
   })
 
   function handleFediSearch(e: React.FormEvent) {
@@ -301,7 +315,25 @@ export default function ConnectionsPage() {
             </form>
             {fediSearchError && <p className="text-sm text-red-500">{fediSearchError}</p>}
 
-            {fediPreview && (
+            {/* AGORA-196: a Bluesky account bridged into the fediverse via
+                Bridgy Fed (handle@bsky.brid.gy) should be followed natively
+                instead — no "follow via bridge" option offered for it. */}
+            {fediPreview && isBridgedBlueskyInstance(fediPreview.instance) && (
+              <div className="flex items-center gap-3 p-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-amber-700 dark:text-amber-400">This is a Bluesky account</p>
+                  <p className="text-xs text-agora-500 mt-1">
+                    @{fediPreview.preferred_username} is a Bluesky account bridged into the fediverse — follow it natively from the Bluesky tab instead.
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setTab('bluesky'); setBskyHandle(fediPreview.preferred_username); setFediPreview(null); setFediHandle('') }}
+                  className="btn-secondary text-xs flex-shrink-0">
+                  Go to Bluesky tab
+                </button>
+              </div>
+            )}
+            {fediPreview && !isBridgedBlueskyInstance(fediPreview.instance) && (
               <div className="flex items-center gap-3 p-3 rounded-xl border border-agora-100 dark:border-agora-700">
                 <div className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
                   {fediPreview.icon_url
@@ -355,6 +387,15 @@ export default function ConnectionsPage() {
                     <span className="flex items-center gap-1 text-xs text-agora-400 flex-shrink-0">
                       <Clock size={12} /> Requested
                     </span>
+                  )}
+                  {f.accepted && isBridgedBlueskyInstance(f.instance) && (
+                    <button
+                      onClick={() => migrateBridged.mutate(f.id)}
+                      disabled={migrateBridged.isPending}
+                      title="This is a Bluesky account followed via the fediverse bridge — switch to following it natively"
+                      className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                      <Cloud size={13} /> {migrateBridged.isPending ? 'Migrating…' : 'Migrate to Bluesky'}
+                    </button>
                   )}
                   {f.accepted && f.user_id && (
                     <button

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Plus, Trash2, Sparkles, RotateCcw } from 'lucide-react'
-import { customFeedsApi, friendsApi, groupsApi, pagesApi, interactionsApi, federationApi } from '../../api'
+import { customFeedsApi, friendsApi, groupsApi, pagesApi, interactionsApi, federationApi, atprotoApi } from '../../api'
 
 interface Filter {
   filter_type: string
@@ -26,13 +26,16 @@ const FILTER_TYPES = [
   { value: 'include_page',      label: 'Include Page' },
   { value: 'fediverse_account', label: 'Include Fediverse Account' },
   { value: 'fediverse_all',     label: 'Include All Fediverse Follows' },
+  { value: 'atproto_account',   label: 'Include Bluesky Account' },
+  { value: 'atproto_all',       label: 'Include All Bluesky Follows' },
   { value: 'exclude_friend',    label: 'Exclude Friend' },
   { value: 'exclude_group',     label: 'Exclude Community Group' },
   { value: 'exclude_page',      label: 'Exclude Page' },
 ]
 
-// fediverse_all has no meaningful "value" to pick — it means "everyone I follow".
-const NO_VALUE_FILTER_TYPES = new Set(['fediverse_all'])
+// fediverse_all/atproto_all have no meaningful "value" to pick — they mean
+// "everyone I follow [on that network]".
+const NO_VALUE_FILTER_TYPES = new Set(['fediverse_all', 'atproto_all'])
 
 export default function FeedBuilderModal({ feed, onClose }: Props) {
   const qc = useQueryClient()
@@ -65,12 +68,17 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
     queryKey: ['fediverse-following'],
     queryFn: () => federationApi.listFollowing().then(r => r.data),
   })
+  const { data: bskyFollowingData } = useQuery({
+    queryKey: ['bluesky-following'],
+    queryFn: () => atprotoApi.listBlueskyFollowing().then(r => r.data),
+  })
 
   const friendGroups = listsData?.groups ?? []
   const friends = friendsData?.friends ?? []
   const myGroups = (groupsData?.groups ?? []).filter((g: any) => g.is_member)
   const myPages: any[] = myPagesData?.pages ?? []
   const following: any[] = followingData?.following ?? []
+  const bskyFollowing: any[] = bskyFollowingData?.following ?? []
 
   const save = useMutation({
     mutationFn: (data: { name: string, smart_ranking: boolean, filters: Filter[] }) =>
@@ -121,6 +129,12 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
         return following
           .filter((f: any) => f.user_id)
           .map((f: any) => ({ id: f.user_id, label: f.display_name || f.username || f.actor_url }))
+      case 'atproto_account':
+        // Same reasoning as fediverse_account — a followed Bluesky account
+        // only has a users.id stub once its first post has been ingested.
+        return bskyFollowing
+          .filter((f: any) => f.user_id)
+          .map((f: any) => ({ id: f.user_id, label: f.display_name || f.handle }))
       default:
         return []
     }

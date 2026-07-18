@@ -1,13 +1,16 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
-import { friendsApi } from '../api'
+import { Link, useSearchParams } from 'react-router-dom'
+import { friendsApi, federationApi } from '../api'
 import { handle } from '../utils/handle'
-import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List } from 'lucide-react'
+import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
-export default function FriendsPage() {
-  const [tab, setTab] = useState<'friends'|'requests'|'lists'>('friends')
+export default function ConnectionsPage() {
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<'friends'|'requests'|'lists'|'fediverse'|'bluesky'>(
+    (searchParams.get('tab') as any) || 'friends'
+  )
   const [newListName, setNewListName] = useState('')
   const [expandedList, setExpandedList] = useState<string | null>(null)
   const [listModalFriend, setListModalFriend] = useState<any | null>(null)
@@ -17,6 +20,48 @@ export default function FriendsPage() {
   const { data: friendsData } = useQuery({ queryKey: ['friends'],       queryFn: () => friendsApi.listFriends().then(r => r.data) })
   const { data: reqData }     = useQuery({ queryKey: ['requests'],      queryFn: () => friendsApi.listRequests().then(r => r.data) })
   const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listFriendLists().then(r => r.data) })
+
+  // ── Fediverse follows (moved from the standalone Fediverse page) ──────────
+  const [fediHandle, setFediHandle] = useState('')
+  const [fediPreview, setFediPreview] = useState<any>(null)
+  const [fediSearchError, setFediSearchError] = useState('')
+
+  const { data: followingData } = useQuery({
+    queryKey: ['fediverse-following'],
+    queryFn: () => federationApi.listFollowing().then(r => r.data),
+    enabled: tab === 'fediverse',
+  })
+  const following: any[] = followingData?.following ?? []
+
+  const resolveFediHandle = useMutation({
+    mutationFn: (h: string) => federationApi.resolveFediverseHandle(h).then(r => r.data),
+    onSuccess: (data) => { setFediPreview(data); setFediSearchError('') },
+    onError: (e: any) => { setFediPreview(null); setFediSearchError(e.response?.data?.error || 'Could not resolve that handle.') },
+  })
+  const followFedi = useMutation({
+    mutationFn: (actorUrl: string) => federationApi.followFediverseAccount(actorUrl),
+    onSuccess: () => {
+      setFediPreview(null)
+      setFediHandle('')
+      qc.invalidateQueries({ queryKey: ['fediverse-following'] })
+    },
+  })
+  const unfollowFedi = useMutation({
+    mutationFn: (id: string) => federationApi.unfollowFediverseAccount(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
+  })
+  const toggleFediNotify = useMutation({
+    mutationFn: ({ id, notify }: { id: string, notify: boolean }) => federationApi.toggleFollowNotify(id, notify),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
+  })
+
+  function handleFediSearch(e: React.FormEvent) {
+    e.preventDefault()
+    if (!fediHandle.trim()) return
+    resolveFediHandle.mutate(fediHandle.trim())
+  }
+
+  const alreadyFollowingFedi = fediPreview && following.some(f => f.actor_url === fediPreview.actor_url)
 
   const accept   = useMutation({
     mutationFn: (friend: any) => friendsApi.acceptRequest(friend.id),
@@ -51,9 +96,11 @@ export default function FriendsPage() {
   const pendingCount = incoming.length
 
   const tabs = [
-    { id: 'friends',  label: `Friends (${friends.length})` },
-    { id: 'requests', label: `Requests${pendingCount ? ` (${pendingCount})` : ''}` },
-    { id: 'lists',    label: 'Friend Lists' },
+    { id: 'friends',   label: `Friends (${friends.length})` },
+    { id: 'requests',  label: `Requests${pendingCount ? ` (${pendingCount})` : ''}` },
+    { id: 'lists',     label: 'Friend Lists' },
+    { id: 'fediverse', label: 'Fediverse' },
+    { id: 'bluesky',   label: 'Bluesky' },
   ]
 
   const Avatar = ({ u }: { u: any }) => (
@@ -66,7 +113,7 @@ export default function FriendsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Friends</h1>
+      <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Connections</h1>
 
       {listModalFriend && (
         <FriendListModal
@@ -175,6 +222,118 @@ export default function FriendsPage() {
               onRemove={(friendID) => removeFromList.mutate({ listID: list.id, friendID })}
             />
           ))}
+        </div>
+      )}
+
+      {/* ── Fediverse tab (moved from the standalone Fediverse page) ── */}
+      {tab === 'fediverse' && (
+        <div className="space-y-4">
+          <div className="card p-5 space-y-4">
+            <div>
+              <h2 className="font-semibold text-sm">Follow a fediverse account</h2>
+              <p className="text-xs text-agora-400 mt-1">
+                Enter a full handle (e.g. <code>user@mastodon.social</code>) or a profile URL. There's no way to
+                search the fediverse by name — like Mastodon's own remote search, you need the exact handle.
+              </p>
+            </div>
+            <form onSubmit={handleFediSearch} className="flex gap-2">
+              <input
+                value={fediHandle}
+                onChange={e => setFediHandle(e.target.value)}
+                placeholder="user@instance.social"
+                className="input flex-1 text-sm"
+              />
+              <button type="submit" disabled={resolveFediHandle.isPending || !fediHandle.trim()} className="btn-secondary text-sm flex items-center gap-1.5">
+                <Search size={14} /> {resolveFediHandle.isPending ? 'Searching…' : 'Search'}
+              </button>
+            </form>
+            {fediSearchError && <p className="text-sm text-red-500">{fediSearchError}</p>}
+
+            {fediPreview && (
+              <div className="flex items-center gap-3 p-3 rounded-xl border border-agora-100 dark:border-agora-700">
+                <div className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  {fediPreview.icon_url
+                    ? <img src={fediPreview.icon_url} alt="" className="w-full h-full object-cover" />
+                    : <span className="w-full h-full flex items-center justify-center font-bold text-agora-500">
+                        {(fediPreview.name || fediPreview.preferred_username || '?')[0]}
+                      </span>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm truncate">{fediPreview.name || fediPreview.preferred_username}</p>
+                  <p className="text-xs text-agora-400 truncate">@{fediPreview.preferred_username}@{fediPreview.instance}</p>
+                  {fediPreview.summary && <p className="text-xs text-agora-500 mt-1 line-clamp-2">{fediPreview.summary}</p>}
+                </div>
+                <button
+                  onClick={() => followFedi.mutate(fediPreview.actor_url)}
+                  disabled={followFedi.isPending || alreadyFollowingFedi}
+                  className="btn-primary text-xs flex items-center gap-1 flex-shrink-0">
+                  <UserPlus size={13} /> {alreadyFollowingFedi ? 'Following' : followFedi.isPending ? 'Following…' : 'Follow'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your follows</h2>
+            {following.length === 0 && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                You're not following anyone on the fediverse yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {following.map(f => (
+                <div key={f.id} className="flex items-center gap-3 py-2">
+                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {f.avatar_url
+                      ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                          {(f.display_name || f.username || '?')[0]}
+                        </span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-sm truncate">{f.display_name || f.username || f.actor_url}</p>
+                    {f.username && <p className="text-xs text-agora-400 truncate">@{f.username}</p>}
+                  </div>
+                  {!f.accepted && (
+                    <span className="flex items-center gap-1 text-xs text-agora-400 flex-shrink-0">
+                      <Clock size={12} /> Requested
+                    </span>
+                  )}
+                  {f.accepted && (
+                    <button
+                      onClick={() => toggleFediNotify.mutate({ id: f.id, notify: !f.notify })}
+                      disabled={toggleFediNotify.isPending}
+                      title={f.notify ? 'Notifications on for this account' : 'Notifications off for this account'}
+                      className={`flex-shrink-0 p-1.5 rounded-full transition-colors ${f.notify ? 'text-agora-700 bg-agora-100 dark:bg-agora-700 dark:text-white' : 'text-agora-400 hover:text-agora-600'}`}>
+                      {f.notify ? <Bell size={15} /> : <BellOff size={15} />}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => unfollowFedi.mutate(f.id)}
+                    disabled={unfollowFedi.isPending}
+                    className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                    <UserMinus size={13} /> Unfollow
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-xs text-agora-400 text-center">
+            Want to opt out of the fediverse entirely? That toggle lives in{' '}
+            <Link to="/settings?tab=fediverse" className="underline hover:text-agora-600">Settings → Fediverse</Link>.
+          </p>
+        </div>
+      )}
+
+      {/* ── Bluesky tab (placeholder — no native follow backend yet, AGORA-195) ── */}
+      {tab === 'bluesky' && (
+        <div className="card p-8 text-center text-agora-400 space-y-2">
+          <Globe size={32} className="mx-auto opacity-50" />
+          <p className="font-medium text-agora-500">Bluesky following is coming soon</p>
+          <p className="text-sm max-w-sm mx-auto">
+            Agora can already post your public updates to Bluesky. Following native Bluesky accounts from here is next.
+          </p>
         </div>
       )}
     </div>

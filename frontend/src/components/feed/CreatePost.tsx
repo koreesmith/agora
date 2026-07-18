@@ -692,7 +692,7 @@ export default function CreatePost() {
                 <option value="">Select list…</option>
                 {friendLists.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
-            : <span className="text-xs text-agora-400">No lists yet — <Link to="/friends" className="underline">create one</Link></span>
+            : <span className="text-xs text-agora-400">No lists yet — <Link to="/connections?tab=lists" className="underline">create one</Link></span>
         )}
 
         <button onClick={() => create.mutate()} disabled={!canPost} className="ml-auto btn-primary text-sm">

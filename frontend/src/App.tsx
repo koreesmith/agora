@@ -19,7 +19,7 @@ import TermsPage          from './pages/TermsPage'
 import SupportPage        from './pages/SupportPage'
 import FeedPage           from './pages/FeedPage'
 import ProfilePage        from './pages/ProfilePage'
-import FriendsPage        from './pages/FriendsPage'
+import ConnectionsPage    from './pages/ConnectionsPage'
 import SearchPage         from './pages/SearchPage'
 import NotificationsPage  from './pages/NotificationsPage'
 import SettingsPage       from './pages/SettingsPage'
@@ -41,7 +41,6 @@ import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
 import PageSettingsPage  from './pages/PageSettingsPage'
 import ExplorePage       from './pages/ExplorePage'
-import FediversePage     from './pages/FediversePage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -112,11 +111,14 @@ function AppRoutes() {
       </Route>
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
         <Route path="/feed"                    element={<FeedPage />} />
-        <Route path="/friends"                 element={<FriendsPage />} />
+        <Route path="/connections"             element={<ConnectionsPage />} />
+        {/* Old routes from before the Friends/Fediverse merge — kept as
+            redirects so existing links and bookmarks still land somewhere. */}
+        <Route path="/friends"                 element={<Navigate to="/connections" replace />} />
+        <Route path="/fediverse"               element={<Navigate to="/connections?tab=fediverse" replace />} />
         <Route path="/search"                  element={<SearchPage />} />
         <Route path="/notifications"           element={<NotificationsPage />} />
         <Route path="/settings"                element={<SettingsPage />} />
-        <Route path="/fediverse"               element={<FediversePage />} />
         <Route path="/admin"                   element={<RequireAdmin><AdminPage /></RequireAdmin>} />
         <Route path="/discover"                element={<DiscoverPage />} />
         <Route path="/lists/:id"               element={<ListFeedPage />} />

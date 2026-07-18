@@ -745,13 +745,21 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ap_following_actor ON ap_following(followed_actor_url)`,
 
-	// AGORA-146: two new custom-feed filter types surface followed fediverse
-	// accounts through the existing custom-feeds engine rather than a new
-	// timeline UI — same drop-and-readd pattern AGORA-111 used to add
-	// include_page/exclude_page.
+	// AGORA-146/195: custom-feed filter types surface followed fediverse and
+	// (later) Bluesky accounts through the existing custom-feeds engine
+	// rather than a new timeline UI — same drop-and-readd pattern AGORA-111
+	// used to add include_page/exclude_page. This must stay the *only*
+	// DROP+ADD pair for this constraint in the whole migration list: since
+	// every statement here replays on every boot (no per-migration tracking
+	// table), a second drop-and-narrower-readd pair added later for a new
+	// filter type would transiently drop back to this older, narrower CHECK
+	// and fail on any row already using the newer type — a bug Agora's own
+	// AGORA-195 introduced by adding a second pair instead of widening this
+	// one, fixed here.
+	// Extend the list in place here going forward.
 	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
 	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all'))`,
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all'))`,
 
 	// AGORA-164: remote-actor stubs (created by upsertRemoteAPUser) never
 	// explicitly set profile_private, which defaults to TRUE — every
@@ -893,13 +901,18 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_at_following_user ON at_following(local_user_id)`,
 
-	// New custom-feed filter types analogous to fediverse_account/fediverse_all
-	// (AGORA-146) — storage/picker plumbing only for now. The actual post-
-	// matching join (which requires a cached-remote-user-by-DID concept fed by
-	// ingestion) is AGORA-197's job, the same way AGORA-146 itself paired
-	// follow+ingestion in one ticket but this epic deliberately splits them —
-	// AT Proto has no inbox-push equivalent, so ingestion is real, separate work.
-	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
-	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all'))`,
+	// atproto_account/atproto_all custom-feed filter types (analogous to
+	// fediverse_account/fediverse_all, AGORA-146) were added to the single
+	// authoritative filter_type CHECK constraint above (search
+	// custom_feed_filters_filter_type_check) rather than a new drop-and-readd
+	// pair here — see that statement's own comment for why a second pair
+	// would be a latent bug, not just redundant.
+
+	// ── Bluesky post ingestion (AGORA-197) ────────────────────────────────────
+	// Cached local stub for a followed Bluesky account, mirroring
+	// ap_actor_url's shape/index — keyed by DID (stable) rather than handle
+	// (which can change), same reasoning ap_actor_url uses actor URL over a
+	// display name.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_remote_did TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_atproto_remote_did ON users(atproto_remote_did) WHERE atproto_remote_did != ''`,
 }

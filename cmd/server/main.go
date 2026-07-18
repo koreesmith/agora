@@ -208,6 +208,7 @@ func main() {
 	go userSvc.StartDeletionCleanup(context.Background())
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
+	go atprotoSvc.StartBlueskyIngestion(context.Background())
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{

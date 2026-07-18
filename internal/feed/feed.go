@@ -83,6 +83,14 @@ type atprotoSender interface {
 	// inReplyTo URL — no-op internally if there's no Bluesky-visible target.
 	DeliverReply(userID, commentID, replyToID string)
 	DeliverReplyUpdate(userID, commentID, replyToID string)
+	// DeliverLike/DeliverUnlike/DeliverAnnounce/DeliverUnannounce (AGORA-201)
+	// mirror fedSender's own four, but write into the liker/reposter's own
+	// repo rather than deliver to an inbox — no-op internally if the target
+	// has no Bluesky presence.
+	DeliverLike(userID, postID string)
+	DeliverUnlike(userID, postID string)
+	DeliverAnnounce(userID, repostID, originalPostID string)
+	DeliverUnannounce(userID, repostID, originalPostID string)
 }
 
 type Service struct {
@@ -1266,12 +1274,16 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// AGORA-203: independent of the AP branching above — BroadcastPostDelete
-	// no-ops on its own if this post was never an AT Proto record (page
-	// posts and reposts never are, same as BroadcastPost never federates
-	// them), so no need to mirror the page/repost special-casing here.
+	// AGORA-203/201: mirrors the AP branching above — a repost's only
+	// outbound record was an app.bsky.feed.repost (AGORA-201), never an
+	// app.bsky.feed.post BroadcastPost never federates, so its delete must
+	// go through DeliverUnannounce instead of BroadcastPostDelete.
 	if s.atproto != nil {
-		go s.atproto.BroadcastPostDelete(authorID, id)
+		if repostOfID != nil {
+			go s.atproto.DeliverUnannounce(authorID, id, *repostOfID)
+		} else {
+			go s.atproto.BroadcastPostDelete(authorID, id)
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
@@ -1299,6 +1311,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil {
 		go s.fed.DeliverLike(userID, postID)
 	}
+	// AGORA-201: same reasoning as the fediverse call above, for a Bluesky target.
+	if s.atproto != nil {
+		go s.atproto.DeliverLike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "liked"})
 }
 
@@ -1308,6 +1324,9 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	if s.fed != nil {
 		go s.fed.DeliverUnlike(userID, postID)
+	}
+	if s.atproto != nil {
+		go s.atproto.DeliverUnlike(userID, postID)
 	}
 	writeJSON(w, 200, map[string]string{"message": "unliked"})
 }
@@ -1369,6 +1388,11 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil && req.Type == "like" {
 		go s.fed.DeliverLike(userID, postID)
 	}
+	// AGORA-201: app.bsky.feed.like is likewise a plain like with no emoji
+	// concept, same restriction as the fediverse call above.
+	if s.atproto != nil && req.Type == "like" {
+		go s.atproto.DeliverLike(userID, postID)
+	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
 }
@@ -1382,6 +1406,10 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	// federated like to undo (e.g. the reaction was "love", not "like").
 	if s.fed != nil {
 		go s.fed.DeliverUnlike(userID, postID)
+	}
+	// AGORA-201: same reasoning, for a Bluesky-federated like.
+	if s.atproto != nil {
+		go s.atproto.DeliverUnlike(userID, postID)
 	}
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
 }
@@ -1934,6 +1962,10 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 	// AGORA-159: federate as an Announce if the original post is remote.
 	if s.fed != nil {
 		go s.fed.DeliverAnnounce(userID, id, repostOfID)
+	}
+	// AGORA-201: same reasoning, for a Bluesky-federated original post.
+	if s.atproto != nil {
+		go s.atproto.DeliverAnnounce(userID, id, repostOfID)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})

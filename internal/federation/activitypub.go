@@ -2517,6 +2517,12 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	for _, inboxURL := range mentionedInboxURLs {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
 	}
+	// AGORA-221: a relay only forwards what instances actually publish to
+	// it — being subscribed (AGORA-220) alone doesn't make this post
+	// discoverable through it.
+	for _, inboxURL := range s.enabledRelayInboxes() {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // BroadcastUpdatePost delivers a signed Update activity when a previously-
@@ -2558,6 +2564,11 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	for _, inboxURL := range mentionedInboxURLs {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
 	}
+	// AGORA-221: keep a relay's copy from going stale the same way an edit
+	// keeps followers' copies from going stale, above.
+	for _, inboxURL := range s.enabledRelayInboxes() {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // BroadcastDeletePost enqueues a signed Delete/Tombstone for a removed post.
@@ -2589,6 +2600,11 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 		"to": []string{"https://www.w3.org/ns/activitystreams#Public"},
 	}
 	s.deliverToFollowers(userID, activity)
+	// AGORA-221: a relay-forwarded post that gets deleted at the source
+	// should stop being forwarded/shown too.
+	for _, inboxURL := range s.enabledRelayInboxes() {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // DeliverReply delivers a new comment to the fediverse when it's a direct

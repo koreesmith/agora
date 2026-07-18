@@ -27,7 +27,7 @@ export default function ListFeedPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <Link to="/friends" className="btn-ghost p-1.5 text-agora-500 hover:text-agora-700">
+        <Link to="/connections?tab=lists" className="btn-ghost p-1.5 text-agora-500 hover:text-agora-700">
           <ArrowLeft size={18} />
         </Link>
         <List size={18} className="text-agora-400" />

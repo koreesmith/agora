@@ -6,6 +6,24 @@ http {
     limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
     limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
     limit_req_zone $binary_remote_addr zone=federation:10m rate=60r/m;
+    # AGORA-206: AT Proto's unauthenticated-facing surface (identity
+    # resolution + XRPC reads) is real work triggered before any signature
+    # check, the same abuse-surface argument AGORA-149 made for the AP
+    # inbox — but it's a distinct traffic shape from federation's own
+    # short request/response deliveries, so it gets its own zone rather
+    # than naively reusing federation's rate. Sized more generously
+    # (120r/m) since a legitimate AppView/relay's identity-resolution and
+    # repo-read traffic can be more frequent than ActivityPub inbox
+    # delivery.
+    limit_req_zone $binary_remote_addr zone=atproto:10m rate=120r/m;
+    # The firehose's traffic shape is different again: subscribeRepos is a
+    # long-lived websocket, not a burst of short requests — limit_req only
+    # ever gates the initial upgrade handshake (not frames within an
+    # already-established connection), so this zone/rate governs how often
+    # a given IP may open a *new* firehose subscription, not the
+    # subscription itself. A low rate is generous for legitimate relay
+    # reconnects while still bounding connection-flood abuse.
+    limit_req_zone $binary_remote_addr zone=firehose:10m rate=10r/m;
 
     server {
         listen 80;
@@ -64,6 +82,27 @@ http {
             proxy_connect_timeout 10s;
         }
 
+        # AT Proto identity resolution (AGORA-186/206) — exact-match so
+        # these two hit the atproto zone instead of the general
+        # /.well-known/ prefix block's federation zone below; matched
+        # before it regardless of file order (nginx always prefers an
+        # exact `=` location over a prefix match).
+        location = /.well-known/did.json {
+            limit_req zone=atproto burst=20 nodelay;
+            proxy_pass http://frontend:80/.well-known/did.json;
+            proxy_http_version 1.1;
+            proxy_set_header Host      $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location = /.well-known/atproto-did {
+            limit_req zone=atproto burst=20 nodelay;
+            proxy_pass http://frontend:80/.well-known/atproto-did;
+            proxy_http_version 1.1;
+            proxy_set_header Host      $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
         location /.well-known/ {
             limit_req zone=federation burst=20 nodelay;
             proxy_pass http://frontend:80/.well-known/;
@@ -80,13 +119,16 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
         }
 
-        # ── AT Proto firehose (AGORA-186/191) ─────────────────────────────────
+        # ── AT Proto firehose (AGORA-186/191/206) ─────────────────────────────
         # subscribeRepos is a websocket — needs explicit Upgrade/Connection
         # passthrough and a long read timeout (a subscription stays open
-        # indefinitely), unlike the plain HTTP proxying above.
-        location /xrpc/ {
-            limit_req zone=federation burst=20 nodelay;
-            proxy_pass http://frontend:80/xrpc/;
+        # indefinitely), unlike the plain HTTP proxying below. Exact-match
+        # on its own zone/rate (AGORA-206) rather than sharing the general
+        # /xrpc/ prefix's rate: a relay's reconnect cadence is a very
+        # different shape from a burst of short reads.
+        location = /xrpc/com.atproto.sync.subscribeRepos {
+            limit_req zone=firehose burst=5 nodelay;
+            proxy_pass http://frontend:80/xrpc/com.atproto.sync.subscribeRepos;
             proxy_http_version 1.1;
             proxy_set_header Host       $host;
             proxy_set_header X-Real-IP  $remote_addr;
@@ -94,6 +136,16 @@ http {
             proxy_set_header Connection "upgrade";
             proxy_read_timeout 1h;
             proxy_buffering off;
+        }
+
+        # Any other XRPC endpoint (AGORA-206) — plain HTTP reads, not a
+        # websocket, so no Upgrade passthrough/long timeout needed.
+        location /xrpc/ {
+            limit_req zone=atproto burst=20 nodelay;
+            proxy_pass http://frontend:80/xrpc/;
+            proxy_http_version 1.1;
+            proxy_set_header Host       $host;
+            proxy_set_header X-Real-IP  $remote_addr;
         }
 
         location / {

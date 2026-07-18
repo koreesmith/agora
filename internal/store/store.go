@@ -928,4 +928,19 @@ var schema = []string{
 	// remote_post_id convention), but AP has no CID equivalent, so this
 	// column is AT-Proto-specific rather than folded into the existing one.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS remote_post_cid TEXT NOT NULL DEFAULT ''`,
+
+	// AGORA-201: tracks outbound app.bsky.feed.like/repost records this
+	// instance wrote into a local user's own repo, keyed by the target post
+	// (not a separate row id) since a user can only like/repost a given post
+	// once — needed to find the record's rkey again on unlike/unrepost,
+	// mirroring atproto_posts' role for app.bsky.feed.post records.
+	`CREATE TABLE IF NOT EXISTS atproto_reactions (
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		kind       VARCHAR(10) NOT NULL CHECK (kind IN ('like','repost')),
+		rkey       TEXT        NOT NULL,
+		record_cid TEXT        NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (post_id, user_id, kind)
+	)`,
 }

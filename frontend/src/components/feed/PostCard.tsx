@@ -720,7 +720,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                           ))}
                         </select>
                       : <p className="text-xs text-agora-400">
-                          No friend lists yet — <Link to="/friends" className="underline">create one</Link>
+                          No friend lists yet — <Link to="/connections?tab=lists" className="underline">create one</Link>
                         </p>
                   )}
                 </div>

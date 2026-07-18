@@ -72,6 +72,12 @@ type fedSender interface {
 // protocols are independent opt-ins with no shared lifecycle.
 type atprotoSender interface {
 	BroadcastPost(userID, postID string)
+	// BroadcastPostUpdate/BroadcastPostDelete (AGORA-202/203) mirror
+	// fedSender's BroadcastUpdatePost/BroadcastDeletePost, but no-op
+	// internally (rather than needing a call-site check here) if the post
+	// was never federated as an AT Proto record in the first place.
+	BroadcastPostUpdate(userID, postID string)
+	BroadcastPostDelete(userID, postID string)
 }
 
 type Service struct {
@@ -1221,6 +1227,14 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AGORA-203: independent of the AP branching above — BroadcastPostDelete
+	// no-ops on its own if this post was never an AT Proto record (page
+	// posts and reposts never are, same as BroadcastPost never federates
+	// them), so no need to mirror the page/repost special-casing here.
+	if s.atproto != nil {
+		go s.atproto.BroadcastPostDelete(authorID, id)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -2163,6 +2177,15 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		go s.fed.BroadcastDeletePost(commentAuthor, commentID)
 	}
 
+	// AGORA-203: no-ops today (comment/reply federation to AT Proto is
+	// AGORA-199, not yet built), but landing this call now — rather than as
+	// a follow-up once AGORA-199 ships — is the whole point of filing this
+	// ticket as a Bug up front, so comment-delete doesn't get missed the way
+	// AGORA-151 initially missed it on the AP side.
+	if s.atproto != nil {
+		go s.atproto.BroadcastPostDelete(commentAuthor, commentID)
+	}
+
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -2272,6 +2295,13 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		} else {
 			go s.fed.BroadcastUpdatePost(userID, id)
 		}
+	}
+
+	// AGORA-202: independent of the AP branching above — BroadcastPostUpdate
+	// no-ops on its own if this post was never an AT Proto record (page
+	// posts never are), so no special-casing needed here.
+	if s.atproto != nil {
+		go s.atproto.BroadcastPostUpdate(userID, id)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "updated"})

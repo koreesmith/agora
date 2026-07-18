@@ -219,7 +219,8 @@ var schema = []string{
 		('smtp_password',        ''),
 		('smtp_from',            'noreply@localhost'),
 		('smtp_enabled',         'false'),
-		('logo_url',             '')
+		('logo_url',             ''),
+		('atproto_enabled',      'false')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────
@@ -854,4 +855,16 @@ var schema = []string{
 	// notify's per-follow, off-by-default shape rather than a global switch,
 	// so a few noisy accounts don't force an all-or-nothing choice.
 	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AT Proto opt-out toggle (AGORA-193) ───────────────────────────────────
+	// Independent pair of flags from activitypub_enabled — a user/instance may
+	// want ActivityPub on and AT Proto off or vice versa, different networks
+	// with different tradeoffs. Per-account defaults true (opt-out), matching
+	// activitypub_enabled's own default; the instance-wide flag defaults off
+	// (checked in atprotoEnabled() below, absent-key-means-off) since — unlike
+	// AGORA-156's AP toggle, which defaulted on to avoid yanking discoverability
+	// out from under instances that already had federation configured — no
+	// instance has AT Proto configured yet, so there's nothing to preserve by
+	// defaulting it on.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_enabled BOOLEAN NOT NULL DEFAULT true`,
 }

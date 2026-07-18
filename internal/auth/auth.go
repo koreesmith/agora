@@ -422,15 +422,16 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		WallApprovalRequired bool
 		ActivityPubEnabled   bool
 		FediverseNotificationsEnabled bool
+		AtprotoEnabled       bool
 	}
 	err = s.db.QueryRow(`
 		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
 		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required,
-		       activitypub_enabled, fediverse_notifications_enabled
+		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
 		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
-		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled)
+		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -445,6 +446,7 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"wall_approval_required": u.WallApprovalRequired,
 		"activitypub_enabled":    u.ActivityPubEnabled,
 		"fediverse_notifications_enabled": u.FediverseNotificationsEnabled,
+		"atproto_enabled": u.AtprotoEnabled,
 	})
 }
 

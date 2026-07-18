@@ -76,17 +76,20 @@ func (s *Service) commitAndPersist(
 // Image blobs (avatar) are deferred to AGORA-194 — this only syncs text
 // fields for now.
 func (s *Service) SyncProfile(userID string) {
+	if !s.atprotoEnabled() {
+		return
+	}
 	ctx := context.Background()
 
 	var username, displayName, bio, did, storedPriv, repoHead, repoRev string
-	var isRemote, profilePrivate bool
+	var isRemote, profilePrivate, atprotoEnabled bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT username, display_name, bio, atproto_did, atproto_private_key,
-		       atproto_repo_head, atproto_repo_rev, is_remote, profile_private
+		       atproto_repo_head, atproto_repo_rev, is_remote, profile_private, atproto_enabled
 		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
 	`, userID).Scan(&username, &displayName, &bio, &did, &storedPriv,
-		&repoHead, &repoRev, &isRemote, &profilePrivate)
-	if err != nil || isRemote || profilePrivate {
+		&repoHead, &repoRev, &isRemote, &profilePrivate, &atprotoEnabled)
+	if err != nil || isRemote || profilePrivate || !atprotoEnabled {
 		return
 	}
 

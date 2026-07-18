@@ -19,21 +19,24 @@ import (
 // This is Create-only: editing or deleting a federated post is AGORA-202/203.
 // Images are AGORA-194.
 func (s *Service) BroadcastPost(userID, postID string) {
+	if !s.atprotoEnabled() {
+		return
+	}
 	ctx := context.Background()
 
 	var username, content, did, storedPriv, repoHead, repoRev string
 	var visibility string
-	var profilePrivate, isRemote bool
+	var profilePrivate, isRemote, atprotoEnabled bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT u.username, u.profile_private, u.is_remote,
+		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
 		       p.visibility, p.content, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &isRemote,
+	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
 		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt)
-	if err != nil || visibility != "public" || profilePrivate || isRemote {
+	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
 		return
 	}
 

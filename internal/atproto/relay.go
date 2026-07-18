@@ -53,9 +53,23 @@ func (s *Service) requestCrawl(ctx context.Context) error {
 func (s *Service) StartRelayCrawl(ctx context.Context) {
 	const maxBackoff = 24 * time.Hour
 	const reconfirmInterval = 6 * time.Hour
+	const disabledPollInterval = 5 * time.Minute
 	backoff := time.Minute
 
 	for {
+		// AGORA-193: re-checked every cycle rather than once at startup —
+		// same anti-pattern federation.StartBackgroundSync's own comment
+		// warns against — so toggling the instance-wide flag off actually
+		// stops crawl requests, and back on resumes them, without a restart.
+		if !s.atprotoEnabled() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(disabledPollInterval):
+			}
+			continue
+		}
+
 		wait := reconfirmInterval
 		if err := s.requestCrawl(ctx); err != nil {
 			log.Printf("atproto: requestCrawl to relay %s failed: %v", s.relayHost(), err)

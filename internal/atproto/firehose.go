@@ -29,6 +29,10 @@ var firehoseUpgrader = websocket.Upgrader{
 // sequence number (via pgEventPersister.Playback) instead of replaying
 // everything or dropping events the subscriber missed while disconnected.
 func (s *Service) SubscribeRepos(w http.ResponseWriter, r *http.Request) {
+	if !s.atprotoEnabled() {
+		writeError(w, 404, "AT Proto not enabled")
+		return
+	}
 	conn, err := firehoseUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("atproto: firehose upgrade failed: %v", err)

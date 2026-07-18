@@ -63,11 +63,25 @@ func didForUsername(instanceDomain, username string) string {
 	return "did:web:" + username + "." + domainFromURL(instanceDomain)
 }
 
+// atprotoEnabled is the instance-wide AT Proto kill switch (AGORA-193) —
+// independent of activitypub_enabled, and checked the same "absent/unset
+// means off" way federationEnabled() does (contrast activityPubEnabled's
+// "absent means on", a deliberate default AGORA-156 chose to avoid yanking
+// discoverability out from under instances that already had federation
+// configured — not applicable here, since no instance has AT Proto
+// configured yet).
+func (s *Service) atprotoEnabled() bool {
+	var val string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'atproto_enabled'`).Scan(&val)
+	return val == "true"
+}
+
 // eligibleUser mirrors apEligibleUser's shape (internal/federation/activitypub.go)
-// for the small set of columns this package needs. Deliberately does not yet
-// gate on an atproto_enabled flag — that's AGORA-193's job, layered on top
-// later the same way AGORA-156 added the AP instance toggle after AGORA-145
-// already shipped.
+// for the small set of columns this package needs, gated on both the
+// instance-wide and per-account AT Proto toggles (AGORA-193) — every entry
+// point that resolves a user's identity funnels through here or
+// ensureIdentity's callers, so gating it here covers DID document /
+// atproto-did resolution in one place.
 type eligibleUser struct {
 	ID          string
 	Username    string
@@ -76,12 +90,15 @@ type eligibleUser struct {
 }
 
 func (s *Service) eligibleUser(username string) (*eligibleUser, bool) {
+	if !s.atprotoEnabled() {
+		return nil, false
+	}
 	var u eligibleUser
 	err := s.db.QueryRow(`
 		SELECT id, username, atproto_did, atproto_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
-		  AND deletion_scheduled_at IS NULL
+		  AND atproto_enabled = true AND deletion_scheduled_at IS NULL
 	`, username).Scan(&u.ID, &u.Username, &u.AtprotoDID, &u.AtprotoPriv)
 	if err != nil {
 		return nil, false

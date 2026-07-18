@@ -210,6 +210,10 @@ export const moderationApi = {
   listInstanceBans:   ()                          => api.get('/moderation/instance-bans'),
   banInstance:        (data: any)                 => api.post('/moderation/instance-bans', data),
   unbanInstance:      (id: string)                => api.delete(`/moderation/instance-bans/${id}`),
+  // AGORA-205: DID-scoped block list, the AT Proto counterpart to instance-bans.
+  listBlockedDIDs:    ()                          => api.get('/moderation/blocked-dids'),
+  blockDID:           (data: any)                 => api.post('/moderation/blocked-dids', data),
+  unblockDID:         (id: string)                => api.delete(`/moderation/blocked-dids/${id}`),
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────

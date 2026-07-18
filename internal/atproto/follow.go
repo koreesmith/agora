@@ -139,6 +139,11 @@ func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) 
 	if err != nil {
 		return "", nil, &followErr{404, "could not resolve that Bluesky account"}
 	}
+	// AGORA-205: reject following a blocked DID/PDS host outright, mirroring
+	// APLookup's own isInstanceBlocked check on the fediverse side.
+	if s.isBlueskyActorBlocked(profile.DID, profile.Handle) {
+		return "", nil, &followErr{404, "could not resolve that Bluesky account"}
+	}
 
 	did, priv, err := s.ensureIdentity(userID, username, did, storedPriv)
 	if err != nil {

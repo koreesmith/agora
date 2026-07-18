@@ -168,6 +168,7 @@ func main() {
 			// call, not at the bare /federation/... path used by remote
 			// fediverse servers dereferencing our public actor/WebFinger URLs.
 			federation.RegisterAuthedRoutes(r, fedSvc)
+			atproto.RegisterAuthedRoutes(r, atprotoSvc)
 		})
 
 		// Moderator or admin — content moderation actions

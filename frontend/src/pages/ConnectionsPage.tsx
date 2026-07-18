@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { friendsApi, federationApi } from '../api'
+import { friendsApi, federationApi, atprotoApi } from '../api'
 import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
@@ -66,6 +66,45 @@ export default function ConnectionsPage() {
   }
 
   const alreadyFollowingFedi = fediPreview && following.some(f => f.actor_url === fediPreview.actor_url)
+
+  // ── Bluesky follows (AGORA-195) ────────────────────────────────────────────
+  const [bskyHandle, setBskyHandle] = useState('')
+  const [bskyPreview, setBskyPreview] = useState<any>(null)
+  const [bskySearchError, setBskySearchError] = useState('')
+
+  const { data: bskyFollowingData } = useQuery({
+    queryKey: ['bluesky-following'],
+    queryFn: () => atprotoApi.listBlueskyFollowing().then(r => r.data),
+    enabled: tab === 'bluesky',
+  })
+  const bskyFollowing: any[] = bskyFollowingData?.following ?? []
+
+  const resolveBskyHandle = useMutation({
+    mutationFn: (h: string) => atprotoApi.resolveBlueskyHandle(h).then(r => r.data),
+    onSuccess: (data) => { setBskyPreview(data); setBskySearchError('') },
+    onError: (e: any) => { setBskyPreview(null); setBskySearchError(e.response?.data?.error || 'Could not resolve that handle.') },
+  })
+  const followBsky = useMutation({
+    mutationFn: (actor: string) => atprotoApi.followBlueskyAccount(actor),
+    onSuccess: () => {
+      setBskyPreview(null)
+      setBskyHandle('')
+      qc.invalidateQueries({ queryKey: ['bluesky-following'] })
+    },
+    onError: (e: any) => setBskySearchError(e.response?.data?.error || 'Could not follow that account.'),
+  })
+  const unfollowBsky = useMutation({
+    mutationFn: (id: string) => atprotoApi.unfollowBlueskyAccount(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['bluesky-following'] }),
+  })
+
+  function handleBskySearch(e: React.FormEvent) {
+    e.preventDefault()
+    if (!bskyHandle.trim()) return
+    resolveBskyHandle.mutate(bskyHandle.trim())
+  }
+
+  const alreadyFollowingBsky = bskyPreview && bskyFollowing.some(f => f.did === bskyPreview.did)
 
   const accept   = useMutation({
     mutationFn: (friend: any) => friendsApi.acceptRequest(friend.id),
@@ -361,13 +400,88 @@ export default function ConnectionsPage() {
         </div>
       )}
 
-      {/* ── Bluesky tab (placeholder — no native follow backend yet, AGORA-195) ── */}
+      {/* ── Bluesky tab (AGORA-195) ── */}
       {tab === 'bluesky' && (
-        <div className="card p-8 text-center text-agora-400 space-y-2">
-          <Globe size={32} className="mx-auto opacity-50" />
-          <p className="font-medium text-agora-500">Bluesky following is coming soon</p>
-          <p className="text-sm max-w-sm mx-auto">
-            Agora can already post your public updates to Bluesky. Following native Bluesky accounts from here is next.
+        <div className="space-y-4">
+          <div className="card p-5 space-y-4">
+            <div>
+              <h2 className="font-semibold text-sm">Follow a Bluesky account</h2>
+              <p className="text-xs text-agora-400 mt-1">
+                Enter a full handle (e.g. <code>user.bsky.social</code>) or a DID.
+              </p>
+            </div>
+            <form onSubmit={handleBskySearch} className="flex gap-2">
+              <input
+                value={bskyHandle}
+                onChange={e => setBskyHandle(e.target.value)}
+                placeholder="user.bsky.social"
+                className="input flex-1 text-sm"
+              />
+              <button type="submit" disabled={resolveBskyHandle.isPending || !bskyHandle.trim()} className="btn-secondary text-sm flex items-center gap-1.5">
+                <Search size={14} /> {resolveBskyHandle.isPending ? 'Searching…' : 'Search'}
+              </button>
+            </form>
+            {bskySearchError && <p className="text-sm text-red-500">{bskySearchError}</p>}
+
+            {bskyPreview && (
+              <div className="flex items-center gap-3 p-3 rounded-xl border border-agora-100 dark:border-agora-700">
+                <div className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  {bskyPreview.avatar_url
+                    ? <img src={bskyPreview.avatar_url} alt="" className="w-full h-full object-cover" />
+                    : <span className="w-full h-full flex items-center justify-center font-bold text-agora-500">
+                        {(bskyPreview.display_name || bskyPreview.handle || '?')[0]}
+                      </span>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm truncate">{bskyPreview.display_name || bskyPreview.handle}</p>
+                  <p className="text-xs text-agora-400 truncate">@{bskyPreview.handle}</p>
+                  {bskyPreview.description && <p className="text-xs text-agora-500 mt-1 line-clamp-2">{bskyPreview.description}</p>}
+                </div>
+                <button
+                  onClick={() => followBsky.mutate(bskyPreview.did)}
+                  disabled={followBsky.isPending || alreadyFollowingBsky}
+                  className="btn-primary text-xs flex items-center gap-1 flex-shrink-0">
+                  <UserPlus size={13} /> {alreadyFollowingBsky ? 'Following' : followBsky.isPending ? 'Following…' : 'Follow'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your follows</h2>
+            {bskyFollowing.length === 0 && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                You're not following anyone on Bluesky yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {bskyFollowing.map(f => (
+                <div key={f.id} className="flex items-center gap-3 py-2">
+                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {f.avatar_url
+                      ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                          {(f.display_name || f.handle || '?')[0]}
+                        </span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>
+                    <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
+                  </div>
+                  <button
+                    onClick={() => unfollowBsky.mutate(f.id)}
+                    disabled={unfollowBsky.isPending}
+                    className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                    <UserMinus size={13} /> Unfollow
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-xs text-agora-400 text-center">
+            Want to opt out of Bluesky entirely? That toggle lives in{' '}
+            <Link to="/settings?tab=bluesky" className="underline hover:text-agora-600">Settings → Bluesky</Link>.
           </p>
         </div>
       )}

@@ -397,6 +397,10 @@ export default function SettingsPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.atproto_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
+          <p className="text-sm text-agora-500 pt-2 border-t border-agora-100 dark:border-agora-700">
+            Following a Bluesky handle and managing who you already follow moved to{' '}
+            <Link to="/connections?tab=bluesky" className="underline hover:text-agora-700">Connections → Bluesky</Link>.
+          </p>
         </div>
       )}
 

@@ -867,4 +867,39 @@ var schema = []string{
 	// instance has AT Proto configured yet, so there's nothing to preserve by
 	// defaulting it on.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// ── Native Bluesky following (AGORA-195) ──────────────────────────────────
+	// Deliberately not reusing ap_following: an AT Proto follow is an
+	// app.bsky.graph.follow record written into the local user's own repo (an
+	// outbound repo write), not an inbox-delivered activity requiring an
+	// Accept/Reject handshake — no "accepted" boolean, since AT Proto follows
+	// are asymmetric and unilateral. rkey/record_cid mirror atproto_posts'
+	// shape, needed to delete the right repo record on unfollow. display_name/
+	// avatar_url are cached from the resolve-time profile lookup for display —
+	// there's no per-DID "cached remote user" row the way fediverse follows
+	// get one, since that's populated by inbound Note ingestion, which has no
+	// AT Proto equivalent until AGORA-197.
+	`CREATE TABLE IF NOT EXISTS at_following (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		remote_did    TEXT        NOT NULL,
+		remote_handle TEXT        NOT NULL DEFAULT '',
+		display_name  TEXT        NOT NULL DEFAULT '',
+		avatar_url    TEXT        NOT NULL DEFAULT '',
+		rkey          TEXT        NOT NULL DEFAULT '',
+		record_cid    TEXT        NOT NULL DEFAULT '',
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, remote_did)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_at_following_user ON at_following(local_user_id)`,
+
+	// New custom-feed filter types analogous to fediverse_account/fediverse_all
+	// (AGORA-146) — storage/picker plumbing only for now. The actual post-
+	// matching join (which requires a cached-remote-user-by-DID concept fed by
+	// ingestion) is AGORA-197's job, the same way AGORA-146 itself paired
+	// follow+ingestion in one ticket but this epic deliberately splits them —
+	// AT Proto has no inbox-push equivalent, so ingestion is real, separate work.
+	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
+	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all'))`,
 }

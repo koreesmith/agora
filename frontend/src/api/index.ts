@@ -269,6 +269,17 @@ export const federationApi = {
   toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
 }
 
+// ── AT Proto / Bluesky ───────────────────────────────────────────────────────
+export const atprotoApi = {
+  // AGORA-195: resolve a Bluesky handle/DID to a live preview (search),
+  // follow/unfollow a native Bluesky account, and list current follows —
+  // the AT Proto counterpart to federationApi's fediverse equivalents.
+  resolveBlueskyHandle:   (handle: string) => api.get('/atproto/lookup', { params: { handle } }),
+  followBlueskyAccount:   (actor: string)  => api.post('/atproto/follow', { actor }),
+  unfollowBlueskyAccount: (id: string)     => api.delete(`/atproto/follow/${id}`),
+  listBlueskyFollowing:   ()               => api.get('/atproto/following'),
+}
+
 // ── Albums ────────────────────────────────────────────────────────────────────
 export const albumsApi = {
   list:         (page = 0)                     => api.get('/albums', { params: { page } }),

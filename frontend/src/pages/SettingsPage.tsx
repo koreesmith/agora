@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
 import { usersApi, authApi, notificationsApi, blocksApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
@@ -8,7 +8,10 @@ import CoverPhoto from '../components/common/CoverPhoto'
 export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
   const qc = useQueryClient()
-  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'data'|'blocked'>('profile')
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'fediverse'|'data'|'blocked'>(
+    (searchParams.get('tab') as any) || 'profile'
+  )
 
   const [profile, setProfile] = useState({ display_name: user?.display_name||'', pronouns: user?.pronouns||'', bio: user?.bio||'', location: user?.location||'', website: user?.website||'' })
   const [passwords, setPasswords] = useState({ current_password:'', new_password:'' })
@@ -170,7 +173,7 @@ export default function SettingsPage() {
     onSuccess: () => refetchBlocked(),
   })
 
-  const tabs = ['profile','account','privacy','notifications','data','blocked'] as const
+  const tabs = ['profile','account','privacy','notifications','fediverse','data','blocked'] as const
 
   return (
     <div className="space-y-4">
@@ -299,23 +302,13 @@ export default function SettingsPage() {
               <option value="nobody">Nobody</option>
             </select>
           </div>
-          <div className="flex items-center justify-between py-2">
-            <div>
-              <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-              <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts. Only applies to public posts — private and friends-only posts are never federated.</p>
-            </div>
-            <button onClick={() => toggleActivityPub.mutate()}
-              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
-              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.activitypub_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
-            </button>
-          </div>
         </div>
       )}
 
       {tab === 'notifications' && (
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Notification settings</h3>
-          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
+          <div className="flex items-center justify-between py-2">
             <div>
               <p className="font-medium text-sm">Email notifications</p>
               <p className="text-xs text-agora-400">Receive emails when someone likes, comments, or sends a friend request. Account emails like verification and password reset are always sent.</p>
@@ -325,6 +318,33 @@ export default function SettingsPage() {
               disabled={toggleEmailNotifs.isPending}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${emailNotifsEnabled ? 'bg-agora-600' : 'bg-agora-200 dark:bg-agora-700'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${emailNotifsEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Fediverse (AGORA-179): the two ActivityPub toggles used to be
+          buried at the bottom of Privacy and Notifications respectively,
+          with no indication they were related. Follow-a-handle and the
+          your-follows list live on the Connections page's Fediverse tab
+          instead of here — that's inherently per-account/list-shaped, not
+          a settings toggle. */}
+      {tab === 'fediverse' && (
+        <div className="card p-4 space-y-4">
+          <h3 className="font-semibold">Fediverse (ActivityPub)</h3>
+          <p className="text-sm text-agora-500">
+            Agora can talk to Mastodon and the rest of the fediverse over ActivityPub — the same open protocol those
+            apps use amongst themselves. Turning this on lets people out there find, follow, and see your public
+            posts, and reply to them. Private and friends-only posts are never federated either way.
+          </p>
+          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
+            <div>
+              <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+              <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts.</p>
+            </div>
+            <button onClick={() => toggleActivityPub.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.activitypub_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
           <div className="flex items-center justify-between py-2">
@@ -339,6 +359,10 @@ export default function SettingsPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.fediverse_notifications_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
+          <p className="text-sm text-agora-500 pt-2 border-t border-agora-100 dark:border-agora-700">
+            Following a fediverse handle and managing who you already follow moved to{' '}
+            <Link to="/connections?tab=fediverse" className="underline hover:text-agora-700">Connections → Fediverse</Link>.
+          </p>
         </div>
       )}
 

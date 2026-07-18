@@ -846,4 +846,12 @@ var schema = []string{
 		data       BYTEA NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// ── Unified connections (AGORA-182) ───────────────────────────────────────
+	// show_in_feed opts a specific fediverse follow into the main feed —
+	// default off, since a followed account's posts otherwise only surface in
+	// a friend list or custom feed the user deliberately built. Mirrors
+	// notify's per-follow, off-by-default shape rather than a global switch,
+	// so a few noisy accounts don't force an all-or-nothing choice.
+	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
 }

@@ -53,6 +53,7 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
+		Embed:         s.buildImageEmbed(ctx, bs, postID),
 	}
 	recordCid, rkey, err := repo.CreateRecord(ctx, "app.bsky.feed.post", rec)
 	if err != nil {
@@ -123,6 +124,7 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
+		Embed:         s.buildImageEmbed(ctx, bs, postID),
 	}
 	path := "app.bsky.feed.post/" + rkey
 	recordCid, err := repo.UpdateRecord(ctx, path, rec)

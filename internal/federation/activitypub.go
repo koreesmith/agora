@@ -507,7 +507,29 @@ func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt t
 }
 
 func plainTextToHTML(s string) string {
-	return strings.ReplaceAll(html.EscapeString(s), "\n", "<br>")
+	return linkifyURLs(strings.ReplaceAll(html.EscapeString(s), "\n", "<br>"))
+}
+
+// federationURLRe matches a bare URL in already-HTML-escaped text — same
+// character class renderContent (frontend) uses to linkify locally, so a
+// post looks the same whether viewed on Agora or on a remote Mastodon-style
+// client.
+var federationURLRe = regexp.MustCompile(`https?://[^\s<>"']+`)
+
+// linkifyURLs wraps a bare URL in an anchor tag (AGORA-211) — Mastodon-style
+// clients render a Note's "content" HTML close to verbatim rather than
+// auto-linking plain-text URLs themselves (the same reasoning
+// linkifyMentionTags already documents for @mentions), so without this a
+// URL in a federated post displays as inert text on every remote client
+// even though Agora's own renderContent already linkifies it locally.
+func linkifyURLs(contentHTML string) string {
+	return federationURLRe.ReplaceAllStringFunc(contentHTML, func(u string) string {
+		// Trailing punctuation likely belongs to the sentence, not the URL —
+		// same trim renderContent (frontend) already does for the same reason.
+		trimmed := strings.TrimRight(u, ".,!?)")
+		trailing := u[len(trimmed):]
+		return fmt.Sprintf(`<a href="%s" rel="nofollow noopener noreferrer" target="_blank">%s</a>%s`, trimmed, trimmed, trailing)
+	})
 }
 
 // linkifyMentionTags rewrites each resolved fediverse mention's plain-text

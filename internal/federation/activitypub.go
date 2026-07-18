@@ -331,6 +331,108 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 	json.NewEncoder(w).Encode(obj)
 }
 
+// ── Instance actor (AGORA-219) ────────────────────────────────────────────────
+//
+// A relay subscription (AGORA-220) is a handshake between two *servers*, not
+// a user and a server — neither of the two actor kinds above fits. This is a
+// third and last kind of local actor: exactly one per instance, used only
+// for relay Follow/Undo/Announce traffic, never surfaced to end users the
+// way a profile or page is.
+
+func (s *Service) instanceActorURL() string {
+	return strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/instance"
+}
+
+func (s *Service) instanceActorKeyID() string {
+	return s.instanceActorURL() + "#main-key"
+}
+
+// getOrCreateInstanceKeyPair mirrors getOrCreateUserKeyPair/
+// getOrCreatePageKeyPair, but the instance actor has no owning row of its own
+// to persist keys on. Stored under instance_settings instead, under key
+// names distinct from the legacy Agora-to-Agora protocol's own instance-wide
+// key (federation_public_key/federation_private_key — Ed25519, base64,
+// federation.go's getOrCreateKeyPair) despite the similar name: this pair is
+// RSA/PEM, matching the per-user/per-page convention standard ActivityPub
+// HTTP Signatures require. Deliberately absent from admin.go's
+// adminEditableSettings allowlist, so it's never serialized to the frontend.
+func (s *Service) getOrCreateInstanceKeyPair() (string, string, *rsa.PrivateKey, error) {
+	var pubPEM, privPEM string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_actor_public_key'`).Scan(&pubPEM)
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_actor_private_key'`).Scan(&privPEM)
+
+	if pubPEM != "" && privPEM != "" {
+		if priv, err := parseRSAPrivateKeyPEM(privPEM); err == nil {
+			return pubPEM, privPEM, priv, nil
+		}
+		// Fall through and regenerate if the stored PEM is somehow unparseable.
+	}
+
+	pubPEMOut, privPEMOut, priv, err := generateRSAKeyPairPEM()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('instance_actor_public_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, pubPEMOut)
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('instance_actor_private_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, privPEMOut)
+
+	log.Printf("federation: generated new RSA keypair for instance actor")
+	return pubPEMOut, privPEMOut, priv, nil
+}
+
+// GetInstanceActor serves the instance-wide actor document at
+// /federation/instance — an ActivityPub "Application" actor, the same type
+// Mastodon's own instance actor uses. Unlike a Person/user actor there's no
+// profile page to link to and no preferredUsername a WebFinger lookup needs
+// to resolve — nothing outside this instance's own relay subscriptions ever
+// looks this actor up by handle, only dereferences it directly by URL (the
+// same way a relay's own actor is dereferenced back, in fetchActorProfileSignedAsInstance).
+func (s *Service) GetInstanceActor(w http.ResponseWriter, r *http.Request) {
+	if !s.activityPubEnabled() {
+		writeError(w, 404, "not found")
+		return
+	}
+	pubPEM, _, _, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		writeError(w, 500, "key error")
+		return
+	}
+	actor := s.instanceActorURL()
+	obj := map[string]any{
+		"@context": []string{
+			"https://www.w3.org/ns/activitystreams",
+			"https://w3id.org/security/v1",
+		},
+		"id":     actor,
+		"type":   "Application",
+		"name":   "Relay",
+		"inbox":  strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
+		"outbox": actor + "/outbox",
+		"publicKey": map[string]string{
+			"id":           actor + "#main-key",
+			"owner":        actor,
+			"publicKeyPem": pubPEM,
+		},
+	}
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(obj)
+}
+
+// InstanceActorOutbox serves an empty OrderedCollection — the instance actor
+// never posts anything itself, it only sends Follow/Undo(Follow) to relays,
+// but an outbox at the URL the actor document advertises is still expected
+// to resolve to *something* by AP crawlers that check.
+func (s *Service) InstanceActorOutbox(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"@context":     "https://www.w3.org/ns/activitystreams",
+		"id":           s.instanceActorURL() + "/outbox",
+		"type":         "OrderedCollection",
+		"totalItems":   0,
+		"orderedItems": []any{},
+	})
+}
+
 // ── Outbox ─────────────────────────────────────────────────────────────────────
 
 func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
@@ -1874,6 +1976,21 @@ func (s *Service) fetchActorProfileSignedAsPage(pageID, actorURL string) (*remot
 	}
 
 	return signedActorProfileFetch(actorURL, s.pageActorKeyID(slug), privKey)
+}
+
+// fetchActorProfileSignedAsInstance mirrors fetchActorProfileSigned but signs
+// as the instance actor (AGORA-219/220) rather than any user or page — used
+// to resolve a relay's own actor document (to get its inbox URL) when
+// subscribing, since a relay Follow has no local user in context to sign as.
+func (s *Service) fetchActorProfileSignedAsInstance(actorURL string) (*remoteActorProfile, error) {
+	if !strings.HasPrefix(actorURL, "https://") {
+		return nil, fmt.Errorf("actor url must be https")
+	}
+	_, _, privKey, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	return signedActorProfileFetch(actorURL, s.instanceActorKeyID(), privKey)
 }
 
 // signedActorProfileFetch is the key-agnostic signing+fetch body shared by

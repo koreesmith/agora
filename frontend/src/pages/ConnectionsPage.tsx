@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { friendsApi, federationApi } from '../api'
 import { handle } from '../utils/handle'
-import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe } from 'lucide-react'
+import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 
 export default function ConnectionsPage() {
@@ -29,7 +29,7 @@ export default function ConnectionsPage() {
   const { data: followingData } = useQuery({
     queryKey: ['fediverse-following'],
     queryFn: () => federationApi.listFollowing().then(r => r.data),
-    enabled: tab === 'fediverse',
+    enabled: tab === 'fediverse' || tab === 'lists',
   })
   const following: any[] = followingData?.following ?? []
 
@@ -52,6 +52,10 @@ export default function ConnectionsPage() {
   })
   const toggleFediNotify = useMutation({
     mutationFn: ({ id, notify }: { id: string, notify: boolean }) => federationApi.toggleFollowNotify(id, notify),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
+  })
+  const toggleFediShowInFeed = useMutation({
+    mutationFn: ({ id, showInFeed }: { id: string, showInFeed: boolean }) => federationApi.toggleShowInFeed(id, showInFeed),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
   })
 
@@ -94,6 +98,15 @@ export default function ConnectionsPage() {
   const outgoing = reqData?.outgoing || []
   const lists    = listsData?.groups || []
   const pendingCount = incoming.length
+
+  // AGORA-182: Friend Lists aren't friendship-only anymore — an accepted
+  // fediverse follow (with a resolved cached user row) can join a list too,
+  // read-side only. Merged here so ListCard doesn't need to know there are
+  // two underlying relationship types.
+  const fediverseConnections = following
+    .filter((f: any) => f.accepted && f.user_id)
+    .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: f.instance }))
+  const connections = [...friends, ...fediverseConnections]
 
   const tabs = [
     { id: 'friends',   label: `Friends (${friends.length})` },
@@ -214,7 +227,7 @@ export default function ConnectionsPage() {
             <ListCard
               key={list.id}
               list={list}
-              friends={friends}
+              connections={connections}
               expanded={expandedList === list.id}
               onToggle={() => setExpandedList(expandedList === list.id ? null : list.id)}
               onDelete={() => { if (confirm(`Delete "${list.name}"?`)) deleteList.mutate(list.id) }}
@@ -275,6 +288,11 @@ export default function ConnectionsPage() {
 
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
+            {following.length > 0 && (
+              <p className="text-xs text-agora-400">
+                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+              </p>
+            )}
             {following.length === 0 && (
               <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
                 You're not following anyone on the fediverse yet.
@@ -298,6 +316,23 @@ export default function ConnectionsPage() {
                     <span className="flex items-center gap-1 text-xs text-agora-400 flex-shrink-0">
                       <Clock size={12} /> Requested
                     </span>
+                  )}
+                  {f.accepted && f.user_id && (
+                    <button
+                      onClick={() => setListModalFriend({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url })}
+                      className="flex-shrink-0 p-1.5 rounded-full text-agora-400 hover:text-agora-600 transition-colors"
+                      title="Add to a friend list">
+                      <List size={15} />
+                    </button>
+                  )}
+                  {f.accepted && (
+                    <button
+                      onClick={() => toggleFediShowInFeed.mutate({ id: f.id, showInFeed: !f.show_in_feed })}
+                      disabled={toggleFediShowInFeed.isPending}
+                      title={f.show_in_feed ? 'Showing in main feed' : 'Not shown in main feed'}
+                      className={`flex-shrink-0 p-1.5 rounded-full transition-colors ${f.show_in_feed ? 'text-agora-700 bg-agora-100 dark:bg-agora-700 dark:text-white' : 'text-agora-400 hover:text-agora-600'}`}>
+                      <Home size={15} />
+                    </button>
                   )}
                   {f.accepted && (
                     <button
@@ -342,9 +377,9 @@ export default function ConnectionsPage() {
 
 // ── ListCard ──────────────────────────────────────────────────────────────────
 
-function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove }: {
+function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRemove }: {
   list: any
-  friends: any[]
+  connections: any[]
   expanded: boolean
   onToggle: () => void
   onDelete: () => void
@@ -358,7 +393,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
   })
   const members: any[] = data?.members || []
   const memberIDs = new Set(members.map((m: any) => m.id))
-  const nonMembers = friends.filter(f => !memberIDs.has(f.id))
+  const nonMembers = connections.filter(f => !memberIDs.has(f.id))
 
   return (
     <div className="card overflow-hidden">
@@ -408,7 +443,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
           {/* Add friends not yet on this list */}
           {nonMembers.length > 0 && (
             <div className="space-y-1.5">
-              <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Add friends</p>
+              <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Add people</p>
               {nonMembers.map((f: any) => (
                 <div key={f.id} className="flex items-center gap-2.5">
                   <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
@@ -429,7 +464,7 @@ function ListCard({ list, friends, expanded, onToggle, onDelete, onAdd, onRemove
           )}
 
           {members.length === 0 && nonMembers.length === 0 && (
-            <p className="text-sm text-agora-400 text-center py-2">Add friends first, then organize them into lists.</p>
+            <p className="text-sm text-agora-400 text-center py-2">Add friends or fediverse follows first, then organize them into lists.</p>
           )}
         </div>
       )}

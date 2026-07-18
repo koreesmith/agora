@@ -65,6 +65,7 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Delete("/federation/follow/{id}", s.UnfollowFediverseAccount)
 	r.Get("/federation/following",      s.ListFollowing)
 	r.Put("/federation/follow/{id}/notify", s.ToggleFollowNotify)
+	r.Put("/federation/follow/{id}/show-in-feed", s.ToggleShowInFeed)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────

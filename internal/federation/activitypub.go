@@ -2094,6 +2094,33 @@ func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"notify": req.Notify})
 }
 
+// ToggleShowInFeed flips whether a specific followed fediverse account's
+// posts (already ingested into the local posts table by ingestFollowedPost)
+// surface in the caller's main feed (AGORA-182) — off by default, same
+// per-follow/opt-in shape as ToggleFollowNotify, so a user controls noise
+// account-by-account instead of an all-or-nothing global toggle.
+func (s *Service) ToggleShowInFeed(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+	var req struct {
+		ShowInFeed bool `json:"show_in_feed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid body")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE ap_following SET show_in_feed = $1 WHERE id = $2 AND follower_user_id = $3`, req.ShowInFeed, id, userID)
+	if err != nil {
+		writeError(w, 500, "could not update")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"show_in_feed": req.ShowInFeed})
+}
+
 // ListFollowing returns the caller's fediverse follows, joined with the
 // cached remote-actor profile (populated by getOrCreateRemoteAPUser the
 // first time that actor's posts are ingested) for display and for the
@@ -2101,7 +2128,7 @@ func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
 func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
-		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.created_at,
+		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.show_in_feed, af.created_at,
 		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
 		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
 		FROM ap_following af
@@ -2120,6 +2147,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		ActorURL    string `json:"actor_url"`
 		Accepted    bool   `json:"accepted"`
 		Notify      bool   `json:"notify"`
+		ShowInFeed  bool   `json:"show_in_feed"`
 		CreatedAt   string `json:"created_at"`
 		UserID      string `json:"user_id,omitempty"`
 		Username    string `json:"username,omitempty"`
@@ -2131,7 +2159,7 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var f followingEntry
 		var createdAt time.Time
-		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &createdAt,
+		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &f.ShowInFeed, &createdAt,
 			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance); err != nil {
 			continue
 		}

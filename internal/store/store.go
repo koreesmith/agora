@@ -922,4 +922,10 @@ var schema = []string{
 	// following alone shouldn't start notifying you).
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
 	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-199: a Bluesky reply strong-ref needs both a URI and a CID —
+	// remote_post_id already carries the URI (shared with fediverse's own
+	// remote_post_id convention), but AP has no CID equivalent, so this
+	// column is AT-Proto-specific rather than folded into the existing one.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS remote_post_cid TEXT NOT NULL DEFAULT ''`,
 }

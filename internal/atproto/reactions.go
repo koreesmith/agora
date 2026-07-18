@@ -98,6 +98,10 @@ func (s *Service) pollLikesFor(ctx context.Context, postID, uri, recordCid strin
 			continue
 		}
 		handle, displayName, avatarURL := actorFields(actor)
+		// AGORA-205: same enforcement point ingestAuthorFeed/ingestThreadReplies use.
+		if s.isBlueskyActorBlocked(did, handle) {
+			continue
+		}
 		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
 		if err != nil {
 			continue
@@ -173,6 +177,10 @@ func (s *Service) pollRepostsFor(ctx context.Context, postID, uri, recordCid str
 			continue
 		}
 		handle, displayName, avatarURL := actorFields(actor)
+		// AGORA-205: same enforcement point ingestAuthorFeed/ingestThreadReplies use.
+		if s.isBlueskyActorBlocked(did, handle) {
+			continue
+		}
 		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
 		if err != nil {
 			continue

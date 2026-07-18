@@ -943,4 +943,18 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (post_id, user_id, kind)
 	)`,
+
+	// AGORA-205: DID-scoped block list — AT Proto identity is DID-first (a
+	// specific account), distinct from instance_bans' domain scope, which
+	// this epic reuses as-is for the PDS-host scope (a domain is still
+	// meaningful at the transport layer even though AT Proto identity isn't
+	// domain-first the way a fediverse actor's is).
+	`CREATE TABLE IF NOT EXISTS blocked_dids (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		did        TEXT        NOT NULL UNIQUE,
+		reason     TEXT        NOT NULL DEFAULT '',
+		notes      TEXT        NOT NULL DEFAULT '',
+		blocked_by UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

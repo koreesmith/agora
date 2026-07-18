@@ -98,9 +98,33 @@ func (s *Service) FollowBlueskyAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.atprotoEnabled() {
-		writeError(w, 404, "AT Proto not enabled")
+	id, profile, err := s.followBlueskyActor(r.Context(), userID, req.Actor)
+	if err != nil {
+		writeError(w, err.code, err.msg)
 		return
+	}
+	writeJSON(w, 201, map[string]string{"id": id, "did": profile.DID, "handle": profile.Handle})
+}
+
+// followErr carries the HTTP status a caller should surface alongside the
+// error, since followBlueskyActor is shared between an HTTP handler
+// (FollowBlueskyAccount) and an internal caller (MigrateBridgedFollow,
+// AGORA-196) that doesn't have a request/response of its own.
+type followErr struct {
+	code int
+	msg  string
+}
+
+func (e *followErr) Error() string { return e.msg }
+
+// followBlueskyActor is FollowBlueskyAccount's core, extracted so
+// MigrateBridgedFollow (AGORA-196) can follow natively without going through
+// an HTTP round trip. Re-resolves the actor and identity itself rather than
+// trusting a caller-supplied DID, same defense-in-depth reasoning
+// FollowBlueskyAccount's HTTP path already used.
+func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) (string, *blueskyPreview, *followErr) {
+	if !s.atprotoEnabled() {
+		return "", nil, &followErr{404, "AT Proto not enabled"}
 	}
 	var username, did, storedPriv, repoHead, repoRev string
 	var atprotoEnabled bool
@@ -108,21 +132,17 @@ func (s *Service) FollowBlueskyAccount(w http.ResponseWriter, r *http.Request) {
 		SELECT username, atproto_did, atproto_private_key, atproto_repo_head, atproto_repo_rev, atproto_enabled
 		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
 	`, userID).Scan(&username, &did, &storedPriv, &repoHead, &repoRev, &atprotoEnabled); err != nil || !atprotoEnabled {
-		writeError(w, 404, "AT Proto not enabled")
-		return
+		return "", nil, &followErr{404, "AT Proto not enabled"}
 	}
 
-	ctx := r.Context()
-	profile, err := s.resolveBlueskyActor(ctx, req.Actor)
+	profile, err := s.resolveBlueskyActor(ctx, actor)
 	if err != nil {
-		writeError(w, 404, "could not resolve that Bluesky account")
-		return
+		return "", nil, &followErr{404, "could not resolve that Bluesky account"}
 	}
 
 	did, priv, err := s.ensureIdentity(userID, username, did, storedPriv)
 	if err != nil {
-		writeError(w, 500, "could not resolve identity")
-		return
+		return "", nil, &followErr{500, "could not resolve identity"}
 	}
 
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
@@ -133,16 +153,14 @@ func (s *Service) FollowBlueskyAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	recordCid, rkey, err := repo.CreateRecord(ctx, "app.bsky.graph.follow", rec)
 	if err != nil {
-		writeError(w, 500, "could not write follow record")
-		return
+		return "", nil, &followErr{500, "could not write follow record"}
 	}
 
 	path := "app.bsky.graph.follow/" + rkey
 	link := lexutil.LexLink(recordCid)
 	ops := []*comatproto.SyncSubscribeRepos_RepoOp{{Action: "create", Path: path, Cid: &link}}
 	if err := s.commitAndPersist(ctx, userID, did, repo, bs, priv, repoRev, ops); err != nil {
-		writeError(w, 500, "could not commit follow")
-		return
+		return "", nil, &followErr{500, "could not commit follow"}
 	}
 
 	var id string
@@ -153,11 +171,10 @@ func (s *Service) FollowBlueskyAccount(w http.ResponseWriter, r *http.Request) {
 		SET remote_handle = $3, display_name = $4, avatar_url = $5, rkey = $6, record_cid = $7
 		RETURNING id
 	`, userID, profile.DID, profile.Handle, profile.DisplayName, profile.AvatarURL, rkey, recordCid.String()).Scan(&id); err != nil {
-		writeError(w, 500, "could not save follow")
-		return
+		return "", nil, &followErr{500, "could not save follow"}
 	}
 
-	writeJSON(w, 201, map[string]string{"id": id, "did": profile.DID, "handle": profile.Handle})
+	return id, profile, nil
 }
 
 // UnfollowBlueskyAccount deletes the app.bsky.graph.follow record from the

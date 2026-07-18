@@ -221,9 +221,7 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, activity.InstanceID).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(activity.InstanceID) {
 		writeError(w, 403, "instance is blocked")
 		return
 	}
@@ -753,8 +751,12 @@ func (s *Service) verifyActivity(raw []byte, a Activity) error {
 }
 
 func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
+	if s.isInstanceBlocked(domain) {
+		return nil, fmt.Errorf("instance is blocked")
+	}
+
 	var keyB64 string
-	s.db.QueryRow(`SELECT public_key FROM federated_instances WHERE domain = $1 AND status != 'blocked'`, domain).Scan(&keyB64)
+	s.db.QueryRow(`SELECT public_key FROM federated_instances WHERE domain = $1`, domain).Scan(&keyB64)
 	if keyB64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(keyB64)
 		if err != nil { return nil, err }
@@ -909,6 +911,26 @@ func (s *Service) activityPubEnabled() bool {
 	var val string
 	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'activitypub_enabled'`).Scan(&val)
 	return val != "false"
+}
+
+// isInstanceBlocked is the single enforcement point for "is this fediverse
+// instance blocked" (AGORA-177), checked instead of the ad-hoc
+// federated_instances.status queries that used to be scattered across this
+// file and activitypub.go. It's true if EITHER an admin has explicitly
+// banned the domain via Admin > Moderation (instance_bans — previously
+// unenforced anywhere) OR the domain's federated_instances row (the legacy
+// Agora-to-Agora protocol's known-instances list, opportunistically
+// populated by getRemotePublicKey/verifyActivity) has been marked blocked
+// via Admin > Federation. Either UI can block a domain outright — neither
+// requires the other's row to exist first.
+func (s *Service) isInstanceBlocked(domain string) bool {
+	domain = strings.ToLower(domain)
+	var blocked bool
+	s.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM federated_instances WHERE domain = $1 AND status = 'blocked')
+		    OR EXISTS(SELECT 1 FROM instance_bans WHERE LOWER(instance) = $1)
+	`, domain).Scan(&blocked)
+	return blocked
 }
 
 func domainFromURL(u string) string {

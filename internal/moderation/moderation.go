@@ -365,13 +365,22 @@ func (s *Service) BanInstance(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Instance) == "" {
 		writeError(w, 400, "instance required"); return
 	}
+
+	// Normalize a pasted URL down to a bare domain (matching how
+	// isInstanceBlocked compares against federated_instances.domain), so
+	// banning "https://bad.example/" and "bad.example" hit the same row.
+	instance := strings.ToLower(strings.TrimSpace(req.Instance))
+	instance = strings.TrimPrefix(instance, "https://")
+	instance = strings.TrimPrefix(instance, "http://")
+	instance = strings.TrimSuffix(instance, "/")
+
 	var id string
 	s.db.QueryRow(`
 		INSERT INTO instance_bans (instance, reason, notes, banned_by)
 		VALUES ($1, $2, $3, $4) ON CONFLICT (instance) DO UPDATE
 		SET reason = $2, notes = $3, banned_by = $4
 		RETURNING id
-	`, strings.TrimSpace(req.Instance), req.Reason, req.Notes, adminID).Scan(&id)
+	`, instance, req.Reason, req.Notes, adminID).Scan(&id)
 	writeJSON(w, 201, map[string]string{"id": id, "message": "instance banned"})
 }
 

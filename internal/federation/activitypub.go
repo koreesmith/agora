@@ -754,9 +754,7 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	}
 
 	domain := domainFromURL(followerActor)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		return
 	}
 
@@ -1047,9 +1045,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 
 	// AGORA-148: an admin-blocked instance can't Follow, but until now could
 	// still reply into threads — apply the same block-list check Follow uses.
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
 		return
 	}
 
@@ -1457,9 +1453,7 @@ func htmlToPlainText(s string) string {
 // Announce, which (unlike Create) only ever target a post directly, never a
 // remote-comment reply chain, so this is simpler than resolveReplyTarget.
 func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (postID, postAuthorID string, ok bool) {
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
 		return "", "", false
 	}
 	postID = localPostIDFromURL(objectURL, s.cfg.InstanceDomain)
@@ -1879,9 +1873,7 @@ func (s *Service) resolveFediverseMentions(userID, content string) (tags []map[s
 		}
 		seen[key] = true
 
-		var status string
-		s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, strings.ToLower(domain)).Scan(&status)
-		if status == "blocked" {
+		if s.isInstanceBlocked(domain) {
 			log.Printf("federation: mention %s skipped — instance blocked", key)
 			continue
 		}
@@ -1945,9 +1937,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := domainFromURL(actorURL)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		writeError(w, 404, "instance is blocked")
 		return
 	}
@@ -1995,9 +1985,7 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 	}
 
 	domain := domainFromURL(req.ActorURL)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		writeError(w, 403, "instance is blocked")
 		return
 	}

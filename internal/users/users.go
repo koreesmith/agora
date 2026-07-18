@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/store"
 )
@@ -115,6 +116,16 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 404, "user not found")
 		return
+	}
+
+	// Defensive re-clean, not just belt-and-suspenders: a remote actor's bio
+	// is only reprocessed through federation.HTMLToPlainText when its cache
+	// row is created or refreshed, so any bio cached before that stripping
+	// existed (or improved to preserve <a> links, AGORA-177) would otherwise
+	// keep showing raw markup forever without a re-fetch. Idempotent on
+	// already-clean text, so this is safe to run on every read.
+	if u.IsRemote {
+		u.Bio = federation.HTMLToPlainText(u.Bio)
 	}
 
 	// Block check — make it appear as if the user doesn't exist

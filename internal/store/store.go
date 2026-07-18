@@ -957,4 +957,14 @@ var schema = []string{
 		blocked_by UUID        REFERENCES users(id) ON DELETE SET NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// AGORA-210: an inbound Mastodon/AP poll (a "Question" object) reports
+	// its own vote tallies per option (oneOf/anyOf[].replies.totalItems) —
+	// nobody local necessarily voted, so there's no poll_votes row to COUNT
+	// the way a local poll's vote count is computed. remote_votes caches
+	// that source-of-truth count directly; always 0 for a locally-created
+	// poll, added to the local COUNT(poll_votes) when rendering (a remote
+	// poll is read-only from Agora today, so that sum is just remote_votes
+	// in practice, but the addition keeps the query correct either way).
+	`ALTER TABLE poll_options ADD COLUMN IF NOT EXISTS remote_votes INT NOT NULL DEFAULT 0`,
 }

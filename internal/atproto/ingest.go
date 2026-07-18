@@ -190,6 +190,10 @@ func (s *Service) StartBlueskyIngestion(ctx context.Context) {
 		// replies on Agora's own broadcast posts, scaling with how many posts
 		// Agora federated rather than with the whole network's firehose.
 		s.pollInboundReplies(ctx)
+
+		// AGORA-200: same ticker again, for Bluesky likes/reposts on Agora's
+		// own broadcast posts.
+		s.pollInboundReactions(ctx)
 	}
 
 	poll()

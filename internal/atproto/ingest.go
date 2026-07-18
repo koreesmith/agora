@@ -103,6 +103,11 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 				avatarURL = *post.Author.Avatar
 			}
 		}
+		// AGORA-205: checked from ingestion's first version, not bolted on
+		// after the fact the way AGORA-148 found this gap on the AP side.
+		if s.isBlueskyActorBlocked(did, handle) {
+			continue
+		}
 		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
 		if err != nil {
 			log.Printf("atproto: could not upsert remote user for %s: %v", did, err)

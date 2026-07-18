@@ -16,6 +16,8 @@ export default function AdminPage() {
   const [suspendForm, setSuspendForm] = useState<Record<string, {days:string, reason:string, notes:string}>>({})
   const [banForm, setBanForm] = useState<Record<string, {reason:string, notes:string}>>({})
   const [instanceBanForm, setInstanceBanForm] = useState({ instance:'', reason:'', notes:'' })
+  const [pdsBanForm, setPdsBanForm] = useState({ instance:'', reason:'', notes:'' })
+  const [didBlockForm, setDidBlockForm] = useState({ did:'', reason:'', notes:'' })
   const qc = useQueryClient()
   const ok = (m:string) => { setMsg(m); setTimeout(()=>setMsg(''), 3000) }
 
@@ -24,7 +26,8 @@ export default function AdminPage() {
   const { data: usersData }= useQuery({ queryKey:['admin-users'],    queryFn: ()=>adminApi.listUsers().then(r=>r.data),   enabled: tab==='users' })
   const { data: repsData } = useQuery({ queryKey:['admin-reports', reportStatus], queryFn: ()=>moderationApi.listReports(reportStatus).then(r=>r.data), enabled: tab==='reports' })
   const { data: modUsersData } = useQuery({ queryKey:['mod-users'], queryFn: ()=>moderationApi.listModeratedUsers().then(r=>r.data), enabled: tab==='moderation' })
-  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' })
+  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' || tab==='bluesky' })
+  const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
@@ -46,6 +49,9 @@ export default function AdminPage() {
   const unban        = useMutation({ mutationFn: (id:string)=>moderationApi.unbanUser(id), onSuccess:()=>{ ok('Unbanned'); qc.invalidateQueries({queryKey:['mod-users']}) } })
   const banInst      = useMutation({ mutationFn: (data:any)=>moderationApi.banInstance(data), onSuccess:()=>{ ok('Instance banned'); setInstanceBanForm({instance:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['instance-bans']}) } })
   const unbanInst    = useMutation({ mutationFn: (id:string)=>moderationApi.unbanInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['instance-bans']}) })
+  const banPds       = useMutation({ mutationFn: (data:any)=>moderationApi.banInstance(data), onSuccess:()=>{ ok('PDS domain banned'); setPdsBanForm({instance:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['instance-bans']}) } })
+  const blockDid     = useMutation({ mutationFn: (data:any)=>moderationApi.blockDID(data), onSuccess:()=>{ ok('DID blocked'); setDidBlockForm({did:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['blocked-dids']}) } })
+  const unblockDid   = useMutation({ mutationFn: (id:string)=>moderationApi.unblockDID(id), onSuccess:()=>qc.invalidateQueries({queryKey:['blocked-dids']}) })
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
@@ -451,16 +457,87 @@ export default function AdminPage() {
           network on and the other off. Its own tab rather than folded into
           the generic Settings tab, matching the Fediverse tab's placement. */}
       {tab==='bluesky' && (
-        <div className="card p-4">
-          <div className="flex items-center justify-between py-2">
-            <div><p className="font-medium text-sm">Bluesky (AT Protocol)</p>
-              <p className="text-xs text-agora-400">Let this instance act as a Bluesky PDS — federating public posts over AT Protocol and being discoverable/followable from Bluesky. Independent of the Fediverse (ActivityPub) toggle; users can also opt out individually in their own Settings.</p></div>
-            <button onClick={()=>setSettingsForm(f=>({...f,atproto_enabled:f.atproto_enabled==='true'?'false':'true'}))}
-              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.atproto_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
-              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.atproto_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
-            </button>
+        <div className="space-y-6">
+          <div className="card p-4">
+            <div className="flex items-center justify-between py-2">
+              <div><p className="font-medium text-sm">Bluesky (AT Protocol)</p>
+                <p className="text-xs text-agora-400">Let this instance act as a Bluesky PDS — federating public posts over AT Protocol and being discoverable/followable from Bluesky. Independent of the Fediverse (ActivityPub) toggle; users can also opt out individually in their own Settings.</p></div>
+              <button onClick={()=>setSettingsForm(f=>({...f,atproto_enabled:f.atproto_enabled==='true'?'false':'true'}))}
+                className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.atproto_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
+                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.atproto_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
+              </button>
+            </div>
+            <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
           </div>
-          <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
+
+          {/* AGORA-205: DID-scoped block list — AT Proto's natural blockable
+              unit, checked from every inbound path in the Bluesky epic
+              (ingested posts, replies, likes/reposts). */}
+          <div>
+            <h3 className="font-semibold mb-3">Blocked Bluesky DIDs</h3>
+            <p className="text-sm text-agora-500 mb-3">Block a specific Bluesky account by DID — enforced against inbound ingested posts, replies, likes, and reposts, and against following that account from this instance.</p>
+            <div className="card p-4 space-y-3 mb-3">
+              <p className="text-sm font-medium">Block a DID</p>
+              <div className="flex gap-2 flex-wrap">
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="DID (e.g. did:plc:abc123…)"
+                  value={didBlockForm.did} onChange={e=>setDidBlockForm(f=>({...f,did:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Reason"
+                  value={didBlockForm.reason} onChange={e=>setDidBlockForm(f=>({...f,reason:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Admin notes (private)"
+                  value={didBlockForm.notes} onChange={e=>setDidBlockForm(f=>({...f,notes:e.target.value}))} />
+                <button onClick={()=>blockDid.mutate(didBlockForm)} disabled={!didBlockForm.did||!didBlockForm.reason||blockDid.isPending}
+                  className="btn-danger text-sm">Block DID</button>
+              </div>
+            </div>
+            {(blockedDidsData?.blocks||[]).length===0 && (
+              <div className="card p-4 text-center text-agora-400 text-sm">No blocked DIDs.</div>
+            )}
+            {(blockedDidsData?.blocks||[]).map((b:any) => (
+              <div key={b.id} className="card p-3 mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium font-mono">{b.did}</p>
+                  <p className="text-xs text-agora-400">{b.reason}{b.blocked_by&&` · by @${b.blocked_by}`}</p>
+                  {b.notes && <p className="text-xs text-agora-400 italic">{b.notes}</p>}
+                </div>
+                <button onClick={()=>unblockDid.mutate(b.id)} className="btn-secondary text-xs py-1 px-2 flex-shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
+
+          {/* PDS-host block scope reuses instance_bans as-is — a domain is
+              still meaningful at the transport layer even though AT Proto
+              identity is DID-first, not domain-first the way a fediverse
+              actor's is. Same list as the Fediverse tab's Instance Bans. */}
+          <div>
+            <h3 className="font-semibold mb-3">Blocked PDS Domains</h3>
+            <p className="text-sm text-agora-500 mb-3">Block an entire self-hosted PDS host — the same block list the Fediverse tab's Instance Bans manage, since a domain block applies regardless of which protocol it's blocking.</p>
+            <div className="card p-4 space-y-3 mb-3">
+              <p className="text-sm font-medium">Ban a PDS domain</p>
+              <div className="flex gap-2 flex-wrap">
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="PDS domain (e.g. bad-pds.example.com)"
+                  value={pdsBanForm.instance} onChange={e=>setPdsBanForm(f=>({...f,instance:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Reason"
+                  value={pdsBanForm.reason} onChange={e=>setPdsBanForm(f=>({...f,reason:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Admin notes (private)"
+                  value={pdsBanForm.notes} onChange={e=>setPdsBanForm(f=>({...f,notes:e.target.value}))} />
+                <button onClick={()=>banPds.mutate(pdsBanForm)} disabled={!pdsBanForm.instance||!pdsBanForm.reason||banPds.isPending}
+                  className="btn-danger text-sm">Ban domain</button>
+              </div>
+            </div>
+            {(instBansData?.bans||[]).length===0 && (
+              <div className="card p-4 text-center text-agora-400 text-sm">No blocked domains.</div>
+            )}
+            {(instBansData?.bans||[]).map((b:any) => (
+              <div key={b.id} className="card p-3 mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">{b.instance}</p>
+                  <p className="text-xs text-agora-400">{b.reason}{b.banned_by&&` · by @${b.banned_by}`}</p>
+                  {b.notes && <p className="text-xs text-agora-400 italic">{b.notes}</p>}
+                </div>
+                <button onClick={()=>unbanInst.mutate(b.id)} className="btn-secondary text-xs py-1 px-2 flex-shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

@@ -42,6 +42,12 @@ func RegisterModeratorRoutes(r chi.Router, s *Service) {
 	r.Get("/moderation/instance-bans",               s.ListInstanceBans)
 	r.Post("/moderation/instance-bans",              s.BanInstance)
 	r.Delete("/moderation/instance-bans/{id}",       s.UnbanInstance)
+	// AGORA-205: DID-scoped block list, the AT Proto counterpart to
+	// instance-bans' domain scope — PDS-host-level blocks reuse
+	// instance-bans as-is rather than a separate mechanism.
+	r.Get("/moderation/blocked-dids",                s.ListBlockedDIDs)
+	r.Post("/moderation/blocked-dids",               s.BlockDID)
+	r.Delete("/moderation/blocked-dids/{id}",        s.UnblockDID)
 }
 
 // ── Reports ───────────────────────────────────────────────────────────────────
@@ -388,6 +394,64 @@ func (s *Service) UnbanInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	s.db.Exec(`DELETE FROM instance_bans WHERE id = $1`, id)
 	writeJSON(w, 200, map[string]string{"message": "instance unbanned"})
+}
+
+// ── Blocked Bluesky DIDs (AGORA-205) ──────────────────────────────────────────
+
+func (s *Service) ListBlockedDIDs(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT b.id, b.did, b.reason, b.notes, b.created_at, u.username AS blocked_by
+		FROM blocked_dids b
+		LEFT JOIN users u ON u.id = b.blocked_by
+		ORDER BY b.created_at DESC
+	`)
+	if err != nil { writeError(w, 500, "db error"); return }
+	defer rows.Close()
+
+	type Block struct {
+		ID        string  `json:"id"`
+		DID       string  `json:"did"`
+		Reason    string  `json:"reason"`
+		Notes     string  `json:"notes"`
+		CreatedAt string  `json:"created_at"`
+		BlockedBy *string `json:"blocked_by"`
+	}
+	var blocks []Block
+	for rows.Next() {
+		var b Block
+		rows.Scan(&b.ID, &b.DID, &b.Reason, &b.Notes, &b.CreatedAt, &b.BlockedBy)
+		blocks = append(blocks, b)
+	}
+	if blocks == nil { blocks = []Block{} }
+	writeJSON(w, 200, map[string]any{"blocks": blocks})
+}
+
+func (s *Service) BlockDID(w http.ResponseWriter, r *http.Request) {
+	adminID := auth.UserIDFromCtx(r.Context())
+	var req struct {
+		DID    string `json:"did"`
+		Reason string `json:"reason"`
+		Notes  string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.DID) == "" {
+		writeError(w, 400, "did required"); return
+	}
+	did := strings.TrimSpace(req.DID)
+
+	var id string
+	s.db.QueryRow(`
+		INSERT INTO blocked_dids (did, reason, notes, blocked_by)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (did) DO UPDATE
+		SET reason = $2, notes = $3, blocked_by = $4
+		RETURNING id
+	`, did, req.Reason, req.Notes, adminID).Scan(&id)
+	writeJSON(w, 201, map[string]string{"id": id, "message": "DID blocked"})
+}
+
+func (s *Service) UnblockDID(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s.db.Exec(`DELETE FROM blocked_dids WHERE id = $1`, id)
+	writeJSON(w, 200, map[string]string{"message": "DID unblocked"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

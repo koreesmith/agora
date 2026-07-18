@@ -2,11 +2,11 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -20,11 +20,11 @@ export default function AdminPage() {
   const ok = (m:string) => { setMsg(m); setTimeout(()=>setMsg(''), 3000) }
 
   const { data: stats }    = useQuery({ queryKey:['admin-stats'],    queryFn: ()=>adminApi.getStats().then(r=>r.data),    enabled: tab==='overview' })
-  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' })
+  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' || tab==='fediverse' })
   const { data: usersData }= useQuery({ queryKey:['admin-users'],    queryFn: ()=>adminApi.listUsers().then(r=>r.data),   enabled: tab==='users' })
   const { data: repsData } = useQuery({ queryKey:['admin-reports', reportStatus], queryFn: ()=>moderationApi.listReports(reportStatus).then(r=>r.data), enabled: tab==='reports' })
   const { data: modUsersData } = useQuery({ queryKey:['mod-users'], queryFn: ()=>moderationApi.listModeratedUsers().then(r=>r.data), enabled: tab==='moderation' })
-  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='moderation' })
+  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
@@ -67,6 +67,7 @@ export default function AdminPage() {
     { id:'waitlist',    label:'Waitlist',    icon: Clock },
     { id:'reports',     label:'Reports',     icon: Flag },
     { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
+    { id:'fediverse',   label:'Fediverse',   icon: Globe },
     { id:'federation',  label:'Federation',  icon: Link2 },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
@@ -158,14 +159,9 @@ export default function AdminPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.federation_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
             </button>
           </div>
-          <div className="flex items-center justify-between py-2">
-            <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-              <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation above; users can also opt out individually in their own Settings.</p></div>
-            <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
-              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
-              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
-            </button>
-          </div>
+          <p className="text-xs text-agora-400 -mt-2">
+            Mastodon/fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
+          </p>
           <div className="flex items-center justify-between py-2">
             <div><p className="font-medium text-sm">Allow users to invite friends</p>
               <p className="text-xs text-agora-400">Users can send email invitations to friends</p></div>
@@ -395,10 +391,30 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
 
-          {/* Instance bans */}
+      {/* Fediverse (AGORA-178): instance-wide ActivityPub toggle + the
+          instance_bans blocking tool (AGORA-177 made this the single
+          enforced way to block a fediverse instance), consolidated out of
+          the Settings and Moderation tabs where they used to be buried. */}
+      {tab==='fediverse' && (
+        <div className="space-y-6">
+          <div className="card p-4">
+            <div className="flex items-center justify-between py-2">
+              <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+                <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
+              <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
+                className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
+                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
+              </button>
+            </div>
+            <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
+          </div>
+
           <div>
             <h3 className="font-semibold mb-3">Instance Bans</h3>
+            <p className="text-sm text-agora-500 mb-3">Block a whole fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
             <div className="card p-4 space-y-3 mb-3">
               <p className="text-sm font-medium">Ban an instance</p>
               <div className="flex gap-2 flex-wrap">
@@ -759,6 +775,8 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         <h3 className="font-semibold">Add Federated Instance</h3>
         <p className="text-sm text-agora-500">
           Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
+          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
+          instance, use the Fediverse tab's Instance Bans instead.
         </p>
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}

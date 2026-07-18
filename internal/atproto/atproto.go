@@ -44,6 +44,17 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/xrpc/com.atproto.sync.subscribeRepos", s.SubscribeRepos)
 }
 
+// RegisterAuthedRoutes wires the endpoints only ever called by Agora's own
+// authenticated frontend (AGORA-195) — resolving/following/unfollowing a
+// native Bluesky account — under /api like every other frontend call, the
+// same split federation.RegisterAuthedRoutes draws from federation.RegisterRoutes.
+func RegisterAuthedRoutes(r chi.Router, s *Service) {
+	r.Get("/atproto/lookup", s.ResolveBlueskyHandle)
+	r.Post("/atproto/follow", s.FollowBlueskyAccount)
+	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
+	r.Get("/atproto/following", s.ListBlueskyFollowing)
+}
+
 // domainFromURL strips the scheme from an instance URL, leaving the bare
 // domain. Duplicated from internal/federation/federation.go rather than
 // imported — same tradeoff already made for fediverseMentionRe there: a

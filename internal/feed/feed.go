@@ -323,8 +323,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
-	var includePageIDs, excludePageIDs, fediverseAccountIDs []string
-	var fediverseAll bool
+	var includePageIDs, excludePageIDs, fediverseAccountIDs, atprotoAccountIDs []string
+	var fediverseAll, atprotoAll bool
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -347,6 +347,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			fediverseAccountIDs = append(fediverseAccountIDs, val)
 		case "fediverse_all":
 			fediverseAll = true
+		case "atproto_account":
+			atprotoAccountIDs = append(atprotoAccountIDs, val)
+		case "atproto_all":
+			atprotoAll = true
 		}
 	}
 	filterRows.Close()
@@ -365,7 +369,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
 	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 ||
-		len(fediverseAccountIDs) > 0 || fediverseAll {
+		len(fediverseAccountIDs) > 0 || fediverseAll || len(atprotoAccountIDs) > 0 || atprotoAll {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -418,6 +422,18 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 				  SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
 				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
 				))`)
+		}
+		// AGORA-195/197: the filter type exists (a feed can be scoped to a
+		// followed Bluesky account, or "every Bluesky account followed") but
+		// deliberately matches no posts yet — there's no ingestion mechanism
+		// populating local posts authored by a followed Bluesky DID until
+		// AGORA-197 ships (AT Proto has no inbox-push equivalent driving
+		// ingestion the way an accepted fediverse follow does). Matching
+		// nothing here is the honest, safe behavior in the meantime: it
+		// scopes the feed down to empty rather than silently ignoring the
+		// filter and showing everything.
+		if len(atprotoAccountIDs) > 0 || atprotoAll {
+			inclParts = append(inclParts, `FALSE`)
 		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}

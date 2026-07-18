@@ -1655,7 +1655,11 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 	rows, err := s.db.Query(
 		fmt.Sprintf(`
 			SELECT po.id, po.post_id, po.text, po.position,
-			       (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) AS votes
+			       -- AGORA-210: remote_votes carries an inbound AP poll's own
+			       -- vote tally (nobody local necessarily voted, so there's
+			       -- nothing for COUNT(poll_votes) to find); always 0 for a
+			       -- locally-created poll.
+			       (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) + po.remote_votes AS votes
 			FROM poll_options po
 			WHERE po.post_id IN (%s)
 			ORDER BY po.post_id, po.position

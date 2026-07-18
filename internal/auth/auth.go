@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/ctxkeys"
@@ -106,16 +108,39 @@ func (s *Service) RequireModerator(next http.Handler) http.Handler {
 func UserIDFromCtx(ctx context.Context) string { return ctxkeys.GetUserID(ctx) }
 func RoleFromCtx(ctx context.Context) string     { return ctxkeys.GetUserRole(ctx) }
 
+// isValidEmail replaces the old strings.Contains(email, "@") check (AGORA-142)
+// — that let through addresses containing raw CR/LF, which notifications.go's
+// SendHTML later spliced directly into SMTP headers ("To: "+to), letting a
+// crafted address inject extra headers (Bcc, additional recipients, ...).
+// mail.ParseAddress both rejects control characters and requires a
+// syntactically real address.
+func isValidEmail(email string) bool {
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+// AGORA-141: per-IP throttles on the unauthenticated auth endpoints an
+// attacker can hammer for credential stuffing (login), reset-token guessing
+// (reset-password), or email bombing (forgot-password, each hit sends an
+// outbound email regardless of whether the address exists). Login gets a
+// looser budget than the two email-sending routes since it's the one
+// legitimate users retry most under normal typos/shared-IP/NAT traffic.
+var (
+	loginRateLimit          = httprate.LimitByIP(10, time.Minute)
+	forgotPasswordRateLimit = httprate.LimitByIP(5, 15*time.Minute)
+	resetPasswordRateLimit  = httprate.LimitByIP(10, time.Minute)
+)
 
 func RegisterPublicRoutes(r chi.Router, s *Service) {
 	r.Get("/setup",                  s.SetupStatus)
 	r.Post("/setup",                 s.RunSetup)
 	r.Post("/auth/register",         s.Register)
-	r.Post("/auth/login",            s.Login)
+	r.With(loginRateLimit).Post("/auth/login", s.Login)
 	r.Get("/auth/verify-email",      s.VerifyEmail)
-	r.Post("/auth/forgot-password",  s.ForgotPassword)
-	r.Post("/auth/reset-password",   s.ResetPassword)
+	r.With(forgotPasswordRateLimit).Post("/auth/forgot-password", s.ForgotPassword)
+	r.With(resetPasswordRateLimit).Post("/auth/reset-password", s.ResetPassword)
 	r.Get("/auth/me",                s.Me)
 	r.Get("/auth/waitlist/accept",   s.WaitlistAccept)
 }
@@ -155,7 +180,7 @@ func (s *Service) RunSetup(w http.ResponseWriter, r *http.Request) {
 	if len(req.Password) < 8 {
 		writeError(w, 400, "password must be at least 8 characters"); return
 	}
-	if req.Email == "" || !strings.Contains(req.Email, "@") {
+	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -230,7 +255,7 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if len(req.Password) < 8 {
 		writeError(w, 400, "password must be at least 8 characters"); return
 	}
-	if req.Email == "" || !strings.Contains(req.Email, "@") {
+	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -482,7 +507,7 @@ func (s *Service) SendUserInvite(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, 400, "email required"); return
 	}
-	if !strings.Contains(req.Email, "@") {
+	if !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -593,7 +618,7 @@ func (s *Service) RequestEmailChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid json"); return
 	}
 	req.NewEmail = strings.ToLower(strings.TrimSpace(req.NewEmail))
-	if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
+	if req.NewEmail == "" || !isValidEmail(req.NewEmail) {
 		writeError(w, 400, "valid email required"); return
 	}
 

@@ -1042,16 +1042,88 @@ func matchAttachments(attachments []apAttachment) (imageURLs []string, videoURL 
 	return imageURLs, videoURL
 }
 
+// apPollOption is one entry of a Question's "oneOf"/"anyOf" array — a
+// single-choice poll uses oneOf, a multiple-choice poll uses anyOf, per the
+// Mastodon/ActivityStreams poll convention (both share this same shape).
+type apPollOption struct {
+	Name    string `json:"name"`
+	Replies struct {
+		TotalItems int `json:"totalItems"`
+	} `json:"replies"`
+}
+
+// apPoll is the parsed poll data from an inbound "Question" object, shared
+// by handleInboundCreate and handleInboundUpdate.
+type apPoll struct {
+	Options  []apPollOption
+	Multiple bool
+	EndTime  string
+}
+
+// parseAPPoll returns nil for anything that isn't a poll (AGORA-210) — a
+// Mastodon poll's outer object type is "Question", not "Note", but
+// handleInboundCreate/handleInboundUpdate never checked the object's "type"
+// at all before this, so a poll's oneOf/anyOf/endTime were silently
+// discarded and only its bare question text (still present in "content",
+// same field a plain Note uses) got ingested as an ordinary post.
+func parseAPPoll(objType string, oneOf, anyOf []apPollOption, endTime string) *apPoll {
+	if objType != "Question" {
+		return nil
+	}
+	options, multiple := oneOf, false
+	if len(anyOf) > 0 {
+		options, multiple = anyOf, true
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return &apPoll{Options: options, Multiple: multiple, EndTime: endTime}
+}
+
+// applyInboundPoll stores a parsed poll's options/vote-tallies/settings
+// against an already-ingested post (AGORA-210). Replaces any existing
+// poll_options wholesale rather than merging — mirrors the same
+// replace-not-append convention storeInboundImages/handleInboundUpdate's own
+// image handling already uses, since a poll's option set can change between
+// an inbound Create and a later Update (Mastodon re-sends the full object,
+// including any admin-added write-in options, not a diff).
+func (s *Service) applyInboundPoll(postID string, poll *apPoll) {
+	if poll == nil {
+		return
+	}
+	var expiresAt any
+	if poll.EndTime != "" {
+		if t, err := time.Parse(time.RFC3339, poll.EndTime); err == nil {
+			expiresAt = t
+		}
+	}
+	s.db.Exec(`UPDATE posts SET poll_multiple_choice = $1, poll_expires_at = $2 WHERE id = $3`,
+		poll.Multiple, expiresAt, postID)
+	s.db.Exec(`DELETE FROM poll_options WHERE post_id = $1`, postID)
+	for i, opt := range poll.Options {
+		name := strings.TrimSpace(opt.Name)
+		if name == "" {
+			continue
+		}
+		s.db.Exec(`INSERT INTO poll_options (post_id, text, position, remote_votes) VALUES ($1, $2, $3, $4)`,
+			postID, name, i, opt.Replies.TotalItems)
+	}
+}
+
 // ── Inbound Create (replies into threads we own, or a followed account's own
 //    top-level posts — AGORA-146) ─────────────────────────────────────────────
 func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
 		ID           string         `json:"id"`
+		Type         string         `json:"type"` // AGORA-210: "Question" for a poll, "Note" otherwise
 		AttributedTo string         `json:"attributedTo"`
 		Content      string         `json:"content"`
 		InReplyTo    string         `json:"inReplyTo"`
 		Summary      string         `json:"summary"` // AGORA-154: content-warning text, if any
 		Attachment   []apAttachment `json:"attachment"`
+		OneOf        []apPollOption `json:"oneOf"`
+		AnyOf        []apPollOption `json:"anyOf"`
+		EndTime      string         `json:"endTime"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1073,13 +1145,16 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 
 	imageURLs, videoURL := matchAttachments(note.Attachment)
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
+	poll := parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime)
 
 	// AGORA-146: no inReplyTo means this isn't a reply into a thread we
 	// own — it's either unrelated top-level fediverse noise (dropped) or a
 	// followed account's own post (ingested), handled entirely separately
-	// from the reply-threading path below.
+	// from the reply-threading path below. A poll is always top-level in
+	// practice (no real AP client posts a poll as a reply), so poll data
+	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL)
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll)
 		return
 	}
 
@@ -1108,7 +1183,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		VALUES ($1, $2, $3, $4, true, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain, htmlToPlainText(note.Summary)).Scan(&commentID)
+	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary)).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1134,10 +1209,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
 		ID           string         `json:"id"`
+		Type         string         `json:"type"` // AGORA-210
 		AttributedTo string         `json:"attributedTo"`
 		Content      string         `json:"content"`
 		Summary      string         `json:"summary"`
 		Attachment   []apAttachment `json:"attachment"`
+		OneOf        []apPollOption `json:"oneOf"`
+		AnyOf        []apPollOption `json:"anyOf"`
+		EndTime      string         `json:"endTime"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1168,13 +1247,17 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.db.Exec(`
 		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
 		WHERE id = $3
-	`, htmlToPlainText(note.Content), htmlToPlainText(note.Summary), postID)
+	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID)
 	// Attachments are fully replaced, not merged — clear the old multi-image
 	// rows before reapplying whatever the edit currently carries, mirroring
 	// EditPost's own replace-not-append handling of image_urls.
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+	// AGORA-210: Mastodon re-sends a poll's full object (not a diff) as vote
+	// tallies change, so this is the mechanism that keeps an already-ingested
+	// poll's counts from going stale over its lifetime.
+	s.applyInboundPoll(postID, parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime))
 }
 
 // logUnmatchedAttachments logs the raw "attachment" JSON when an inbound
@@ -1241,7 +1324,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1260,7 +1343,7 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(content), noteID, domain, htmlToPlainText(summary)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary)).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -1272,6 +1355,7 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	}
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+	s.applyInboundPoll(postID, poll) // AGORA-210
 
 	// AGORA-160/164/166: notify local users who actively follow this actor,
 	// have the global fediverse-notifications toggle on, AND have
@@ -1444,7 +1528,7 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
 		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
 		RETURNING id
-	`, syntheticUsername, displayName, profile.IconURL, htmlToPlainText(profile.Summary),
+	`, syntheticUsername, displayName, profile.IconURL, HTMLToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox,
 	).Scan(&id)
 	if err != nil {
@@ -1453,16 +1537,39 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	return id, nil
 }
 
-// htmlToPlainText converts the (sanitized) HTML content fediverse software
+// HTMLToPlainText converts the (sanitized) HTML content fediverse software
 // sends in a Note's "content" field into plain text, consistent with how
 // Agora's own renderContent expects plain text and does its own @mention/URL
 // linkification. Good enough for the small tag set Mastodon etc. emit
 // (p, br, a, span, strong, em, ...); not a general HTML sanitizer.
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 var htmlBlockBreakRe = regexp.MustCompile(`(?i)<(br|/p|/li)\s*/?>`)
+var htmlATagRe = regexp.MustCompile(`(?is)<a\s[^>]*href=["']([^"']*)["'][^>]*>(.*?)</a>`)
 
-func htmlToPlainText(s string) string {
+func HTMLToPlainText(s string) string {
 	s = htmlBlockBreakRe.ReplaceAllString(s, "\n")
+	// Preserve <a> hrefs before the generic tag strip below discards them —
+	// Mastodon etc. wrap auto-linked URLs in nested <span>s (to CSS-truncate
+	// the visible portion), so link text is usually already the URL once its
+	// own tags are stripped; @mentions/#hashtags are likewise already
+	// meaningful as bare text. Only a manually authored link whose text
+	// differs from its href (e.g. "click here") needs the href appended so
+	// renderContent's bare-URL linkifier still picks it up.
+	s = htmlATagRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := htmlATagRe.FindStringSubmatch(m)
+		href := strings.TrimSpace(html.UnescapeString(parts[1]))
+		text := strings.TrimSpace(html.UnescapeString(htmlTagRe.ReplaceAllString(parts[2], "")))
+		switch {
+		case text == "":
+			return href
+		case strings.HasPrefix(text, "@"), strings.HasPrefix(text, "#"):
+			return text
+		case strings.Contains(strings.ToLower(href), strings.ToLower(text)), strings.HasPrefix(strings.ToLower(text), "http"):
+			return text
+		default:
+			return text + " (" + href + ")"
+		}
+	})
 	s = htmlTagRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(s))
 }
@@ -1979,7 +2086,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 		"actor_url":          actorURL,
 		"preferred_username": profile.PreferredUsername,
 		"name":               profile.Name,
-		"summary":            htmlToPlainText(profile.Summary),
+		"summary":            HTMLToPlainText(profile.Summary),
 		"icon_url":           profile.IconURL,
 		"instance":           domain,
 	})

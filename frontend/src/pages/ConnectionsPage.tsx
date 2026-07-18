@@ -111,6 +111,10 @@ export default function ConnectionsPage() {
     mutationFn: (id: string) => atprotoApi.unfollowBlueskyAccount(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['bluesky-following'] }),
   })
+  const toggleBskyNotify = useMutation({
+    mutationFn: ({ id, notify }: { id: string, notify: boolean }) => atprotoApi.toggleFollowNotify(id, notify),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['bluesky-following'] }),
+  })
 
   function handleBskySearch(e: React.FormEvent) {
     e.preventDefault()
@@ -490,6 +494,11 @@ export default function ConnectionsPage() {
 
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
+            {bskyFollowing.length > 0 && (
+              <p className="text-xs text-agora-400">
+                <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+              </p>
+            )}
             {bskyFollowing.length === 0 && (
               <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
                 You're not following anyone on Bluesky yet.
@@ -509,6 +518,13 @@ export default function ConnectionsPage() {
                     <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>
                     <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
                   </div>
+                  <button
+                    onClick={() => toggleBskyNotify.mutate({ id: f.id, notify: !f.notify })}
+                    disabled={toggleBskyNotify.isPending}
+                    title={f.notify ? 'Notifications on for this account' : 'Notifications off for this account'}
+                    className={`flex-shrink-0 p-1.5 rounded-full transition-colors ${f.notify ? 'text-agora-700 bg-agora-100 dark:bg-agora-700 dark:text-white' : 'text-agora-400 hover:text-agora-600'}`}>
+                    {f.notify ? <Bell size={15} /> : <BellOff size={15} />}
+                  </button>
                   <button
                     onClick={() => unfollowBsky.mutate(f.id)}
                     disabled={unfollowBsky.isPending}

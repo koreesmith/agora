@@ -214,6 +214,7 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		ActivityPubEnabled   *bool   `json:"activitypub_enabled"`
 		FediverseNotificationsEnabled *bool `json:"fediverse_notifications_enabled"`
 		AtprotoEnabled       *bool   `json:"atproto_enabled"`
+		AtprotoNotificationsEnabled *bool `json:"atproto_notifications_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -265,6 +266,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AtprotoEnabled != nil {
 		sets = append(sets, fmt.Sprintf("atproto_enabled = $%d", i)); args = append(args, *req.AtprotoEnabled); i++
+	}
+	if req.AtprotoNotificationsEnabled != nil {
+		sets = append(sets, fmt.Sprintf("atproto_notifications_enabled = $%d", i)); args = append(args, *req.AtprotoNotificationsEnabled); i++
 	}
 
 	args = append(args, userID)

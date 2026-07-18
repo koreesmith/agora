@@ -915,4 +915,11 @@ var schema = []string{
 	// display name.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_remote_did TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_atproto_remote_did ON users(atproto_remote_did) WHERE atproto_remote_did != ''`,
+
+	// AGORA-198: notify on a followed Bluesky account's new posts, mirroring
+	// fediverse_notifications_enabled (global kill switch) and
+	// ap_following.notify (AGORA-166's per-follow opt-in, default false since
+	// following alone shouldn't start notifying you).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
 }

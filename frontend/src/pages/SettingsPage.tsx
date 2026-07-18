@@ -113,6 +113,15 @@ export default function SettingsPage() {
     onError: fail,
   })
 
+  const toggleAtprotoNotifications = useMutation({
+    mutationFn: () => {
+      const newVal = !user?.atproto_notifications_enabled
+      return usersApi.updateProfile({ atproto_notifications_enabled: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ atproto_notifications_enabled: newVal }); ok('Bluesky notification setting updated') },
+    onError: fail,
+  })
+
   const uploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return
     const res = await usersApi.uploadAvatar(f)
@@ -387,7 +396,7 @@ export default function SettingsPage() {
             identity and moderation model. Turning this on lets people on Bluesky find, follow, and see your public
             posts. Private and friends-only posts are never federated either way.
           </p>
-          <div className="flex items-center justify-between py-2">
+          <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Bluesky (AT Protocol)</p>
               <p className="text-xs text-agora-400">Let people on Bluesky find, follow, and see your public posts.</p>
@@ -395,6 +404,18 @@ export default function SettingsPage() {
             <button onClick={() => toggleAtproto.mutate()}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.atproto_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.atproto_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Bluesky post notifications</p>
+              <p className="text-xs text-agora-400">Get notified when a Bluesky account you follow posts something new. Doesn't affect any other notification type.</p>
+            </div>
+            <button
+              onClick={() => toggleAtprotoNotifications.mutate()}
+              disabled={toggleAtprotoNotifications.isPending}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.atproto_notifications_enabled ? 'bg-agora-600' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.atproto_notifications_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
           <p className="text-sm text-agora-500 pt-2 border-t border-agora-100 dark:border-agora-700">

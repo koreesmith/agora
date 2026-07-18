@@ -224,7 +224,7 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 	// picker has a users.id to store as the filter value — same shape
 	// federation's ListFollowing already establishes for fediverse_account.
 	rows, err := s.db.Query(`
-		SELECT af.id, af.remote_did, af.remote_handle, af.display_name, af.avatar_url, af.created_at,
+		SELECT af.id, af.remote_did, af.remote_handle, af.display_name, af.avatar_url, af.created_at, af.notify,
 		       COALESCE(u.id::text, '')
 		FROM at_following af
 		LEFT JOIN users u ON u.atproto_remote_did = af.remote_did
@@ -243,13 +243,14 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		AvatarURL   string `json:"avatar_url"`
 		CreatedAt   string `json:"created_at"`
+		Notify      bool   `json:"notify"`
 		UserID      string `json:"user_id,omitempty"`
 	}
 	var list []entry
 	for rows.Next() {
 		var e entry
 		var createdAt time.Time
-		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.UserID) == nil {
+		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.UserID) == nil {
 			e.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 			list = append(list, e)
 		}
@@ -258,4 +259,31 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		list = []entry{}
 	}
 	writeJSON(w, 200, map[string]any{"following": list})
+}
+
+// ToggleFollowNotify flips whether the caller gets atproto_post
+// notifications for a specific followed Bluesky account's posts (AGORA-198)
+// — independent of the global atproto_notifications_enabled setting, which
+// stays the all-accounts kill switch checked alongside this one, mirroring
+// federation's ToggleFollowNotify (AGORA-166).
+func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Notify bool `json:"notify"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid body")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE at_following SET notify = $1 WHERE id = $2 AND local_user_id = $3`, req.Notify, id, userID)
+	if err != nil {
+		writeError(w, 500, "could not update")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"notify": req.Notify})
 }

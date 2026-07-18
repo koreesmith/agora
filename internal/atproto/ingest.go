@@ -130,6 +130,30 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 		}
 		s.storeInboundImages(postID, imageURLs)
 
+		// AGORA-198: notify local users who actively follow this DID, have
+		// the global atproto_notifications_enabled toggle on, AND have
+		// specifically opted into notifications for this account (af.notify)
+		// — mirrors AGORA-160/166's ap_following loop. Runs only on the
+		// actual first insert above (ON CONFLICT DO NOTHING made postID
+		// empty and continued otherwise), so a redelivered/re-polled post
+		// never fires a duplicate notification.
+		if s.notif != nil {
+			rows, err := s.db.QueryContext(ctx, `
+				SELECT af.local_user_id
+				FROM at_following af JOIN users u ON u.id = af.local_user_id
+				WHERE af.remote_did = $1 AND af.notify = true AND u.atproto_notifications_enabled = true
+			`, did)
+			if err == nil {
+				for rows.Next() {
+					var followerID string
+					if rows.Scan(&followerID) == nil {
+						s.notif.Create(followerID, authorID, "atproto_post", postID, "")
+					}
+				}
+				rows.Close()
+			}
+		}
+
 		log.Printf("atproto: ingested post %s from %s (%s)", postID, handle, post.Uri)
 	}
 }

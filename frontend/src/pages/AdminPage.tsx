@@ -2,11 +2,11 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -20,7 +20,7 @@ export default function AdminPage() {
   const ok = (m:string) => { setMsg(m); setTimeout(()=>setMsg(''), 3000) }
 
   const { data: stats }    = useQuery({ queryKey:['admin-stats'],    queryFn: ()=>adminApi.getStats().then(r=>r.data),    enabled: tab==='overview' })
-  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' || tab==='fediverse' })
+  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' || tab==='fediverse' || tab==='bluesky' })
   const { data: usersData }= useQuery({ queryKey:['admin-users'],    queryFn: ()=>adminApi.listUsers().then(r=>r.data),   enabled: tab==='users' })
   const { data: repsData } = useQuery({ queryKey:['admin-reports', reportStatus], queryFn: ()=>moderationApi.listReports(reportStatus).then(r=>r.data), enabled: tab==='reports' })
   const { data: modUsersData } = useQuery({ queryKey:['mod-users'], queryFn: ()=>moderationApi.listModeratedUsers().then(r=>r.data), enabled: tab==='moderation' })
@@ -68,6 +68,7 @@ export default function AdminPage() {
     { id:'reports',     label:'Reports',     icon: Flag },
     { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
     { id:'fediverse',   label:'Fediverse',   icon: Globe },
+    { id:'bluesky',     label:'Bluesky',     icon: Cloud },
     { id:'federation',  label:'Federation',  icon: Link2 },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
@@ -442,6 +443,24 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Bluesky (AGORA-193): instance-wide AT Proto toggle — independent of
+          the ActivityPub toggle above, since a user/instance may want one
+          network on and the other off. Its own tab rather than folded into
+          the generic Settings tab, matching the Fediverse tab's placement. */}
+      {tab==='bluesky' && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between py-2">
+            <div><p className="font-medium text-sm">Bluesky (AT Protocol)</p>
+              <p className="text-xs text-agora-400">Let this instance act as a Bluesky PDS — federating public posts over AT Protocol and being discoverable/followable from Bluesky. Independent of the Fediverse (ActivityPub) toggle; users can also opt out individually in their own Settings.</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,atproto_enabled:f.atproto_enabled==='true'?'false':'true'}))}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.atproto_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.atproto_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
+          <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
         </div>
       )}
 

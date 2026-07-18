@@ -9,7 +9,7 @@ export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
   const qc = useQueryClient()
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'fediverse'|'data'|'blocked'>(
+  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'fediverse'|'bluesky'|'data'|'blocked'>(
     (searchParams.get('tab') as any) || 'profile'
   )
 
@@ -104,6 +104,15 @@ export default function SettingsPage() {
     onError: fail,
   })
 
+  const toggleAtproto = useMutation({
+    mutationFn: () => {
+      const newVal = !user?.atproto_enabled
+      return usersApi.updateProfile({ atproto_enabled: newVal }).then(() => newVal)
+    },
+    onSuccess: (newVal) => { updateUser({ atproto_enabled: newVal }); ok('Bluesky setting updated') },
+    onError: fail,
+  })
+
   const uploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return
     const res = await usersApi.uploadAvatar(f)
@@ -173,7 +182,7 @@ export default function SettingsPage() {
     onSuccess: () => refetchBlocked(),
   })
 
-  const tabs = ['profile','account','privacy','notifications','fediverse','data','blocked'] as const
+  const tabs = ['profile','account','privacy','notifications','fediverse','bluesky','data','blocked'] as const
 
   return (
     <div className="space-y-4">
@@ -363,6 +372,31 @@ export default function SettingsPage() {
             Following a fediverse handle and managing who you already follow moved to{' '}
             <Link to="/connections?tab=fediverse" className="underline hover:text-agora-700">Connections → Fediverse</Link>.
           </p>
+        </div>
+      )}
+
+      {/* Bluesky (AGORA-193): independent from the Fediverse toggle above —
+          a separate network with its own tradeoffs, not a sub-setting of
+          ActivityPub. Follow management lands here once AGORA-195 exists;
+          for now this is just the opt-out toggle. */}
+      {tab === 'bluesky' && (
+        <div className="card p-4 space-y-4">
+          <h3 className="font-semibold">Bluesky (AT Protocol)</h3>
+          <p className="text-sm text-agora-500">
+            Agora can also talk to Bluesky over AT Protocol, a separate network from the fediverse with its own
+            identity and moderation model. Turning this on lets people on Bluesky find, follow, and see your public
+            posts. Private and friends-only posts are never federated either way.
+          </p>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="font-medium text-sm">Bluesky (AT Protocol)</p>
+              <p className="text-xs text-agora-400">Let people on Bluesky find, follow, and see your public posts.</p>
+            </div>
+            <button onClick={() => toggleAtproto.mutate()}
+              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.atproto_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${user?.atproto_enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
         </div>
       )}
 

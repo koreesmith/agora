@@ -967,4 +967,34 @@ var schema = []string{
 	// poll is read-only from Agora today, so that sum is just remote_votes
 	// in practice, but the addition keeps the query correct either way).
 	`ALTER TABLE poll_options ADD COLUMN IF NOT EXISTS remote_votes INT NOT NULL DEFAULT 0`,
+
+	// AGORA-220: a relay is a third-party server the instance actor (AGORA-219)
+	// Follows to receive its firehose — the same Follow/Accept/Reject/Undo
+	// handshake shape as ap_following, but scoped to the whole instance rather
+	// than any one user, so there's no follower_user_id-equivalent column.
+	// actor_url is resolved (and cached) lazily on first successful profile
+	// fetch — only inbox_url is known/needed to send the initial Follow.
+	`CREATE TABLE IF NOT EXISTS relays (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		inbox_url  TEXT        NOT NULL UNIQUE,
+		actor_url  TEXT        NOT NULL DEFAULT '',
+		status     VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','enabled','rejected','disabled')),
+		added_by   UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// The instance actor's own outbound delivery queue, mirroring
+	// ap_delivery_queue/page_ap_delivery_queue's shape — no actor_user_id/
+	// actor_page_id-equivalent column since there's only ever one instance
+	// actor to sign as.
+	`CREATE TABLE IF NOT EXISTS instance_ap_delivery_queue (
+		id           UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		inbox_url    TEXT        NOT NULL,
+		activity     JSONB       NOT NULL,
+		attempts     INT         NOT NULL DEFAULT 0,
+		last_error   TEXT        NOT NULL DEFAULT '',
+		next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_instance_ap_delivery_next ON instance_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
 }

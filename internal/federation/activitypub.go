@@ -1080,7 +1080,37 @@ func usernameFromAcceptObject(objectRaw json.RawMessage, instanceDomain string) 
 	return usernameFromActorURL(objectID, instanceDomain)
 }
 
+// followObjectActor extracts the raw "actor" URL/IRI an inbound Accept or
+// Reject's "object" refers to, whether it's an embedded Follow object
+// ({"actor": "..."}) or a bare IRI string referencing the original Follow's
+// id (threads.net does this — AGORA-175). Groundwork shared by
+// usernameFromAcceptObject (per-user Accept, above) and the relay
+// Accept/Reject check below (AGORA-220) — kept separate from that function
+// rather than reused, since each caller compares the extracted actor
+// against a different kind of local actor URL.
+func followObjectActor(objectRaw json.RawMessage) string {
+	var follow struct {
+		Actor string `json:"actor"`
+	}
+	if err := json.Unmarshal(objectRaw, &follow); err == nil && follow.Actor != "" {
+		return follow.Actor
+	}
+	var objectID string
+	if err := json.Unmarshal(objectRaw, &objectID); err == nil {
+		return objectID
+	}
+	return ""
+}
+
 func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+	// AGORA-220: a relay confirming our subscription looks identical to a
+	// user's outbound-follow Accept, except the followed object is the
+	// instance actor rather than any /federation/users/{username} URL.
+	if followObjectActor(objectRaw) == s.instanceActorURL() {
+		s.handleRelayAccept(verifiedActor)
+		return
+	}
+
 	username := usernameFromAcceptObject(objectRaw, s.cfg.InstanceDomain)
 	if username == "" {
 		return
@@ -1096,6 +1126,12 @@ func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json
 // handleInboundRejectFollow removes the pending ap_following row so the UI
 // reverts to "not following" and the user can retry or give up.
 func (s *Service) handleInboundRejectFollow(verifiedActor string, objectRaw json.RawMessage) {
+	// AGORA-220: mirrors the relay check in handleInboundAcceptFollow above.
+	if followObjectActor(objectRaw) == s.instanceActorURL() {
+		s.handleRelayReject(verifiedActor)
+		return
+	}
+
 	var follow struct {
 		Actor string `json:"actor"`
 	}
@@ -3152,6 +3188,94 @@ func (s *Service) deliverAPActivity(userID, inboxURL string, activity []byte) er
 	req.Header.Set("Accept", "application/activity+json")
 
 	if err := signRequest(req, s.actorKeyID(username), privKey, activity); err != nil {
+		return err
+	}
+
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("remote inbox returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ── Instance actor delivery queue (AGORA-220) ─────────────────────────────────
+//
+// Mirrors enqueuePageAPDelivery/drainPageAPQueue/deliverPageAPActivity —
+// this codebase's established answer to "a second kind of actor needs its
+// own delivery pipeline" is to duplicate the queue, not parameterize the
+// existing one (see deliverAPActivity/deliverPageAPActivity above).
+
+func (s *Service) enqueueInstanceAPDelivery(inboxURL string, activity any) {
+	payload, err := json.Marshal(activity)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`
+		INSERT INTO instance_ap_delivery_queue (inbox_url, activity, next_attempt)
+		VALUES ($1, $2, NOW())
+	`, inboxURL, string(payload))
+}
+
+func (s *Service) drainInstanceAPQueue() {
+	rows, err := s.db.Query(`
+		SELECT id, inbox_url, activity
+		FROM instance_ap_delivery_queue
+		WHERE attempts < 10 AND next_attempt <= NOW()
+		ORDER BY next_attempt ASC
+		LIMIT 20
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type instanceJob struct {
+		id, inboxURL string
+		activity     []byte
+	}
+	var jobs []instanceJob
+	for rows.Next() {
+		var j instanceJob
+		if rows.Scan(&j.id, &j.inboxURL, &j.activity) == nil {
+			jobs = append(jobs, j)
+		}
+	}
+	rows.Close()
+
+	for _, j := range jobs {
+		sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
+		if sendErr == nil {
+			s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
+		} else {
+			s.db.Exec(`
+				UPDATE instance_ap_delivery_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
+				WHERE id = $2
+			`, sendErr.Error(), j.id)
+		}
+	}
+}
+
+func (s *Service) deliverInstanceAPActivity(inboxURL string, activity []byte) error {
+	_, _, privKey, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, inboxURL, bytes.NewReader(activity))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/activity+json")
+	req.Header.Set("Accept", "application/activity+json")
+
+	if err := signRequest(req, s.instanceActorKeyID(), privKey, activity); err != nil {
 		return err
 	}
 

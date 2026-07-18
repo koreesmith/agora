@@ -852,6 +852,7 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	if s.activityPubEnabled() {
 		go s.drainAPQueue()
 		go s.drainPageAPQueue()
+		go s.drainInstanceAPQueue() // AGORA-220
 	}
 
 	for {
@@ -866,6 +867,7 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 			if s.activityPubEnabled() {
 				go s.drainAPQueue()
 				go s.drainPageAPQueue()
+				go s.drainInstanceAPQueue() // AGORA-220
 			}
 		case <-syncTicker.C:
 			if s.federationEnabled() {

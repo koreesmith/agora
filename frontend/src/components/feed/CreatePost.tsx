@@ -542,17 +542,24 @@ export default function CreatePost() {
 
       {/* Trigger warning label input */}
       {twEnabled && (
-        <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-          <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />
-          <input
-            className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
-            placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
-            autoComplete="off"
-            value={twLabel}
-            onChange={e => setTwLabel(e.target.value)}
-            autoFocus
-            maxLength={120}
-          />
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
+            <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />
+            <input
+              className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
+              placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
+              autoComplete="off"
+              value={twLabel}
+              onChange={e => setTwLabel(e.target.value)}
+              autoFocus
+              maxLength={120}
+            />
+          </div>
+          {/* AGORA-204: Bluesky has no free-text CW field, only a fixed label
+              vocabulary, so this specific text can't carry over there. */}
+          <p className="text-xs text-agora-400 px-1">
+            On Bluesky, this shows as a generic content warning — the text above won't carry over.
+          </p>
         </div>
       )}
 

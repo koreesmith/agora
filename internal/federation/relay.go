@@ -39,6 +39,35 @@ func RegisterAdminRoutes(r chi.Router, s *Service) {
 	r.Delete("/admin/relays/{id}", s.DeleteRelay)
 }
 
+// enabledRelayInboxes returns every currently-enabled relay's inbox URL —
+// used by BroadcastPublicPost/BroadcastUpdatePost/BroadcastDeletePost
+// (AGORA-221) to add relays as extra recipients of a local public post's
+// normal follower delivery. Deliberately delivered signed as the post's own
+// author (via the existing enqueueAPDelivery/deliverAPActivity path), not
+// the instance actor — a relay is "just another subscriber" from a Create's
+// perspective, and at least one popular relay implementation verifies the
+// delivered activity's attributedTo/actor against the HTTP signature's own
+// keyId the same strict way Agora's own inbound handling does (see
+// handleInboundCreate), which a delivery signed as the instance actor would
+// fail. The instance actor's own delivery queue (instance_ap_delivery_queue)
+// is reserved for the instance actor's own authored traffic — the
+// Follow/Undo(Follow) subscription handshake (AGORA-220), not post content.
+func (s *Service) enabledRelayInboxes() []string {
+	rows, err := s.db.Query(`SELECT inbox_url FROM relays WHERE status = 'enabled'`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var inboxes []string
+	for rows.Next() {
+		var inbox string
+		if rows.Scan(&inbox) == nil {
+			inboxes = append(inboxes, inbox)
+		}
+	}
+	return inboxes
+}
+
 func (s *Service) ListRelays(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`SELECT id, inbox_url, actor_url, status, created_at FROM relays ORDER BY created_at DESC`)
 	if err != nil {

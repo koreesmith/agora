@@ -49,6 +49,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/pages/{slug}",           s.GetPageActor)
 	r.Get("/federation/pages/{slug}/outbox",    s.PageOutbox)
 	r.Get("/federation/pages/{slug}/followers", s.PageFollowers)
+	// AGORA-219: instance-wide actor, used only for relay Follow/Announce
+	// traffic — no followers endpoint, since nothing ever follows it back.
+	r.Get("/federation/instance",        s.GetInstanceActor)
+	r.Get("/federation/instance/outbox", s.InstanceActorOutbox)
 }
 
 // RegisterAuthedRoutes registers federation routes that require a valid Agora

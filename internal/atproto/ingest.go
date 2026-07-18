@@ -111,11 +111,11 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app')
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri).Scan(&postID)
+		`, authorID, rec.Text, post.Uri, post.Cid).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
@@ -185,6 +185,11 @@ func (s *Service) StartBlueskyIngestion(ctx context.Context) {
 		for _, did := range dids {
 			s.ingestAuthorFeed(ctx, did)
 		}
+
+		// AGORA-199: same ticker, same polling philosophy — check Bluesky
+		// replies on Agora's own broadcast posts, scaling with how many posts
+		// Agora federated rather than with the whole network's firehose.
+		s.pollInboundReplies(ctx)
 	}
 
 	poll()

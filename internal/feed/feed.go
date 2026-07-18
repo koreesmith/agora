@@ -78,6 +78,11 @@ type atprotoSender interface {
 	// was never federated as an AT Proto record in the first place.
 	BroadcastPostUpdate(userID, postID string)
 	BroadcastPostDelete(userID, postID string)
+	// DeliverReply/DeliverReplyUpdate (AGORA-199) mirror fedSender's own
+	// pair, but resolve a reply/root strong-ref pair instead of a single
+	// inReplyTo URL — no-op internally if there's no Bluesky-visible target.
+	DeliverReply(userID, commentID, replyToID string)
+	DeliverReplyUpdate(userID, commentID, replyToID string)
 }
 
 type Service struct {
@@ -2173,6 +2178,11 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil {
 		go s.fed.DeliverReply(userID, id, parentID)
 	}
+	// AGORA-199: same reasoning as the fediverse call above, for a Bluesky
+	// reply target.
+	if s.atproto != nil {
+		go s.atproto.DeliverReply(userID, id, parentID)
+	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
 }
@@ -2374,6 +2384,10 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	// reply must send an Update, not go stale on the remote side forever.
 	if s.fed != nil {
 		go s.fed.DeliverReplyUpdate(userID, commentID, parentID)
+	}
+	// AGORA-199: same reasoning as the fediverse call above.
+	if s.atproto != nil {
+		go s.atproto.DeliverReplyUpdate(userID, commentID, parentID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "updated"})

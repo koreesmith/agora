@@ -278,6 +278,8 @@ export const atprotoApi = {
   followBlueskyAccount:   (actor: string)  => api.post('/atproto/follow', { actor }),
   unfollowBlueskyAccount: (id: string)     => api.delete(`/atproto/follow/${id}`),
   listBlueskyFollowing:   ()               => api.get('/atproto/following'),
+  // AGORA-198: per-follow notification opt-in, mirroring toggleFollowNotify.
+  toggleFollowNotify:     (id: string, notify: boolean) => api.put(`/atproto/follow/${id}/notify`, { notify }),
   // AGORA-196: reconcile a Bridgy-Fed-bridged Bluesky follow (an ap_following
   // row) into a native one.
   migrateBridgedFollow:   (apFollowingId: string) => api.post(`/atproto/bridged-follows/${apFollowingId}/migrate`),

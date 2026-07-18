@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
 
@@ -28,10 +29,11 @@ type Service struct {
 	db     *store.DB
 	cfg    *config.Config
 	events *events.EventManager
+	notif  *notifications.Service
 }
 
-func NewService(db *store.DB, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg, events: events.NewEventManager(newPgEventPersister(db))}
+func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
+	return &Service{db: db, cfg: cfg, events: events.NewEventManager(newPgEventPersister(db)), notif: notif}
 }
 
 // RegisterRoutes wires the public, unauthenticated AT Proto identity and
@@ -53,6 +55,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Post("/atproto/follow", s.FollowBlueskyAccount)
 	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
 	r.Get("/atproto/following", s.ListBlueskyFollowing)
+	// AGORA-198: per-follow notification opt-in, mirroring federation's
+	// /federation/follow/{id}/notify.
+	r.Put("/atproto/follow/{id}/notify", s.ToggleFollowNotify)
 	// AGORA-196: reconcile Bridgy-Fed-bridged Bluesky follows to native ones.
 	r.Get("/atproto/bridged-follows", s.ListBridgedBlueskyFollows)
 	r.Post("/atproto/bridged-follows/{id}/migrate", s.MigrateBridgedFollow)

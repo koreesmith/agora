@@ -70,7 +70,7 @@ func main() {
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
-	atprotoSvc      := atproto.NewService(db, cfg)
+	atprotoSvc      := atproto.NewService(db, cfg, notifSvc)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)

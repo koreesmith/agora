@@ -148,11 +148,11 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 
 		var commentID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid)
-			VALUES ($1, $2, 'public', $3, true, $4, 'bsky.app', $5)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
+			VALUES ($1, $2, 'public', $3, true, $4, 'bsky.app', $5, $6)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, localParentID, post.Uri, post.Cid).Scan(&commentID)
+		`, authorID, rec.Text, localParentID, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels)).Scan(&commentID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}

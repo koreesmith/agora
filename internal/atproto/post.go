@@ -25,18 +25,18 @@ func (s *Service) BroadcastPost(userID, postID string) {
 	}
 	ctx := context.Background()
 
-	var username, content, did, storedPriv, repoHead, repoRev string
+	var username, content, contentWarning, did, storedPriv, repoHead, repoRev string
 	var visibility string
 	var profilePrivate, isRemote, atprotoEnabled bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.created_at
+		       p.visibility, p.content, p.content_warning, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt)
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt)
 	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
 		return
 	}
@@ -54,6 +54,7 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Labels:        labelsForContentWarning(contentWarning),
 	}
 	recordCid, rkey, err := repo.CreateRecord(ctx, "app.bsky.feed.post", rec)
 	if err != nil {
@@ -94,20 +95,20 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 	}
 	ctx := context.Background()
 
-	var username, content, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
+	var username, content, contentWarning, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
 	var visibility string
 	var profilePrivate, isRemote, atprotoEnabled bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.created_at, ap.rkey, ap.record_cid
+		       p.visibility, p.content, p.content_warning, p.created_at, ap.rkey, ap.record_cid
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		JOIN atproto_posts ap ON ap.post_id = p.id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt, &rkey, &oldCidStr)
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &rkey, &oldCidStr)
 	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
 		return
 	}
@@ -125,6 +126,7 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Labels:        labelsForContentWarning(contentWarning),
 	}
 	path := "app.bsky.feed.post/" + rkey
 	recordCid, err := repo.UpdateRecord(ctx, path, rec)

@@ -111,11 +111,11 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid).Scan(&postID)
+		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels)).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}

@@ -73,18 +73,18 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	}
 	ctx := context.Background()
 
-	var username, content, did, storedPriv, repoHead, repoRev string
+	var username, content, contentWarning, did, storedPriv, repoHead, repoRev string
 	var visibility string
 	var profilePrivate, isRemote, atprotoEnabled bool
 	var createdAt time.Time
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.created_at
+		       p.visibility, p.content, p.content_warning, p.created_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, commentID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt); err != nil ||
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt); err != nil ||
 		visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
 		return
 	}
@@ -112,6 +112,7 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, commentID),
+		Labels:        labelsForContentWarning(contentWarning),
 		Reply: &bsky.FeedPost_ReplyRef{
 			Parent: &comatproto.RepoStrongRef{Uri: parentURI, Cid: parentCid},
 			Root:   &comatproto.RepoStrongRef{Uri: rootURI, Cid: rootCid},
@@ -152,20 +153,20 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 	}
 	ctx := context.Background()
 
-	var username, content, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
+	var username, content, contentWarning, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
 	var visibility string
 	var profilePrivate, isRemote, atprotoEnabled bool
 	var createdAt time.Time
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.created_at, ap.rkey, ap.record_cid
+		       p.visibility, p.content, p.content_warning, p.created_at, ap.rkey, ap.record_cid
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		JOIN atproto_posts ap ON ap.post_id = p.id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, commentID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &createdAt, &rkey, &oldCidStr); err != nil ||
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &rkey, &oldCidStr); err != nil ||
 		visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
 		return // never federated in the first place (no Bluesky target when created) — nothing to update
 	}
@@ -193,6 +194,7 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 		Text:          content,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, commentID),
+		Labels:        labelsForContentWarning(contentWarning),
 		Reply: &bsky.FeedPost_ReplyRef{
 			Parent: &comatproto.RepoStrongRef{Uri: parentURI, Cid: parentCid},
 			Root:   &comatproto.RepoStrongRef{Uri: rootURI, Cid: rootCid},

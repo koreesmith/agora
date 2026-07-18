@@ -219,9 +219,16 @@ func (s *Service) UnfollowBlueskyAccount(w http.ResponseWriter, r *http.Request)
 // ListBlueskyFollowing returns the caller's native Bluesky follows.
 func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
+	// LEFT JOINs the cached remote-user stub (AGORA-197's ingestion populates
+	// it on first ingested post) so the FeedBuilderModal's atproto_account
+	// picker has a users.id to store as the filter value — same shape
+	// federation's ListFollowing already establishes for fediverse_account.
 	rows, err := s.db.Query(`
-		SELECT id, remote_did, remote_handle, display_name, avatar_url, created_at
-		FROM at_following WHERE local_user_id = $1 ORDER BY created_at DESC
+		SELECT af.id, af.remote_did, af.remote_handle, af.display_name, af.avatar_url, af.created_at,
+		       COALESCE(u.id::text, '')
+		FROM at_following af
+		LEFT JOIN users u ON u.atproto_remote_did = af.remote_did
+		WHERE af.local_user_id = $1 ORDER BY af.created_at DESC
 	`, userID)
 	if err != nil {
 		writeError(w, 500, "db error")
@@ -236,12 +243,13 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		AvatarURL   string `json:"avatar_url"`
 		CreatedAt   string `json:"created_at"`
+		UserID      string `json:"user_id,omitempty"`
 	}
 	var list []entry
 	for rows.Next() {
 		var e entry
 		var createdAt time.Time
-		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt) == nil {
+		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.UserID) == nil {
 			e.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 			list = append(list, e)
 		}

@@ -423,17 +423,29 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
 				))`)
 		}
-		// AGORA-195/197: the filter type exists (a feed can be scoped to a
-		// followed Bluesky account, or "every Bluesky account followed") but
-		// deliberately matches no posts yet — there's no ingestion mechanism
-		// populating local posts authored by a followed Bluesky DID until
-		// AGORA-197 ships (AT Proto has no inbox-push equivalent driving
-		// ingestion the way an accepted fediverse follow does). Matching
-		// nothing here is the honest, safe behavior in the meantime: it
-		// scopes the feed down to empty rather than silently ignoring the
-		// filter and showing everything.
-		if len(atprotoAccountIDs) > 0 || atprotoAll {
-			inclParts = append(inclParts, `FALSE`)
+		// AGORA-197: a specific followed Bluesky account — mirrors
+		// fediverse_account's shape, joining at_following/atproto_remote_did
+		// instead of ap_following/ap_actor_url. The EXISTS re-verifies the
+		// viewer actually follows that DID, same reasoning fediverse_account
+		// uses.
+		if len(atprotoAccountIDs) > 0 {
+			phs := make([]string, len(atprotoAccountIDs))
+			for i, id := range atprotoAccountIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`(p.author_id IN (%s) AND EXISTS(
+				  SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+				  WHERE af.local_user_id = $1 AND ru.id = p.author_id
+				))`, strings.Join(phs, ",")))
+		}
+		// AGORA-197: every Bluesky account the viewer follows.
+		if atprotoAll {
+			inclParts = append(inclParts,
+				`(p.is_remote = true AND EXISTS(
+				  SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+				  WHERE af.local_user_id = $1 AND ru.id = p.author_id
+				))`)
 		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
@@ -541,6 +553,12 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		    OR EXISTS(
 		      SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
 		      WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+		    )
+		    -- AGORA-197: same reasoning as the ap_following branch above, for
+		    -- a followed Bluesky account.
+		    OR EXISTS(
+		      SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+		      WHERE af.local_user_id = $1 AND ru.id = p.author_id
 		    )
 		  )
 		  AND (

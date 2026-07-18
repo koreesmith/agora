@@ -266,6 +266,7 @@ export const federationApi = {
   unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
   listFollowing:            ()                 => api.get('/federation/following'),
   toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
+  toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

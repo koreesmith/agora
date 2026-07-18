@@ -361,7 +361,7 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, _ := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_remote, u.remote_instance
 		FROM friend_group_members m
 		JOIN users u ON u.id = m.friend_id
 		WHERE m.group_id = $1
@@ -370,15 +370,17 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Member struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
+		ID             string `json:"id"`
+		Username       string `json:"username"`
+		DisplayName    string `json:"display_name"`
+		AvatarURL      string `json:"avatar_url"`
+		IsRemote       bool   `json:"is_remote"`
+		RemoteInstance string `json:"remote_instance"`
 	}
 	var members []Member
 	for rows.Next() {
 		var m Member
-		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL)
+		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance)
 		members = append(members, m)
 	}
 	if members == nil { members = []Member{} }
@@ -398,15 +400,26 @@ func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify actually friends
-	var status string
+	// AGORA-182: list membership isn't friendship-only anymore — a followed
+	// fediverse (or, once AGORA-195 lands, Bluesky) account can join a list
+	// too, read-side only. There's no mutual "accept" for a one-way follow,
+	// so the bar is just "the caller follows them and it's been accepted",
+	// checked via the cached remote-actor row ListFollowing already joins
+	// against (ap_following.followed_actor_url = users.ap_actor_url).
+	var ok bool
 	s.db.QueryRow(`
-		SELECT status FROM friendships
-		WHERE (requester_id = $1 AND addressee_id = $2)
-		   OR (requester_id = $2 AND addressee_id = $1)
-	`, userID, friendID).Scan(&status)
-	if status != "accepted" {
-		writeError(w, 400, "can only add friends to groups")
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE status = 'accepted'
+			  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+		) OR EXISTS(
+			SELECT 1 FROM ap_following af
+			JOIN users u ON u.ap_actor_url = af.followed_actor_url
+			WHERE af.follower_user_id = $1 AND af.accepted = true AND u.id = $2
+		)
+	`, userID, friendID).Scan(&ok)
+	if !ok {
+		writeError(w, 400, "can only add friends or followed fediverse accounts to lists")
 		return
 	}
 

@@ -241,6 +241,19 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			      p.page_id IS NOT NULL
 			      AND EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.page_id AND ps.user_id = $1)
 			    )
+			    OR (
+			      -- AGORA-182: a followed fediverse account's ingested posts join
+			      -- the main feed only if the caller opted this specific follow
+			      -- into it (show_in_feed) — off by default, since otherwise every
+			      -- fediverse follow would dump straight into the main feed with
+			      -- no per-account noise control.
+			      EXISTS(
+			        SELECT 1 FROM ap_following af
+			        JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+			        WHERE af.follower_user_id = $1 AND af.accepted = true AND af.show_in_feed = true
+			          AND ru.id = p.author_id
+			      )
+			    )
 			  )
 			  AND (
 			    -- Friend-list posts: only show if viewer is in that specific friend list

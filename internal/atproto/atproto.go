@@ -44,6 +44,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/.well-known/did.json", s.DIDDocument)
 	r.Get("/.well-known/atproto-did", s.AtprotoDIDText)
 	r.Get("/xrpc/com.atproto.sync.subscribeRepos", s.SubscribeRepos)
+	// AGORA-230: a relay probes this before accepting requestCrawl to confirm
+	// the target host actually speaks the PDS protocol — without it every
+	// crawl request is rejected with "server is not a PDS", regardless of how
+	// correct each user's own did:web documents are.
+	r.Get("/xrpc/com.atproto.server.describeServer", s.DescribeServer)
 }
 
 // RegisterAuthedRoutes wires the endpoints only ever called by Agora's own
@@ -293,6 +298,21 @@ func (s *Service) AtprotoDIDText(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
 	w.Write([]byte(id.DID))
+}
+
+// DescribeServer serves GET /xrpc/com.atproto.server.describeServer — the
+// com.atproto.server.describeServer lexicon's minimal required shape
+// (AGORA-230). This describes the instance itself, not any individual user:
+// "did" is a server-level did:web for the bare instance domain, distinct
+// from every per-user did:web:username.domain identity, and
+// "availableUserDomains" advertises the suffix those per-user handles are
+// built from.
+func (s *Service) DescribeServer(w http.ResponseWriter, r *http.Request) {
+	domain := domainFromURL(s.cfg.InstanceDomain)
+	writeJSON(w, 200, map[string]any{
+		"did":                  "did:web:" + domain,
+		"availableUserDomains": []string{"." + domain},
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

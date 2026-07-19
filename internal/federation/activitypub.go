@@ -509,7 +509,13 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		note["inReplyTo"] = inReplyTo
 	}
 	if contentWarning != "" {
+		// AGORA-224: Mastodon (and most other AP software) only treats a
+		// post as content-warned if "sensitive" is true — "summary" alone
+		// is not enough. Without this, the post shows up on the fediverse
+		// with its content fully visible and no warning at all, silently
+		// dropping the author's own trigger warning.
 		note["summary"] = contentWarning
+		note["sensitive"] = true
 	}
 	// AGORA-152: attach images so they render on Mastodon etc., not just as a
 	// caption with no photo. Queried here (rather than threaded through every

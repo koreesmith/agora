@@ -73,21 +73,22 @@ func (s *Service) commitAndPersist(
 // created (AGORA-189), so a freshly-created repo isn't empty of even its own
 // profile record.
 //
-// Image blobs (avatar) are deferred to AGORA-194 — this only syncs text
-// fields for now.
+// Avatar/banner blobs (AGORA-233) are read from the same local uploads
+// buildImageEmbed already knows how to turn into blobs — this just points
+// that at users.avatar_url/cover_url instead of a post's images.
 func (s *Service) SyncProfile(userID string) {
 	if !s.atprotoEnabled() {
 		return
 	}
 	ctx := context.Background()
 
-	var username, displayName, bio, did, storedPriv, repoHead, repoRev string
+	var username, displayName, bio, avatarURL, coverURL, did, storedPriv, repoHead, repoRev string
 	var isRemote, profilePrivate, atprotoEnabled bool
 	err := s.db.QueryRowContext(ctx, `
-		SELECT username, display_name, bio, atproto_did, atproto_private_key,
+		SELECT username, display_name, bio, avatar_url, cover_url, atproto_did, atproto_private_key,
 		       atproto_repo_head, atproto_repo_rev, is_remote, profile_private, atproto_enabled
 		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
-	`, userID).Scan(&username, &displayName, &bio, &did, &storedPriv,
+	`, userID).Scan(&username, &displayName, &bio, &avatarURL, &coverURL, &did, &storedPriv,
 		&repoHead, &repoRev, &isRemote, &profilePrivate, &atprotoEnabled)
 	if err != nil || isRemote || profilePrivate || !atprotoEnabled {
 		return
@@ -107,6 +108,20 @@ func (s *Service) SyncProfile(userID string) {
 	}
 	if bio != "" {
 		rec.Description = &bio
+	}
+	if avatarURL != "" {
+		if blob, err := s.uploadImageBlob(ctx, bs, avatarURL); err != nil {
+			log.Printf("atproto: could not upload avatar blob for user %s: %v", userID, err)
+		} else {
+			rec.Avatar = blob
+		}
+	}
+	if coverURL != "" {
+		if blob, err := s.uploadImageBlob(ctx, bs, coverURL); err != nil {
+			log.Printf("atproto: could not upload cover blob for user %s: %v", userID, err)
+		} else {
+			rec.Banner = blob
+		}
 	}
 	// AT Proto profile records use a fixed singleton rkey ("self"), unlike
 	// TID-keyed collections (posts, likes, ...) — but neither PutRecord nor

@@ -74,14 +74,43 @@ func (s *Service) postImageURLs(ctx context.Context, postID string) []string {
 	return nil
 }
 
-// buildImageEmbed uploads each image as a content-addressed blob into this
-// user's own block store (AGORA-194) — pgBlockstore's flat (user_id, cid,
-// data) shape holds a raw blob exactly as easily as an MST/commit node, so
-// no new storage plumbing is needed beyond this function. Truncates to AT
-// Proto's 4-image embed cap rather than erroring the whole post federation
-// attempt if Agora's own post_photos limit (currently higher) was used.
-// Alt text is left blank — Agora doesn't capture per-image alt text today;
-// a real follow-up if that ever changes, not something to block this on.
+// uploadImageBlob reads an already-uploaded local image and stores it as a
+// content-addressed blob in bs, returning the LexBlob ref a record embeds it
+// with. Shared by buildImageEmbed (post images, AGORA-194) and SyncProfile
+// (avatar/banner, AGORA-233) — the upload step itself doesn't care what kind
+// of image it is.
+func (s *Service) uploadImageBlob(ctx context.Context, bs *pgBlockstore, url string) (*lexutil.LexBlob, error) {
+	data, mimeType, err := readLocalImage(s.cfg.UploadDir, url)
+	if err != nil {
+		return nil, err
+	}
+	c, err := blobCID(data)
+	if err != nil {
+		return nil, err
+	}
+	blk, err := blocks.NewBlockWithCid(data, c)
+	if err != nil {
+		return nil, err
+	}
+	if err := bs.Put(ctx, blk); err != nil {
+		return nil, err
+	}
+	return &lexutil.LexBlob{
+		Ref:      lexutil.LexLink(c),
+		MimeType: mimeType,
+		Size:     int64(len(data)),
+	}, nil
+}
+
+// buildImageEmbed uploads each of a post's images as a content-addressed
+// blob into this user's own block store (AGORA-194) — pgBlockstore's flat
+// (user_id, cid, data) shape holds a raw blob exactly as easily as an
+// MST/commit node, so no new storage plumbing is needed beyond
+// uploadImageBlob. Truncates to AT Proto's 4-image embed cap rather than
+// erroring the whole post federation attempt if Agora's own post_photos
+// limit (currently higher) was used. Alt text is left blank — Agora doesn't
+// capture per-image alt text today; a real follow-up if that ever changes,
+// not something to block this on.
 func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID string) *bsky.FeedPost_Embed {
 	urls := s.postImageURLs(ctx, postID)
 	if len(urls) == 0 {
@@ -93,32 +122,12 @@ func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID 
 
 	var images []*bsky.EmbedImages_Image
 	for _, url := range urls {
-		data, mimeType, err := readLocalImage(s.cfg.UploadDir, url)
+		blob, err := s.uploadImageBlob(ctx, bs, url)
 		if err != nil {
-			log.Printf("atproto: could not read image %s for blob upload: %v", url, err)
+			log.Printf("atproto: could not upload image blob for %s: %v", url, err)
 			continue
 		}
-		c, err := blobCID(data)
-		if err != nil {
-			log.Printf("atproto: could not compute blob CID for %s: %v", url, err)
-			continue
-		}
-		blk, err := blocks.NewBlockWithCid(data, c)
-		if err != nil {
-			log.Printf("atproto: could not construct blob block for %s: %v", url, err)
-			continue
-		}
-		if err := bs.Put(ctx, blk); err != nil {
-			log.Printf("atproto: could not store blob for %s: %v", url, err)
-			continue
-		}
-		images = append(images, &bsky.EmbedImages_Image{
-			Image: &lexutil.LexBlob{
-				Ref:      lexutil.LexLink(c),
-				MimeType: mimeType,
-				Size:     int64(len(data)),
-			},
-		})
+		images = append(images, &bsky.EmbedImages_Image{Image: blob})
 	}
 	if len(images) == 0 {
 		return nil

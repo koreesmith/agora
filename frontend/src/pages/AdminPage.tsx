@@ -2,11 +2,11 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -29,6 +29,7 @@ export default function AdminPage() {
   const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' || tab==='bluesky' })
   const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
+  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='relays' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
@@ -76,6 +77,7 @@ export default function AdminPage() {
     { id:'fediverse',   label:'Fediverse',   icon: Globe },
     { id:'bluesky',     label:'Bluesky',     icon: Cloud },
     { id:'federation',  label:'Federation',  icon: Link2 },
+    { id:'relays',      label:'Relays',      icon: Radio },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
     { id:'pages',       label:'Pages',       icon: Star },
@@ -550,6 +552,13 @@ export default function AdminPage() {
         />
       )}
 
+      {tab==='relays' && (
+        <RelaysPanel
+          relays={relaysData?.relays||[]}
+          onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
+        />
+      )}
+
       {tab==='invites' && (
         <div className="space-y-3">
           <button onClick={()=>createInvite.mutate()} disabled={createInvite.isPending} className="btn-primary">Generate invite code</button>
@@ -920,6 +929,111 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
             {inst.status === 'active'
               ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Block</button>
               : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline flex-shrink-0">Unblock</button>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Relays Panel (AGORA-223) ──────────────────────────────────────────────────
+//
+// Mirrors Mastodon's own admin Relays screen: a relay is entered by its
+// inbox URL directly (not resolved/validated client-side — the backend
+// sends the actual subscribe Follow and reports back via status), shown as
+// a list with its current status and Enable/Disable/Delete actions.
+
+function RelaysPanel({ relays, onChanged }: {
+  relays: any[], onChanged: () => void
+}) {
+  const [inboxUrl, setInboxUrl] = useState('')
+  const [addMsg, setAddMsg] = useState('')
+  const [addErr, setAddErr] = useState('')
+
+  const add = useMutation({
+    mutationFn: () => adminApi.addRelay(inboxUrl.trim()),
+    onSuccess: () => {
+      setAddMsg('✓ Relay follow requested')
+      setInboxUrl('')
+      setAddErr('')
+      onChanged()
+      setTimeout(() => setAddMsg(''), 4000)
+    },
+    onError: (e: any) => setAddErr(e.response?.data?.error || 'Could not add relay'),
+  })
+  const enable  = useMutation({ mutationFn: (id: string) => adminApi.enableRelay(id),  onSuccess: onChanged })
+  const disable = useMutation({ mutationFn: (id: string) => adminApi.disableRelay(id), onSuccess: onChanged })
+  const remove  = useMutation({ mutationFn: (id: string) => adminApi.deleteRelay(id),  onSuccess: onChanged })
+
+  const statusLabel: Record<string, string> = {
+    enabled: '✓ Enabled', pending: '⏳ Pending', disabled: 'Disabled', rejected: 'Rejected',
+  }
+  const statusClass: Record<string, string> = {
+    enabled: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400',
+    pending: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400',
+    disabled: 'bg-agora-100 dark:bg-agora-700 text-agora-500',
+    rejected: 'bg-red-100 dark:bg-red-900/30 text-red-600',
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Add relay */}
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Add new relay</h3>
+        <p className="text-sm text-agora-500">
+          A federation relay is an intermediary server that exchanges large volumes of public posts between
+          servers that subscribe and publish to it. It can help small and medium servers discover content from
+          the fediverse, which would otherwise require local users manually following other people on remote
+          servers.
+        </p>
+        {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
+        {addErr && <p className="text-sm text-red-500">{addErr}</p>}
+        <div className="flex gap-2">
+          <input
+            className="input flex-1 text-sm"
+            autoComplete="off"
+            placeholder="https://relay.example.com/inbox"
+            value={inboxUrl}
+            onChange={e => { setInboxUrl(e.target.value); setAddErr('') }}
+            onKeyDown={e => e.key === 'Enter' && inboxUrl.trim() && add.mutate()}
+          />
+          <button
+            onClick={() => add.mutate()}
+            disabled={!inboxUrl.trim() || add.isPending}
+            className="btn-primary text-sm"
+          >
+            {add.isPending ? 'Requesting…' : 'Add new relay'}
+          </button>
+        </div>
+      </div>
+
+      {/* Relay list */}
+      <div className="space-y-2">
+        {relays.length === 0 && (
+          <div className="card p-8 text-center text-agora-400 space-y-1">
+            <p className="font-medium">No relays yet</p>
+            <p className="text-sm">Add a relay above to start discovering content from across the fediverse.</p>
+          </div>
+        )}
+        {relays.map((relay: any) => (
+          <div key={relay.id} className={`card p-3 flex items-center gap-3 ${relay.status !== 'enabled' ? 'opacity-70' : ''}`}>
+            <div className="flex-1 min-w-0">
+              <p className="font-mono text-sm truncate">{relay.inbox_url}</p>
+              <span className={`inline-block mt-1 px-1.5 py-0.5 rounded text-xs ${statusClass[relay.status] || ''}`}>
+                {statusLabel[relay.status] || relay.status}
+              </span>
+            </div>
+            <div className="flex gap-3 flex-shrink-0">
+              {relay.status === 'enabled'
+                ? <button onClick={() => disable.mutate(relay.id)} className="text-xs text-agora-500 hover:underline">Disable</button>
+                : <button onClick={() => enable.mutate(relay.id)} className="text-xs text-green-600 hover:underline">Enable</button>}
+              <button
+                onClick={() => { if (confirm(`Remove relay ${relay.inbox_url}?`)) remove.mutate(relay.id) }}
+                className="text-xs text-red-500 hover:underline"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         ))}
       </div>

@@ -252,6 +252,12 @@ export const adminApi = {
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
+  // Fediverse relays (AGORA-223)
+  listRelays:   ()               => api.get('/admin/relays'),
+  addRelay:     (inboxUrl: string) => api.post('/admin/relays', { inbox_url: inboxUrl }),
+  enableRelay:  (id: string)     => api.post(`/admin/relays/${id}/enable`),
+  disableRelay: (id: string)     => api.post(`/admin/relays/${id}/disable`),
+  deleteRelay:  (id: string)     => api.delete(`/admin/relays/${id}`),
 }
 
 

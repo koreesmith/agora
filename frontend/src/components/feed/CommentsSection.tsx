@@ -120,7 +120,7 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
   // URLs. No nested capturing groups within any alternative — String.split
   // splices every capture group's result into the output, so an inner group
   // here would corrupt the parts array.
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+)/g)
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+)/g)
   return parts.map((part, i) => {
     // Fediverse mention (@handle@instance.tld) — links to the same
     // synthetic-username profile route already used everywhere else a
@@ -134,6 +134,12 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     // AGORA-89: +group-slug links to group page
     if (/^\+[a-zA-Z0-9_-]+$/.test(part)) {
       return <Link key={i} to={`/groups/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
+    // AGORA-217: #hashtag jumps into the unified search, posts tab, pre-filled
+    // with the tag — the same bare-"#tag" query SearchPage's own posts query
+    // already knows how to route through post_hashtags (AGORA-214).
+    if (/^#[a-zA-Z0-9_]+$/.test(part)) {
+      return <Link key={i} to={`/search?tab=posts&q=${encodeURIComponent(part)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^https?:\/\//i.test(part)) {
       const url = part.replace(/[.,!?)]+$/, '')

@@ -54,6 +54,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/xrpc/com.atproto.sync.getRepo", s.GetRepo)
 	r.Get("/xrpc/com.atproto.sync.getLatestCommit", s.GetLatestCommit)
 	r.Get("/xrpc/com.atproto.sync.getBlocks", s.GetBlocks)
+	// AGORA-232: how a relay learns which DIDs live on this (multi-tenant)
+	// host at all, before it has any reason to call the endpoints above.
+	r.Get("/xrpc/com.atproto.sync.listRepos", s.ListRepos)
 }
 
 // RegisterAuthedRoutes wires the endpoints only ever called by Agora's own

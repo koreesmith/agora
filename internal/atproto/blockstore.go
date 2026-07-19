@@ -64,3 +64,29 @@ func (bs *pgBlockstore) Put(ctx context.Context, b blocks.Block) error {
 	`, bs.userID, b.Cid().String(), b.RawData())
 	return err
 }
+
+// AllBlocks returns every block ever stored for this user, keyed by CID
+// string — the source for a full repo export (GetRepo, AGORA-231). Nothing
+// here is ever deleted (Put is insert-only, content-addressed), so this is
+// always a superset of what's reachable from the current head; a relay
+// ignores anything unreachable from the roots it was given, so returning a
+// few orphaned MST nodes from past edits is harmless, just not maximally
+// pruned.
+func (bs *pgBlockstore) AllBlocks(ctx context.Context) (map[string][]byte, error) {
+	rows, err := bs.db.QueryContext(ctx, `SELECT cid, data FROM atproto_blocks WHERE user_id = $1`, bs.userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string][]byte)
+	for rows.Next() {
+		var cidStr string
+		var data []byte
+		if err := rows.Scan(&cidStr, &data); err != nil {
+			return nil, err
+		}
+		out[cidStr] = data
+	}
+	return out, rows.Err()
+}

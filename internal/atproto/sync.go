@@ -176,3 +176,36 @@ func (s *Service) ListRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+
+// GetBlob serves GET /xrpc/com.atproto.sync.getBlob (AGORA-235) — fetches a
+// single blob's raw bytes by (did, cid), e.g. for Bluesky's image CDN to
+// fetch and cache an avatar/banner (AGORA-233) or post image (AGORA-194)
+// the first time it's requested. Without this, a blob CID referenced from
+// a record points at bytes no consumer can actually retrieve, even once
+// the record itself indexes correctly. Content-Type is sniffed rather than
+// stored, mirroring readLocalImage's same approach for local files —
+// pgBlockstore only ever holds raw bytes, no separate mimetype column.
+func (s *Service) GetBlob(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.eligibleUserByDID(r.URL.Query().Get("did"))
+	if !ok {
+		writeError(w, 404, "not found")
+		return
+	}
+	c, err := cid.Decode(r.URL.Query().Get("cid"))
+	if err != nil {
+		writeError(w, 400, "invalid cid")
+		return
+	}
+
+	bs := &pgBlockstore{db: s.db, userID: u.ID}
+	blk, err := bs.Get(r.Context(), c)
+	if err != nil {
+		writeError(w, 404, "blob not found")
+		return
+	}
+
+	data := blk.RawData()
+	w.Header().Set("Content-Type", http.DetectContentType(data))
+	w.WriteHeader(200)
+	w.Write(data)
+}

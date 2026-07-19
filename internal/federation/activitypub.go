@@ -851,7 +851,17 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			s.handleInboundUndoBlock(verifiedActor, inner.Object)
 		}
 	case "Create":
-		s.handleInboundCreate(verifiedActor, a.Object)
+		// AGORA-222: a Create signed by a relay this instance is subscribed
+		// to is forwarded on behalf of some other, unrelated instance's
+		// author — handleInboundCreate's normal attributedTo==verifiedActor
+		// check would (correctly, for every other sender) reject that
+		// outright, so relay-sourced Creates get their own ingestion path
+		// instead of weakening that check for everyone.
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+			s.ingestRelayForwardedCreate(a.Object)
+		} else {
+			s.handleInboundCreate(verifiedActor, a.Object)
+		}
 	case "Update":
 		s.handleInboundUpdate(verifiedActor, a.Object)
 	case "Delete":
@@ -859,7 +869,16 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	case "Like":
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
-		s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+		// AGORA-222: mirrors the relay check on Create above —
+		// handleInboundAnnounce only ever resolves an Announce's object
+		// against one of Agora's *own* posts (resolveFederatableTarget),
+		// which a relay-forwarded Announce (pointing at some other
+		// instance's post entirely) can never satisfy.
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+			s.ingestRelayForwardedAnnounce(a.Object)
+		} else {
+			s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+		}
 	case "Block":
 		s.handleInboundBlock(verifiedActor, a.Object)
 	case "Accept":

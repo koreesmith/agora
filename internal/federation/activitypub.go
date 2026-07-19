@@ -500,12 +500,18 @@ func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt t
 	objID := actor + "/posts/" + postID
 	to := note["to"]
 	cc := note["cc"]
+	updated := time.Now().UTC().Format(time.RFC3339)
+	// AGORA-229: Mastodon's receiving side (ProcessStatusUpdateService) only
+	// applies an Update to a Note if the object itself carries a present
+	// "updated" timestamp — without it the whole activity is silently
+	// no-op'd on arrival, even though delivery succeeded.
+	note["updated"] = updated
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
 		"id":        fmt.Sprintf("%s/updates/%d", objID, time.Now().UnixNano()),
 		"type":      "Update",
 		"actor":     actor,
-		"published": time.Now().UTC().Format(time.RFC3339),
+		"published": updated,
 		"to":        to,
 		"cc":        cc,
 		"object":    note,

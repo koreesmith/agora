@@ -55,6 +55,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	// AGORA-215: fuzzy, network-wide account search — distinct from lookup's
 	// exact handle/DID resolve.
 	r.Get("/atproto/search/actors", s.SearchBlueskyActors)
+	// AGORA-216: read-only, on-demand network-wide post/hashtag search —
+	// never ingests into local storage the way ingestAuthorFeed does.
+	r.Get("/atproto/search/posts", s.SearchBlueskyPosts)
 	r.Post("/atproto/follow", s.FollowBlueskyAccount)
 	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
 	r.Get("/atproto/following", s.ListBlueskyFollowing)

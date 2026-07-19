@@ -49,6 +49,11 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// crawl request is rejected with "server is not a PDS", regardless of how
 	// correct each user's own did:web documents are.
 	r.Get("/xrpc/com.atproto.server.describeServer", s.DescribeServer)
+	// AGORA-231: the sync read surface a relay needs to backfill a repo's
+	// pre-existing history, not just tail new commits off subscribeRepos.
+	r.Get("/xrpc/com.atproto.sync.getRepo", s.GetRepo)
+	r.Get("/xrpc/com.atproto.sync.getLatestCommit", s.GetLatestCommit)
+	r.Get("/xrpc/com.atproto.sync.getBlocks", s.GetBlocks)
 }
 
 // RegisterAuthedRoutes wires the endpoints only ever called by Agora's own
@@ -130,6 +135,28 @@ func (s *Service) eligibleUser(username string) (*eligibleUser, bool) {
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
 		  AND atproto_enabled = true AND deletion_scheduled_at IS NULL
 	`, username).Scan(&u.ID, &u.Username, &u.AtprotoDID, &u.AtprotoPriv)
+	if err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// eligibleUserByDID is eligibleUser's counterpart for the sync read endpoints
+// (AGORA-231) — a relay's getRepo/getLatestCommit/getBlocks requests identify
+// the repo by "did" query param, not by subdomain, so the lookup is keyed on
+// the already-persisted atproto_did column instead of re-deriving a username
+// from a Host header.
+func (s *Service) eligibleUserByDID(did string) (*eligibleUser, bool) {
+	if !s.atprotoEnabled() || did == "" {
+		return nil, false
+	}
+	var u eligibleUser
+	err := s.db.QueryRow(`
+		SELECT id, username, atproto_did, atproto_private_key
+		FROM users
+		WHERE atproto_did = $1 AND is_remote = false AND profile_private = false
+		  AND atproto_enabled = true AND deletion_scheduled_at IS NULL
+	`, did).Scan(&u.ID, &u.Username, &u.AtprotoDID, &u.AtprotoPriv)
 	if err != nil {
 		return nil, false
 	}

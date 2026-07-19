@@ -57,6 +57,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// AGORA-232: how a relay learns which DIDs live on this (multi-tenant)
 	// host at all, before it has any reason to call the endpoints above.
 	r.Get("/xrpc/com.atproto.sync.listRepos", s.ListRepos)
+	// AGORA-235: fetches a blob's actual bytes by CID — the piece a client
+	// needs to render any image a record only ever references by CID
+	// (avatar/banner, post images).
+	r.Get("/xrpc/com.atproto.sync.getBlob", s.GetBlob)
 }
 
 // RegisterAuthedRoutes wires the endpoints only ever called by Agora's own

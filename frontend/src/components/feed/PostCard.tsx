@@ -373,6 +373,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReport, setShowReport] = useState(false)
   const [showShare, setShowShare] = useState(false)
   const [shareContent, setShareContent] = useState('')
+  const [shareVisibility, setShareVisibility] = useState('friends')
+  const [shareGroupId, setShareGroupId] = useState('')
+  const [shareTwEnabled, setShareTwEnabled] = useState(false)
+  const [shareTwLabel, setShareTwLabel] = useState('')
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
@@ -392,7 +396,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const { data: groupsData } = useQuery({
     queryKey: ['friend-lists'],
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
-    enabled: editing && !post.group_id,
+    enabled: (editing && !post.group_id) || showShare,
   })
   const friendLists: any[] = groupsData?.groups || []
 
@@ -486,15 +490,29 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   })
 
   const repost = useMutation({
-    mutationFn: () => feedApi.repost(post.id, { content: shareContent, visibility: 'friends' }),
+    mutationFn: () => feedApi.repost(post.id, {
+      content: shareContent,
+      visibility: shareVisibility,
+      group_id: shareVisibility === 'group' ? shareGroupId : undefined,
+      content_warning: shareTwEnabled && shareTwLabel.trim() ? shareTwLabel.trim() : '',
+    }),
     onSuccess: () => {
-      setShowShare(false); setShareContent(''); invalidate()
+      setShowShare(false); setShareContent('')
+      setShareVisibility('friends'); setShareGroupId('')
+      setShareTwEnabled(false); setShareTwLabel('')
+      invalidate()
       // AGORA-71: brief confirmation flash
       setSharedConfirm(true)
       setTimeout(() => setSharedConfirm(false), 2500)
     },
     onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
   })
+
+  const closeShareModal = () => {
+    setShowShare(false); setShareContent('')
+    setShareVisibility('friends'); setShareGroupId('')
+    setShareTwEnabled(false); setShareTwLabel('')
+  }
 
   const pollVote = useMutation({
     mutationFn: (optionId: string | null) =>
@@ -1059,11 +1077,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
       {/* Share modal */}
       {showShare && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowShare(false)}>
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeShareModal}>
           <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between p-4 border-b border-agora-100 dark:border-agora-700">
               <h2 className="font-bold text-lg">Share post</h2>
-              <button onClick={() => setShowShare(false)} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
+              <button onClick={closeShareModal} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
             </div>
             <div className="p-4 space-y-3">
               {/* Author's comment */}
@@ -1075,6 +1093,23 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onChange={e => setShareContent(e.target.value)}
                 autoFocus
               />
+
+              {/* AGORA-225: trigger warning for the sharer's own commentary */}
+              {shareTwEnabled && (
+                <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
+                  <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />
+                  <input
+                    className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
+                    placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
+                    autoComplete="off"
+                    value={shareTwLabel}
+                    onChange={e => setShareTwLabel(e.target.value)}
+                    autoFocus
+                    maxLength={120}
+                  />
+                </div>
+              )}
+
               {/* Preview of the post being shared */}
               <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 bg-agora-50 dark:bg-agora-900 space-y-1.5">
                 <div className="flex items-center gap-2">
@@ -1089,15 +1124,42 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{post.content}</p>}
                 {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
               </div>
-              <p className="text-xs text-agora-400 dark:text-agora-500">
-                This will be shared with your friends.
-              </p>
+
+              {/* AGORA-226: audience selector for the sharer's own commentary,
+                  independent of the original post's own visibility. */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => setShareTwEnabled(v => { if (v) setShareTwLabel(''); return !v })}
+                  className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg border transition-colors ${
+                    shareTwEnabled
+                      ? 'bg-amber-100 dark:bg-amber-900/30 border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
+                      : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400 hover:text-agora-600'
+                  }`}
+                >
+                  <AlertTriangle size={13} /> TW
+                </button>
+                <select value={shareVisibility} onChange={e => setShareVisibility(e.target.value)}
+                  className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
+                  <option value="public">Public</option>
+                  <option value="friends">Friends</option>
+                  <option value="group">Friend List</option>
+                </select>
+                {shareVisibility === 'group' && (
+                  friendLists.length > 0
+                    ? <select value={shareGroupId} onChange={e => setShareGroupId(e.target.value)}
+                        className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
+                        <option value="">Select list…</option>
+                        {friendLists.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                      </select>
+                    : <span className="text-xs text-agora-400">No lists yet</span>
+                )}
+              </div>
             </div>
             <div className="flex justify-end gap-2 px-4 pb-4">
-              <button onClick={() => setShowShare(false)} className="btn-secondary">Cancel</button>
+              <button onClick={closeShareModal} className="btn-secondary">Cancel</button>
               <button
                 onClick={() => repost.mutate()}
-                disabled={repost.isPending}
+                disabled={repost.isPending || (shareVisibility === 'group' && !shareGroupId) || (shareTwEnabled && !shareTwLabel.trim())}
                 className="btn-primary flex items-center gap-1.5"
               >
                 <Repeat2 size={14} />

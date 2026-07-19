@@ -52,6 +52,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // same split federation.RegisterAuthedRoutes draws from federation.RegisterRoutes.
 func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Get("/atproto/lookup", s.ResolveBlueskyHandle)
+	// AGORA-215: fuzzy, network-wide account search — distinct from lookup's
+	// exact handle/DID resolve.
+	r.Get("/atproto/search/actors", s.SearchBlueskyActors)
 	r.Post("/atproto/follow", s.FollowBlueskyAccount)
 	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
 	r.Get("/atproto/following", s.ListBlueskyFollowing)

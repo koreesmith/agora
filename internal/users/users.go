@@ -337,6 +337,12 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
 		})
 	}
+	// AGORA-233: a photo-only change never touches display_name/bio, so
+	// without this the AT Proto profile record would silently keep
+	// pointing at a stale (or no) avatar until the next text-field edit.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
+	}
 	writeJSON(w, 200, map[string]string{"avatar_url": url})
 }
 
@@ -348,6 +354,11 @@ func (s *Service) UploadCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.Exec(`UPDATE users SET cover_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
+	// AGORA-233: same reasoning as UploadAvatar above — a cover-only change
+	// otherwise never reaches the AT Proto profile record either.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
+	}
 	writeJSON(w, 200, map[string]string{"cover_url": url})
 }
 

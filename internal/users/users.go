@@ -89,6 +89,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		IsRemote       bool    `json:"is_remote"`
 		RemoteInstance string  `json:"remote_instance,omitempty"`
 		APActorURL     string  `json:"ap_actor_url,omitempty"`
+		AtprotoRemoteDID string `json:"-"`
 		CreatedAt      string  `json:"created_at"`
 		FriendStatus   string  `json:"friend_status"`
 		FriendCount    int     `json:"friend_count"`
@@ -106,12 +107,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
 		       location, website, profile_private, hide_timeline, is_remote, remote_instance, ap_actor_url,
-		       created_at
+		       atproto_remote_did, created_at
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
-		&u.CreatedAt,
+		&u.AtprotoRemoteDID, &u.CreatedAt,
 	)
 	if err != nil {
 		writeError(w, 404, "user not found")
@@ -185,6 +186,21 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 			var notify bool
 			if err := s.db.QueryRow(`SELECT id, notify FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2 AND accepted = true`,
 				viewerID, u.APActorURL).Scan(&followID, &notify); err == nil {
+				u.FollowID = followID
+				u.Following = true
+				u.FollowNotify = notify
+			}
+		}
+
+		// AGORA-234: native Bluesky follow/notify state, same shape as the
+		// fediverse block above — a native Bluesky remote never has
+		// ap_actor_url set, so this is keyed off at_following's remote_did
+		// instead.
+		if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" {
+			var followID string
+			var notify bool
+			if err := s.db.QueryRow(`SELECT id, notify FROM at_following WHERE local_user_id = $1 AND remote_did = $2`,
+				viewerID, u.AtprotoRemoteDID).Scan(&followID, &notify); err == nil {
 				u.FollowID = followID
 				u.Following = true
 				u.FollowNotify = notify

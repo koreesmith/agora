@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationApi } from '../api'
+import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationApi, atprotoApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
@@ -102,6 +102,24 @@ export default function ProfilePage() {
     onSuccess: inv,
   })
 
+  // AGORA-234: native Bluesky accounts have no friending concept either —
+  // follow/notify (at_following) is the equivalent, same as the fediverse
+  // block above but against the AT Proto endpoints. profile.username is the
+  // account's Bluesky handle for these rows (getOrCreateRemoteATUser stores
+  // the handle as the username), so it doubles as the "actor" to follow.
+  const followBsky = useMutation({
+    mutationFn: () => atprotoApi.followBlueskyAccount(profile.username),
+    onSuccess: inv,
+  })
+  const unfollowBsky = useMutation({
+    mutationFn: () => atprotoApi.unfollowBlueskyAccount(profile.follow_id),
+    onSuccess: inv,
+  })
+  const toggleBskyNotify = useMutation({
+    mutationFn: () => atprotoApi.toggleFollowNotify(profile.follow_id, !profile.follow_notify),
+    onSuccess: inv,
+  })
+
   const wallApprove = useMutation({
     mutationFn: (id: string) => feedApi.wallApprove(id),
     onSuccess: () => { refetchWall(); refetchQueue() },
@@ -144,6 +162,7 @@ export default function ProfilePage() {
 
   const status = profile.friend_status
   const isFediverse = !!profile.ap_actor_url
+  const isBluesky = profile.remote_instance === 'bsky.app'
   const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
 
   const albums: any[] = albumsData?.albums ?? []
@@ -214,7 +233,37 @@ export default function ProfilePage() {
                   </button>
                 </div>
               )}
-              {me && !isSelf && !isFediverse && !status && (
+              {me && !isSelf && isBluesky && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { if (profile.following) { if (confirm(`Unfollow ${profile.display_name}?`)) unfollowBsky.mutate() } else followBsky.mutate() }}
+                    disabled={followBsky.isPending || unfollowBsky.isPending}
+                    className={profile.following ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
+                  >
+                    {profile.following ? <><UserCheck size={16}/> Following</> : <><UserPlus size={16}/> Follow</>}
+                  </button>
+                  {profile.following && (
+                    <button
+                      onClick={() => toggleBskyNotify.mutate()}
+                      disabled={toggleBskyNotify.isPending}
+                      title={profile.follow_notify ? 'Turn off notifications for this account' : 'Notify me when they post'}
+                      className={`btn-secondary text-sm flex items-center gap-1 ${profile.follow_notify ? 'text-agora-700 dark:text-agora-200 border-agora-400' : 'text-agora-400'}`}
+                    >
+                      {profile.follow_notify ? <><BellOff size={15}/> Notifying</> : <><Bell size={15}/> Notify me</>}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { if (confirm(profile.is_blocked ? `Unblock ${profile.display_name}?` : `Block ${profile.display_name}? They won't be able to see your profile or contact you.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-agora-400"
+                    title={profile.is_blocked ? 'Unblock' : 'Block'}
+                  >
+                    {profile.is_blocked ? <ShieldOff size={15}/> : <Shield size={15}/>}
+                    {profile.is_blocked ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
+              )}
+              {me && !isSelf && !isFediverse && !isBluesky && !status && (
                 <div className="flex gap-2">
                   <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                     <UserPlus size={16}/> Add friend

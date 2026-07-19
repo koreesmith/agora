@@ -1811,8 +1811,10 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 	repostOfID := chi.URLParam(r, "id")
 
 	var req struct {
-		Content    string `json:"content"`
-		Visibility string `json:"visibility"`
+		Content        string `json:"content"`
+		Visibility     string `json:"visibility"`
+		GroupID        string `json:"group_id"`
+		ContentWarning string `json:"content_warning"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Visibility == "" {
@@ -1840,11 +1842,19 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "group posts cannot be shared outside the group"); return
 	}
 
+	// AGORA-226: a share's own audience is independent of the original
+	// post's — the sharer picks who sees *their* commentary, mirroring
+	// CreatePost's own visibility/group_id handling.
+	var friendGroupID *string
+	if req.GroupID != "" && req.Visibility == "group" {
+		friendGroupID = &req.GroupID
+	}
+
 	var id string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, repost_of_id)
-		VALUES ($1, $2, $3, $4) RETURNING id
-	`, userID, req.Content, req.Visibility, repostOfID).Scan(&id)
+		INSERT INTO posts (author_id, content, visibility, group_id, content_warning, repost_of_id)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+	`, userID, req.Content, req.Visibility, friendGroupID, req.ContentWarning, repostOfID).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not share post")
 		return

@@ -997,4 +997,18 @@ var schema = []string{
 		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_instance_ap_delivery_next ON instance_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
+	// AGORA-213: a hashtag is a first-class queryable concept, not a content
+	// substring — one row per (post, tag), tag always lowercased so lookup
+	// is a plain equality match rather than a case-insensitive scan.
+	// Extracted at creation/edit time for local posts, or from the source
+	// Note "tag" array / AT Proto "facets" data directly at ingestion time
+	// for remote posts — never re-derived from rendered HTML, which would
+	// lose or corrupt tags a renderer reformatted.
+	`CREATE TABLE IF NOT EXISTS post_hashtags (
+		post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		tag     TEXT NOT NULL,
+		PRIMARY KEY (post_id, tag)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(tag)`,
 }

@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/bluesky-social/indigo/api/bsky"
@@ -70,6 +71,37 @@ func (s *Service) storeInboundImages(postID string, imageURLs []string) {
 	}
 }
 
+// storeHashtagsFromFacets (AGORA-213) mirrors federation's storeHashtags/
+// hashtagsFromAPTags pair, but reads an AT Proto record's own "facets"
+// array directly — a #tag facet's Tag field is already bare (no leading #
+// per the app.bsky.richtext.facet#tag lexicon), so this only needs to
+// lowercase and dedupe, not strip a prefix the way the Fediverse Hashtag
+// tag-name parsing does.
+func (s *Service) storeHashtagsFromFacets(postID string, facets []*bsky.RichtextFacet) {
+	seen := map[string]bool{}
+	var tags []string
+	for _, f := range facets {
+		if f == nil {
+			continue
+		}
+		for _, feat := range f.Features {
+			if feat == nil || feat.RichtextFacet_Tag == nil || feat.RichtextFacet_Tag.Tag == "" {
+				continue
+			}
+			tag := strings.ToLower(feat.RichtextFacet_Tag.Tag)
+			if seen[tag] {
+				continue
+			}
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+	}
+	s.db.Exec(`DELETE FROM post_hashtags WHERE post_id = $1`, postID)
+	for _, tag := range tags {
+		s.db.Exec(`INSERT INTO post_hashtags (post_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, postID, tag)
+	}
+}
+
 // ingestAuthorFeed fetches a followed DID's recent posts from the AppView
 // and ingests any not already seen. Idempotent via the same
 // (remote_post_id, remote_instance) unique index AGORA-146's fediverse
@@ -134,6 +166,7 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			}
 		}
 		s.storeInboundImages(postID, imageURLs)
+		s.storeHashtagsFromFacets(postID, rec.Facets) // AGORA-213
 
 		// AGORA-198: notify local users who actively follow this DID, have
 		// the global atproto_notifications_enabled toggle on, AND have

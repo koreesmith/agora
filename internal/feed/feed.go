@@ -33,6 +33,39 @@ var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 // "handle" is itself a dotted AT Proto handle, e.g. @jane.bsky.social@bsky.brid.gy.
 var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
+// hashtagRe (AGORA-213) matches a #tag token in local post/comment content.
+var hashtagRe = regexp.MustCompile(`#([a-zA-Z0-9_]+)`)
+
+// extractHashtags parses distinct, lowercased #tag tokens out of local post
+// content — the plain-text-parsing counterpart to how a remote Note's own
+// "tag" array (federation package) or an AT Proto record's own "facets"
+// array (atproto package) are read directly instead, since neither of those
+// has plain #hashtag text to parse the same way a local post does.
+func extractHashtags(content string) []string {
+	matches := hashtagRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	var tags []string
+	for _, m := range matches {
+		tag := strings.ToLower(m[1])
+		if seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+// storeHashtags replaces postID's stored hashtag set — same replace-not-
+// merge convention EditPost's image handling already uses, since a post's
+// tag set can shrink or grow between edits.
+func (s *Service) storeHashtags(postID string, tags []string) {
+	s.db.Exec(`DELETE FROM post_hashtags WHERE post_id = $1`, postID)
+	for _, tag := range tags {
+		s.db.Exec(`INSERT INTO post_hashtags (post_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, postID, tag)
+	}
+}
+
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
@@ -1029,6 +1062,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, i)
 		}
 	}
+
+	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
 
 	go s.notifyMentions(req.Content, userID, id)
 	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
@@ -2205,6 +2240,8 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
+
 	// Notify post author (if not self)
 	if postAuthorID != userID {
 		go s.notif.Create(postAuthorID, userID, "post_comment", postID, "")
@@ -2377,6 +2414,12 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AGORA-213: only re-extract when content actually changed — a visibility-
+	// or content-warning-only edit shouldn't touch the stored tag set.
+	if req.Content != nil {
+		s.storeHashtags(id, extractHashtags(*req.Content))
+	}
+
 	// AGORA-150: notify fediverse followers a federated post was edited
 	if s.fed != nil {
 		if pageID != nil {
@@ -2425,6 +2468,7 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET content = $1, edited_at = NOW() WHERE id = $2`, req.Content, commentID)
+	s.storeHashtags(commentID, extractHashtags(req.Content)) // AGORA-213
 
 	// AGORA-162: mirror EditPost's federation hook — a previously-federated
 	// reply must send an Update, not go stale on the remote side forever.

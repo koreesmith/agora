@@ -1183,6 +1183,47 @@ type apAttachment struct {
 	URL       string `json:"url"`
 }
 
+// apTagEntry (AGORA-213) is a Note's "tag" array element — shared shape for
+// both Mention and Hashtag entries (resolveFediverseMentions builds the
+// outbound Mention side of this same array; this is the inbound-parsing
+// counterpart, and only cares about Hashtag entries).
+type apTagEntry struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+// hashtagsFromAPTags extracts distinct, lowercased tag names from a Note's
+// own "tag" array — read directly from the source data (never re-parsed
+// from rendered HTML content, which a renderer may have reformatted or
+// dropped the leading # from).
+func hashtagsFromAPTags(entries []apTagEntry) []string {
+	seen := map[string]bool{}
+	var tags []string
+	for _, t := range entries {
+		if t.Type != "Hashtag" || t.Name == "" {
+			continue
+		}
+		tag := strings.ToLower(strings.TrimPrefix(t.Name, "#"))
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+// storeHashtags mirrors feed.Service's own helper of the same name —
+// replaces postID's stored hashtag set, the same replace-not-merge
+// convention this file already uses for a Note's attachments/poll options
+// on update.
+func (s *Service) storeHashtags(postID string, tags []string) {
+	s.db.Exec(`DELETE FROM post_hashtags WHERE post_id = $1`, postID)
+	for _, tag := range tags {
+		s.db.Exec(`INSERT INTO post_hashtags (post_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, postID, tag)
+	}
+}
+
 // matchAttachments sorts a Note's attachments into image URLs and (at most
 // one) video URL, reusing Agora's existing native video-post columns
 // (video_url/video_thumb_url) — only the first video is kept, mirroring how
@@ -1284,6 +1325,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		InReplyTo    string         `json:"inReplyTo"`
 		Summary      string         `json:"summary"` // AGORA-154: content-warning text, if any
 		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213: hashtags (mixed with Mention entries)
 		OneOf        []apPollOption `json:"oneOf"`
 		AnyOf        []apPollOption `json:"anyOf"`
 		EndTime      string         `json:"endTime"`
@@ -1317,7 +1359,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// practice (no real AP client posts a poll as a reply), so poll data
 	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll)
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag))
 		return
 	}
 
@@ -1354,6 +1396,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	}
 	s.storeInboundImages(commentID, imageURLs)
 	s.storeInboundVideo(commentID, videoURL)
+	s.storeHashtags(commentID, hashtagsFromAPTags(note.Tag)) // AGORA-213
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
@@ -1377,6 +1420,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 		Content      string         `json:"content"`
 		Summary      string         `json:"summary"`
 		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213
 		OneOf        []apPollOption `json:"oneOf"`
 		AnyOf        []apPollOption `json:"anyOf"`
 		EndTime      string         `json:"endTime"`
@@ -1421,6 +1465,8 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	// tallies change, so this is the mechanism that keeps an already-ingested
 	// poll's counts from going stale over its lifetime.
 	s.applyInboundPoll(postID, parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime))
+	// AGORA-213: same replace-not-merge treatment as attachments/poll above.
+	s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
 }
 
 // logUnmatchedAttachments logs the raw "attachment" JSON when an inbound
@@ -1487,7 +1533,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1519,6 +1565,7 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
 	s.applyInboundPoll(postID, poll) // AGORA-210
+	s.storeHashtags(postID, tags)    // AGORA-213
 
 	// AGORA-160/164/166: notify local users who actively follow this actor,
 	// have the global fediverse-notifications toggle on, AND have

@@ -171,6 +171,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 			}
 		}
 		s.storeInboundImages(commentID, imageURLs)
+		s.storeHashtagsFromFacets(commentID, rec.Facets) // AGORA-213
 
 		if s.notif != nil && parentAuthorID != "" && parentAuthorID != authorID {
 			s.notif.Create(parentAuthorID, authorID, "post_comment", localParentID, "")

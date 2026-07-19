@@ -303,6 +303,7 @@ type apRemoteNote struct {
 	Summary      string
 	InReplyTo    string
 	Attachment   []apAttachment
+	Tag          []apTagEntry // AGORA-213
 }
 
 // ingestRelayForwardedCreate handles a relay forwarding a full Create
@@ -316,6 +317,7 @@ func (s *Service) ingestRelayForwardedCreate(objectRaw json.RawMessage) {
 		Summary      string         `json:"summary"`
 		InReplyTo    string         `json:"inReplyTo"`
 		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -323,6 +325,7 @@ func (s *Service) ingestRelayForwardedCreate(objectRaw json.RawMessage) {
 	s.ingestRelaySourcedNote(&apRemoteNote{
 		ID: note.ID, AttributedTo: note.AttributedTo, Content: note.Content,
 		Summary: note.Summary, InReplyTo: note.InReplyTo, Attachment: note.Attachment,
+		Tag: note.Tag,
 	})
 }
 
@@ -368,7 +371,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	imageURLs, videoURL := matchAttachments(note.Attachment)
-	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL)
+	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag))
 }
 
 // fetchRemoteNoteSignedAsInstance dereferences a relay-announced post URL,
@@ -410,6 +413,7 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 		Summary      string         `json:"summary"`
 		InReplyTo    string         `json:"inReplyTo"`
 		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&note); err != nil {
 		return nil, err
@@ -420,6 +424,7 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 	return &apRemoteNote{
 		ID: note.ID, AttributedTo: note.AttributedTo, Content: note.Content,
 		Summary: note.Summary, InReplyTo: note.InReplyTo, Attachment: note.Attachment,
+		Tag: note.Tag,
 	}, nil
 }
 
@@ -451,7 +456,7 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.
-func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string) {
+func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string) {
 	if actorURL == "" || noteID == "" {
 		return
 	}
@@ -476,4 +481,5 @@ func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, i
 	}
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+	s.storeHashtags(postID, tags) // AGORA-213
 }

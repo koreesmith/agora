@@ -1,9 +1,11 @@
 package search
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -95,6 +97,56 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 
 // ── Post search ───────────────────────────────────────────────────────────────
 
+// hashtagFromQuery reports whether q names a single hashtag (a bare "#tag"
+// query, whitespace-trimmed) rather than a free-text keyword search — the
+// two are matched completely differently below (AGORA-214): a hashtag is a
+// case-insensitive exact match against the real post_hashtags table
+// (AGORA-213), never a content substring, since an ILIKE on "#games" would
+// both miss "#Games" and false-positive on a word like "average".
+func hashtagFromQuery(q string) (tag string, ok bool) {
+	q = strings.TrimSpace(q)
+	if !strings.HasPrefix(q, "#") {
+		return "", false
+	}
+	tag = strings.ToLower(strings.TrimPrefix(q, "#"))
+	return tag, tag != ""
+}
+
+// postVisibilityClause is the same "posts visible to the viewer" scoping
+// SearchPosts always enforced, factored out only because it's now shared
+// verbatim by both the hashtag and keyword query branches below — own
+// posts, public posts, friends-only posts from accepted friends, or group
+// posts for groups the viewer is in.
+const postVisibilityClause = `
+	(
+	  p.author_id = $1
+	  OR (p.visibility = 'public' AND p.community_group_id IS NULL)
+	  OR (
+	    p.visibility = 'friends'
+	    AND EXISTS(
+	      SELECT 1 FROM friendships f
+	      WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
+	          OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
+	      AND f.status = 'accepted'
+	    )
+	  )
+	  OR (
+	    p.community_group_id IS NOT NULL
+	    AND EXISTS(
+	      SELECT 1 FROM community_group_members cgm
+	      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
+	    )
+	  )
+	)`
+
+const postResultColumns = `
+	p.id, p.author_id, u.username, u.display_name, u.avatar_url,
+	p.content, p.image_url, p.visibility, p.created_at,
+	p.is_remote, p.remote_instance,
+	(SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+	(SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
+	EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked`
+
 func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
 	q := r.URL.Query().Get("q")
@@ -109,53 +161,37 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		offset = p * limit
 	}
 
-	// Only return posts visible to the viewer:
-	// - public posts from anyone
-	// - friends-only posts from accepted friends
-	// - own posts (all visibilities except private... actually include private for own)
-	// - never group posts from groups they're not in
-	rows, err := s.db.Query(`
-		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url, p.visibility, p.created_at,
-		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
-		       (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
-		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked
-		FROM posts p
-		JOIN users u ON u.id = p.author_id
-		WHERE p.parent_id IS NULL
-		  AND p.deleted_at IS NULL
-		  AND p.is_remote = false
-		  AND p.content ILIKE '%' || $2 || '%'
-		  AND (
-		    -- Own posts
-		    p.author_id = $1
-		    OR (
-		      -- Public posts
-		      p.visibility = 'public'
-		      AND p.community_group_id IS NULL
-		    )
-		    OR (
-		      -- Friends-only posts from accepted friends
-		      p.visibility = 'friends'
-		      AND EXISTS(
-		        SELECT 1 FROM friendships f
-		        WHERE ((f.requester_id = $1 AND f.addressee_id = p.author_id)
-		            OR (f.addressee_id = $1 AND f.requester_id = p.author_id))
-		        AND f.status = 'accepted'
-		      )
-		    )
-		    OR (
-		      -- Group posts for groups the viewer is in
-		      p.community_group_id IS NOT NULL
-		      AND EXISTS(
-		        SELECT 1 FROM community_group_members cgm
-		        WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
-		      )
-		    )
-		  )
-		ORDER BY p.created_at DESC
-		LIMIT $3 OFFSET $4
-	`, viewerID, q, limit, offset)
+	// AGORA-214: an already-ingested Fediverse/Bluesky post is public by
+	// construction (both ingestion paths only ever pull in public content),
+	// so dropping the old "is_remote = false" restriction here doesn't need
+	// any new visibility rule — the existing scoping already covers it.
+	var rows *sql.Rows
+	var err error
+	if tag, isHashtag := hashtagFromQuery(q); isHashtag {
+		rows, err = s.db.Query(`
+			SELECT `+postResultColumns+`
+			FROM posts p
+			JOIN users u ON u.id = p.author_id
+			JOIN post_hashtags ph ON ph.post_id = p.id AND ph.tag = $2
+			WHERE p.parent_id IS NULL
+			  AND p.deleted_at IS NULL
+			  AND `+postVisibilityClause+`
+			ORDER BY p.created_at DESC
+			LIMIT $3 OFFSET $4
+		`, viewerID, tag, limit, offset)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT `+postResultColumns+`
+			FROM posts p
+			JOIN users u ON u.id = p.author_id
+			WHERE p.parent_id IS NULL
+			  AND p.deleted_at IS NULL
+			  AND p.content ILIKE '%' || $2 || '%'
+			  AND `+postVisibilityClause+`
+			ORDER BY p.created_at DESC
+			LIMIT $3 OFFSET $4
+		`, viewerID, q, limit, offset)
+	}
 	if err != nil {
 		writeError(w, 500, "search error")
 		return
@@ -163,18 +199,20 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type PostResult struct {
-		ID           string `json:"id"`
-		AuthorID     string `json:"author_id"`
-		Username     string `json:"username"`
-		DisplayName  string `json:"display_name"`
-		AvatarURL    string `json:"avatar_url"`
-		Content      string `json:"content"`
-		ImageURL     string `json:"image_url"`
-		Visibility   string `json:"visibility"`
-		CreatedAt    string `json:"created_at"`
-		LikeCount    int    `json:"like_count"`
-		CommentCount int    `json:"comment_count"`
-		Liked        bool   `json:"liked"`
+		ID             string `json:"id"`
+		AuthorID       string `json:"author_id"`
+		Username       string `json:"username"`
+		DisplayName    string `json:"display_name"`
+		AvatarURL      string `json:"avatar_url"`
+		Content        string `json:"content"`
+		ImageURL       string `json:"image_url"`
+		Visibility     string `json:"visibility"`
+		CreatedAt      string `json:"created_at"`
+		IsRemote       bool   `json:"is_remote"`
+		RemoteInstance string `json:"remote_instance,omitempty"`
+		LikeCount      int    `json:"like_count"`
+		CommentCount   int    `json:"comment_count"`
+		Liked          bool   `json:"liked"`
 	}
 
 	var posts []PostResult
@@ -182,6 +220,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		var p PostResult
 		rows.Scan(&p.ID, &p.AuthorID, &p.Username, &p.DisplayName, &p.AvatarURL,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt,
+			&p.IsRemote, &p.RemoteInstance,
 			&p.LikeCount, &p.CommentCount, &p.Liked)
 		posts = append(posts, p)
 	}

@@ -293,6 +293,10 @@ export const atprotoApi = {
   // AGORA-196: reconcile a Bridgy-Fed-bridged Bluesky follow (an ap_following
   // row) into a native one.
   migrateBridgedFollow:   (apFollowingId: string) => api.post(`/atproto/bridged-follows/${apFollowingId}/migrate`),
+  // AGORA-215/216: fuzzy, network-wide search — distinct from lookup's exact
+  // handle/DID resolve, and from searchApi's own Agora+cached-remote search.
+  searchBlueskyActors: (q: string) => api.get('/atproto/search/actors', { params: { q } }),
+  searchBlueskyPosts:  (q: string) => api.get('/atproto/search/posts', { params: { q } }),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

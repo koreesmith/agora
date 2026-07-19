@@ -2016,6 +2016,17 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 	if s.atproto != nil {
 		go s.atproto.DeliverAnnounce(userID, id, repostOfID)
 	}
+	// AGORA-228: a bare reshare (no commentary) is correctly represented by
+	// the Announce above alone — standard AP boost semantics, and nothing
+	// else to say. But a *quoted* share carries the sharer's own new
+	// content, which an Announce never includes (it only ever references
+	// the original post's own URI) — that content needs its own Create
+	// broadcast, exactly like any other public post (CreatePost's own
+	// BroadcastPublicPost call), or it silently never reaches the fediverse
+	// at all despite the repost succeeding locally.
+	if req.Content != "" && s.fed != nil {
+		go s.fed.BroadcastPublicPost(userID, id)
+	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
 }

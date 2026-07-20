@@ -65,11 +65,24 @@ export default function ConnectionsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['fediverse-following'] }),
   })
   // AGORA-196: reconcile a Bridgy-Fed-bridged Bluesky follow to a native one.
+  // AGORA-237: per-row error state — several bridged follows can each be
+  // migrated independently, and without this a failure (bad handle resolve,
+  // blocked DID, transient error) surfaced no feedback at all, reading as
+  // "the button doesn't do anything."
+  const [migrateErrors, setMigrateErrors] = useState<Record<string, string>>({})
   const migrateBridged = useMutation({
     mutationFn: (id: string) => atprotoApi.migrateBridgedFollow(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      setMigrateErrors(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       qc.invalidateQueries({ queryKey: ['fediverse-following'] })
       qc.invalidateQueries({ queryKey: ['bluesky-following'] })
+    },
+    onError: (e: any, id) => {
+      setMigrateErrors(prev => ({ ...prev, [id]: e.response?.data?.error || 'Could not migrate this follow.' }))
     },
   })
 
@@ -113,6 +126,11 @@ export default function ConnectionsPage() {
   })
   const toggleBskyNotify = useMutation({
     mutationFn: ({ id, notify }: { id: string, notify: boolean }) => atprotoApi.toggleFollowNotify(id, notify),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['bluesky-following'] }),
+  })
+  // AGORA-236: main-feed opt-in for a native Bluesky follow, mirroring toggleFediShowInFeed.
+  const toggleBskyShowInFeed = useMutation({
+    mutationFn: ({ id, showInFeed }: { id: string, showInFeed: boolean }) => atprotoApi.toggleShowInFeed(id, showInFeed),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['bluesky-following'] }),
   })
 
@@ -403,13 +421,16 @@ export default function ConnectionsPage() {
                     </span>
                   )}
                   {f.accepted && isBridgedBlueskyInstance(f.instance) && (
-                    <button
-                      onClick={() => migrateBridged.mutate(f.id)}
-                      disabled={migrateBridged.isPending}
-                      title="This is a Bluesky account followed via the fediverse bridge — switch to following it natively"
-                      className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
-                      <Cloud size={13} /> {migrateBridged.isPending ? 'Migrating…' : 'Migrate to Bluesky'}
-                    </button>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <button
+                        onClick={() => migrateBridged.mutate(f.id)}
+                        disabled={migrateBridged.isPending}
+                        title="This is a Bluesky account followed via the fediverse bridge — switch to following it natively"
+                        className="btn-secondary text-xs flex items-center gap-1">
+                        <Cloud size={13} /> {migrateBridged.isPending ? 'Migrating…' : 'Migrate to Bluesky'}
+                      </button>
+                      {migrateErrors[f.id] && <p className="text-xs text-red-500">{migrateErrors[f.id]}</p>}
+                    </div>
                   )}
                   {f.accepted && f.user_id && (
                     <button
@@ -506,7 +527,7 @@ export default function ConnectionsPage() {
             <h2 className="font-semibold text-sm">Your follows</h2>
             {bskyFollowing.length > 0 && (
               <p className="text-xs text-agora-400">
-                <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+                <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
               </p>
             )}
             {bskyFollowing.length === 0 && (
@@ -528,6 +549,13 @@ export default function ConnectionsPage() {
                     <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>
                     <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
                   </div>
+                  <button
+                    onClick={() => toggleBskyShowInFeed.mutate({ id: f.id, showInFeed: !f.show_in_feed })}
+                    disabled={toggleBskyShowInFeed.isPending}
+                    title={f.show_in_feed ? 'Showing in main feed' : 'Not shown in main feed'}
+                    className={`flex-shrink-0 p-1.5 rounded-full transition-colors ${f.show_in_feed ? 'text-agora-700 bg-agora-100 dark:bg-agora-700 dark:text-white' : 'text-agora-400 hover:text-agora-600'}`}>
+                    <Home size={15} />
+                  </button>
                   <button
                     onClick={() => toggleBskyNotify.mutate({ id: f.id, notify: !f.notify })}
                     disabled={toggleBskyNotify.isPending}

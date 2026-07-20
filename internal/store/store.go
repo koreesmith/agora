@@ -1011,4 +1011,9 @@ var schema = []string{
 		PRIMARY KEY (post_id, tag)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(tag)`,
+
+	// AGORA-236: show_in_feed for a native Bluesky follow, mirroring
+	// ap_following.show_in_feed (AGORA-182) exactly — off by default, same
+	// per-follow noise-control shape as the fediverse side.
+	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
 }

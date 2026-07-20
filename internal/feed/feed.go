@@ -306,6 +306,18 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			          AND ru.id = p.author_id
 			      )
 			    )
+			    OR (
+			      -- AGORA-236: same per-follow main-feed opt-in as AGORA-182 above,
+			      -- for native Bluesky follows — no accepted flag to check here
+			      -- (an AT Proto follow is a repo write with no accept/reject
+			      -- handshake, so the row existing already means followed).
+			      EXISTS(
+			        SELECT 1 FROM at_following af
+			        JOIN users ru ON ru.atproto_remote_did = af.remote_did
+			        WHERE af.local_user_id = $1 AND af.show_in_feed = true
+			          AND ru.id = p.author_id
+			      )
+			    )
 			  )
 			  AND (
 			    -- Friend-list posts: only show if viewer is in that specific friend list

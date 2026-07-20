@@ -61,6 +61,13 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// needs to render any image a record only ever references by CID
 	// (avatar/banner, post images).
 	r.Get("/xrpc/com.atproto.sync.getBlob", s.GetBlob)
+	// AGORA-241: the repo.* record-read surface, distinct from sync.*'s
+	// whole-repo/CAR-oriented endpoints — AppViews call these directly to
+	// fetch or re-verify a single record (most importantly the singleton
+	// app.bsky.actor.profile record, which has no other path to being
+	// rediscovered once its one originating firehose commit has passed).
+	r.Get("/xrpc/com.atproto.repo.listRecords", s.ListRecords)
+	r.Get("/xrpc/com.atproto.repo.getRecord", s.GetRecord)
 }
 
 // RegisterAuthedRoutes wires the endpoints only ever called by Agora's own

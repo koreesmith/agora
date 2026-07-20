@@ -2565,14 +2565,28 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	var username, visibility, content, contentWarning string
 	var profilePrivate, apEnabled bool
 	var createdAt time.Time
+	var repostOfID *string
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
 		return
+	}
+	// AGORA-239: a quote-share's own Create(Note) only ever carried the
+	// sharer's new commentary — the quoted post itself was never
+	// referenced at all, so Mastodon (or any other receiver) had no way to
+	// know a quote even happened. True native quote-embed rendering needs
+	// FEP-044f's full consent/authorization handshake (a much bigger
+	// feature); appending a plain link here is the universally-compatible
+	// fallback that works on every receiver with no protocol support
+	// needed — plainTextToHTML/linkifyURLs (below) auto-linkifies it.
+	if repostOfID != nil {
+		if quoteURL := s.quotedPostURL(*repostOfID); quoteURL != "" {
+			content = strings.TrimRight(content, " \n") + "\n\nRE: " + quoteURL
+		}
 	}
 
 	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
@@ -2601,6 +2615,28 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	for _, inboxURL := range s.enabledRelayInboxes() {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
 	}
+}
+
+// quotedPostURL resolves the canonical AP object URI a quote-share's
+// fallback link (AGORA-239) should point at. Unlike lookupRemoteTarget
+// (which only ever resolves a remote original, for Like/Announce), a
+// quoted post can just as easily be a local Agora one — which never has a
+// remote_post_id to key off — so this covers both directions itself
+// rather than reusing that helper.
+func (s *Service) quotedPostURL(postID string) string {
+	var isRemote bool
+	var username, remotePostID string
+	if err := s.db.QueryRow(`
+		SELECT u.is_remote, u.username, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.deleted_at IS NULL
+	`, postID).Scan(&isRemote, &username, &remotePostID); err != nil {
+		return ""
+	}
+	if isRemote {
+		return remotePostID
+	}
+	return s.actorURL(username) + "/posts/" + postID
 }
 
 // BroadcastUpdatePost delivers a signed Update activity when a previously-

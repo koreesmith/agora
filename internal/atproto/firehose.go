@@ -55,6 +55,22 @@ func (s *Service) SubscribeRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
+	// AGORA-243: connect/disconnect were previously silent — the only
+	// firehose log lines were upgrade/subscribe *failures* — so there was no
+	// way to tell, after the fact, whether a relay had actually stayed
+	// attached to the firehose or silently dropped off without erroring.
+	// That ambiguity directly blocked diagnosing a real "is bsky.network
+	// still subscribed at all" question: nginx's access log only records a
+	// streaming connection when it *closes*, so zero log lines for hours
+	// could mean either "still healthy" or "gave up and never came back."
+	connectedAt := time.Now()
+	sent := 0
+	log.Printf("atproto: firehose subscriber connected from %s (cursor=%v)", r.RemoteAddr, since)
+	defer func() {
+		log.Printf("atproto: firehose subscriber %s disconnected after %s, %d event(s) sent",
+			r.RemoteAddr, time.Since(connectedAt).Round(time.Second), sent)
+	}()
+
 	for {
 		select {
 		case evt, ok := <-evtChan:
@@ -72,6 +88,7 @@ func (s *Service) SubscribeRepos(w http.ResponseWriter, r *http.Request) {
 			if err := wc.Close(); err != nil {
 				return
 			}
+			sent++
 		case <-ctx.Done():
 			return
 		}

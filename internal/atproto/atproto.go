@@ -81,6 +81,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	// AGORA-198: per-follow notification opt-in, mirroring federation's
 	// /federation/follow/{id}/notify.
 	r.Put("/atproto/follow/{id}/notify", s.ToggleFollowNotify)
+	// AGORA-236: per-follow main-feed opt-in, mirroring federation's
+	// /federation/follow/{id}/show-in-feed.
+	r.Put("/atproto/follow/{id}/show-in-feed", s.ToggleShowInFeed)
 	// AGORA-196: reconcile Bridgy-Fed-bridged Bluesky follows to native ones.
 	r.Get("/atproto/bridged-follows", s.ListBridgedBlueskyFollows)
 	r.Post("/atproto/bridged-follows/{id}/migrate", s.MigrateBridgedFollow)

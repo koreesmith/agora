@@ -230,7 +230,7 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 	// federation's ListFollowing already establishes for fediverse_account.
 	rows, err := s.db.Query(`
 		SELECT af.id, af.remote_did, af.remote_handle, af.display_name, af.avatar_url, af.created_at, af.notify,
-		       COALESCE(u.id::text, '')
+		       af.show_in_feed, COALESCE(u.id::text, '')
 		FROM at_following af
 		LEFT JOIN users u ON u.atproto_remote_did = af.remote_did
 		WHERE af.local_user_id = $1 ORDER BY af.created_at DESC
@@ -249,13 +249,14 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		AvatarURL   string `json:"avatar_url"`
 		CreatedAt   string `json:"created_at"`
 		Notify      bool   `json:"notify"`
+		ShowInFeed  bool   `json:"show_in_feed"`
 		UserID      string `json:"user_id,omitempty"`
 	}
 	var list []entry
 	for rows.Next() {
 		var e entry
 		var createdAt time.Time
-		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.UserID) == nil {
+		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.ShowInFeed, &e.UserID) == nil {
 			e.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 			list = append(list, e)
 		}
@@ -264,6 +265,32 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		list = []entry{}
 	}
 	writeJSON(w, 200, map[string]any{"following": list})
+}
+
+// ToggleShowInFeed flips whether a specific followed Bluesky account's
+// ingested posts surface in the caller's main feed (AGORA-236), mirroring
+// federation.ToggleShowInFeed (AGORA-182) exactly — off by default, same
+// per-follow noise-control shape.
+func (s *Service) ToggleShowInFeed(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+	var req struct {
+		ShowInFeed bool `json:"show_in_feed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid body")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE at_following SET show_in_feed = $1 WHERE id = $2 AND local_user_id = $3`, req.ShowInFeed, id, userID)
+	if err != nil {
+		writeError(w, 500, "could not update")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"show_in_feed": req.ShowInFeed})
 }
 
 // ToggleFollowNotify flips whether the caller gets atproto_post

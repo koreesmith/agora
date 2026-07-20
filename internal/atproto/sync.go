@@ -1,6 +1,7 @@
 package atproto
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 	"strconv"
@@ -140,15 +141,26 @@ func (s *Service) ListRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor := r.URL.Query().Get("cursor")
 
-	rows, err := s.db.QueryContext(r.Context(), `
+	// AGORA-240: id is uuid — SQL doesn't short-circuit OR, so Postgres
+	// still type-checks "id > $1" even when the empty-cursor branch is the
+	// one that's true, and casting "" to uuid fails outright ("invalid
+	// input syntax for type uuid"). This 500'd on literally every
+	// no-cursor (first-page) call, which is the relay's normal case.
+	// Branching in Go instead of relying on SQL to skip the comparison
+	// avoids ever handing an empty string to a uuid comparison at all.
+	const baseQuery = `
 		SELECT id, atproto_did, atproto_repo_head, atproto_repo_rev
 		FROM users
 		WHERE is_remote = false AND profile_private = false AND atproto_enabled = true
 		  AND deletion_scheduled_at IS NULL AND atproto_repo_head != ''
-		  AND ($1 = '' OR id > $1)
-		ORDER BY id ASC
-		LIMIT $2
-	`, cursor, limit)
+	`
+	var rows *sql.Rows
+	var err error
+	if cursor == "" {
+		rows, err = s.db.QueryContext(r.Context(), baseQuery+` ORDER BY id ASC LIMIT $1`, limit)
+	} else {
+		rows, err = s.db.QueryContext(r.Context(), baseQuery+` AND id > $1 ORDER BY id ASC LIMIT $2`, cursor, limit)
+	}
 	if err != nil {
 		writeError(w, 500, "could not list repos")
 		return

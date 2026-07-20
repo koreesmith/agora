@@ -331,6 +331,65 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 	json.NewEncoder(w).Encode(obj)
 }
 
+// BroadcastActorUpdate delivers a signed Update(Person) activity to every
+// ActivityPub follower (AGORA-242) — the actor-level counterpart to
+// BroadcastUpdatePost. Without this, a remote server that fetched this
+// user's actor doc once (typically on first Follow) never learns of any
+// later change: unlike a Note, a Person's icon/name/summary aren't
+// resurfaced by any other activity, so an avatar or display-name edit sat
+// invisibly on this end forever from the follower's point of view. Rebuilds
+// the exact same object writeActorObject serves, since that's the
+// authoritative current shape a follower should end up caching.
+func (s *Service) BroadcastActorUpdate(userID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var username string
+	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1 AND is_remote = false`, userID).Scan(&username); err != nil {
+		return
+	}
+	u, ok := s.apEligibleUser(username)
+	if !ok {
+		return
+	}
+	pubPEM, _, _, err := s.getOrCreateUserKeyPair(u.ID, u.PubKeyPEM, u.PrivKeyPEM)
+	if err != nil {
+		return
+	}
+
+	actor := s.actorURL(u.Username)
+	person := map[string]any{
+		"id":                 actor,
+		"type":               "Person",
+		"preferredUsername":  u.Username,
+		"name":               u.DisplayName,
+		"summary":            u.Bio,
+		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
+		"outbox":             actor + "/outbox",
+		"followers":          actor + "/followers",
+		"url":                strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username,
+		"publicKey": map[string]string{
+			"id":           actor + "#main-key",
+			"owner":        actor,
+			"publicKeyPem": pubPEM,
+		},
+	}
+	if u.AvatarURL != "" {
+		person["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
+	}
+
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       fmt.Sprintf("%s/updates/%d", actor, time.Now().UnixNano()),
+		"type":     "Update",
+		"actor":    actor,
+		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
+		"object":   person,
+	}
+	s.deliverToFollowers(userID, activity)
+}
+
 // ── Instance actor (AGORA-219) ────────────────────────────────────────────────
 //
 // A relay subscription (AGORA-220) is a handshake between two *servers*, not

@@ -65,7 +65,11 @@ func (s *Service) SubscribeRepos(w http.ResponseWriter, r *http.Request) {
 	// could mean either "still healthy" or "gave up and never came back."
 	connectedAt := time.Now()
 	sent := 0
-	log.Printf("atproto: firehose subscriber connected from %s (cursor=%v)", r.RemoteAddr, since)
+	cursorStr := "none"
+	if since != nil {
+		cursorStr = strconv.FormatInt(*since, 10)
+	}
+	log.Printf("atproto: firehose subscriber connected from %s (cursor=%s)", r.RemoteAddr, cursorStr)
 	defer func() {
 		log.Printf("atproto: firehose subscriber %s disconnected after %s, %d event(s) sent",
 			r.RemoteAddr, time.Since(connectedAt).Round(time.Second), sent)

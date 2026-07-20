@@ -23,6 +23,7 @@ import (
 
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
+	BroadcastActorUpdate(userID string)
 }
 
 // atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
@@ -323,6 +324,12 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 				"bio":          bio,
 			},
 		})
+		// AGORA-242: BroadcastToFriendInstances above only reaches other
+		// Agora instances — its payload is Agora's own internal shape, not a
+		// real ActivityPub activity. Standard fediverse followers (Mastodon
+		// etc.) need an actual signed Update(Person) or a display-name/bio
+		// edit never reaches them at all.
+		go s.fed.BroadcastActorUpdate(userID)
 	}
 
 	// Keep the AT Proto profile record in sync too (AGORA-189) — a repo
@@ -352,6 +359,9 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 			"actor": username,
 			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
 		})
+		// AGORA-242: same reasoning as UpdateProfile above — a real Update
+		// activity is the only thing standard fediverse followers act on.
+		go s.fed.BroadcastActorUpdate(userID)
 	}
 	// AGORA-233: a photo-only change never touches display_name/bio, so
 	// without this the AT Proto profile record would silently keep

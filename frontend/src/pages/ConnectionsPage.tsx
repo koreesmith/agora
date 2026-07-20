@@ -538,15 +538,28 @@ export default function ConnectionsPage() {
             <div className="space-y-2">
               {bskyFollowing.map(f => (
                 <div key={f.id} className="flex items-center gap-3 py-2">
-                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                    {f.avatar_url
-                      ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
-                      : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
-                          {(f.display_name || f.handle || '?')[0]}
-                        </span>}
-                  </div>
+                  {/* AGORA-238: only clickable once the account has a local
+                      cached row (populated on first ingested post) — same
+                      conditional the Fediverse tab already uses. */}
+                  {f.username
+                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </Link>
+                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </div>}
                   <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.handle}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>}
                     <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
                   </div>
                   <button

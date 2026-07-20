@@ -230,7 +230,7 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 	// federation's ListFollowing already establishes for fediverse_account.
 	rows, err := s.db.Query(`
 		SELECT af.id, af.remote_did, af.remote_handle, af.display_name, af.avatar_url, af.created_at, af.notify,
-		       af.show_in_feed, COALESCE(u.id::text, '')
+		       af.show_in_feed, COALESCE(u.id::text, ''), COALESCE(u.username, '')
 		FROM at_following af
 		LEFT JOIN users u ON u.atproto_remote_did = af.remote_did
 		WHERE af.local_user_id = $1 ORDER BY af.created_at DESC
@@ -251,12 +251,16 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		Notify      bool   `json:"notify"`
 		ShowInFeed  bool   `json:"show_in_feed"`
 		UserID      string `json:"user_id,omitempty"`
+		// AGORA-238: the frontend needs the cached local username (not just
+		// id) to link to /profile/:username, the same shape ListFollowing
+		// already gives the fediverse tab.
+		Username string `json:"username,omitempty"`
 	}
 	var list []entry
 	for rows.Next() {
 		var e entry
 		var createdAt time.Time
-		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.ShowInFeed, &e.UserID) == nil {
+		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.ShowInFeed, &e.UserID, &e.Username) == nil {
 			e.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 			list = append(list, e)
 		}

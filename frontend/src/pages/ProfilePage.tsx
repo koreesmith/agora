@@ -5,7 +5,7 @@ import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationA
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
-import { renderContent } from '../components/feed/CommentsSection'
+import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
@@ -334,7 +334,7 @@ export default function ProfilePage() {
             </div>
           </div>
           <h1 className="text-xl font-bold">
-            {profile.display_name}
+            {renderName(profile.display_name, profile.emojis)}
             {profile.pronouns && (
               <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
             )}
@@ -349,7 +349,7 @@ export default function ProfilePage() {
               </span>
             )}
           </div>
-          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio)}</p>}
+          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio, undefined, profile.emojis)}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
             {/* AGORA-253: a remote account's own post/follower/following
                 counts, same layout Bluesky itself shows on a profile — in
@@ -451,11 +451,11 @@ export default function ProfilePage() {
                         : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{p.author_display_name?.[0]}</span>}
                     </div>
                     <div>
-                      <span className="text-sm font-medium">{p.author_display_name || p.author_username}</span>
+                      <span className="text-sm font-medium">{p.author_display_name ? renderName(p.author_display_name, p.author_emojis) : p.author_username}</span>
                       <span className="text-xs text-agora-400 ml-1">@{p.author_username}</span>
                     </div>
                   </div>
-                  <p className="text-sm text-agora-700 dark:text-agora-300 whitespace-pre-wrap">{p.content}</p>
+                  <p className="text-sm text-agora-700 dark:text-agora-300 whitespace-pre-wrap">{renderContent(p.content, undefined, p.content_emojis)}</p>
                   <div className="flex gap-2">
                     <button onClick={() => wallApprove.mutate(p.id)} className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
                       <CheckCircle size={13} /> Approve

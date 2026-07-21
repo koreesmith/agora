@@ -212,7 +212,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-			       p.video_url, p.video_thumb_url
+			p.video_url, p.video_thumb_url,
+			COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -261,7 +262,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-			       p.video_url, p.video_thumb_url
+			p.video_url, p.video_thumb_url,
+			COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -607,7 +609,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -733,7 +736,8 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -940,7 +944,8 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -1280,7 +1285,8 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
@@ -1624,7 +1630,7 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT po.id, po.text,
-		       u.id, u.username, u.display_name, u.avatar_url
+		       u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.emojis::text,'{}')
 		FROM poll_options po
 		JOIN poll_votes pv ON pv.option_id = po.id
 		JOIN users u ON u.id = pv.user_id
@@ -1637,10 +1643,11 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Voter struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
+		ID          string          `json:"id"`
+		Username    string          `json:"username"`
+		DisplayName string          `json:"display_name"`
+		AvatarURL   string          `json:"avatar_url"`
+		Emojis      json.RawMessage `json:"emojis,omitempty"`
 	}
 	type OptionVoters struct {
 		OptionID   string  `json:"option_id"`
@@ -1652,9 +1659,10 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 	order := []string{}
 
 	for rows.Next() {
-		var optID, optText string
+		var optID, optText, emojis string
 		var v Voter
-		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL)
+		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL, &emojis)
+		v.Emojis = json.RawMessage(nonEmptyEmojisJSON(emojis))
 		if _, ok := byOption[optID]; !ok {
 			byOption[optID] = &OptionVoters{OptionID: optID, OptionText: optText, Voters: []Voter{}}
 			order = append(order, optID)
@@ -1700,9 +1708,11 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), NULL::text, NULL::text
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
@@ -1742,9 +1752,11 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), NULL::text, NULL::text
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
@@ -1957,18 +1969,19 @@ func (s *Service) enrichPhotos(posts []Post) {
 }
 
 type ReactionUser struct {
-	UserID      string `json:"user_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	AvatarURL   string `json:"avatar_url"`
-	Type        string `json:"type"`
+	UserID      string          `json:"user_id"`
+	Username    string          `json:"username"`
+	DisplayName string          `json:"display_name"`
+	AvatarURL   string          `json:"avatar_url"`
+	Type        string          `json:"type"`
+	Emojis      json.RawMessage `json:"emojis,omitempty"`
 }
 
 func (s *Service) GetReactions(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 
 	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, COALESCE(u.avatar_url,''), r.reaction_type
+		SELECT u.id, u.username, u.display_name, COALESCE(u.avatar_url,''), r.reaction_type, COALESCE(u.emojis::text,'{}')
 		FROM reactions r
 		JOIN users u ON u.id = r.user_id
 		WHERE r.post_id = $1 AND u.deletion_scheduled_at IS NULL
@@ -1984,7 +1997,9 @@ func (s *Service) GetReactions(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var ru ReactionUser
-		rows.Scan(&ru.UserID, &ru.Username, &ru.DisplayName, &ru.AvatarURL, &ru.Type)
+		var emojis string
+		rows.Scan(&ru.UserID, &ru.Username, &ru.DisplayName, &ru.AvatarURL, &ru.Type, &emojis)
+		ru.Emojis = json.RawMessage(nonEmptyEmojisJSON(emojis))
 		reactions = append(reactions, ru)
 		counts[ru.Type]++
 	}
@@ -2108,6 +2123,10 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		MyReaction     string         `json:"my_reaction"`
 		ReactionCounts map[string]int `json:"reaction_counts"`
 		Replies        []Comment      `json:"replies"`
+		// AGORA-258: custom emoji for the commenter's display name and this
+		// comment's own content, mirroring Post.AuthorEmojis/ContentEmojis.
+		AuthorEmojis  json.RawMessage `json:"author_emojis,omitempty"`
+		ContentEmojis json.RawMessage `json:"content_emojis,omitempty"`
 	}
 
 	scanComment := func(rows interface {
@@ -2115,14 +2134,18 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	}) Comment {
 		var c Comment
 		var myReaction *string
+		var authorEmojis, contentEmojis string
 		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.Pronouns, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction)
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction,
+			&authorEmojis, &contentEmojis)
 		if myReaction != nil {
 			c.MyReaction = *myReaction
 		}
 		c.ReactionCount = 0 // bulk enrichment below sets this; zero here to avoid double-count
 		c.ReactionCounts = map[string]int{}
 		c.Replies = []Comment{}
+		c.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		c.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
 		return c
 	}
 
@@ -2130,7 +2153,8 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.created_at, p.edited_at,
 		       (SELECT COUNT(*) FROM reactions WHERE post_id = p.id) AS reaction_count,
-		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction
+		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction,
+		       COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		WHERE p.parent_id = $2 AND p.deleted_at IS NULL AND u.deletion_scheduled_at IS NULL
@@ -2622,6 +2646,28 @@ type Post struct {
 	RepostLinkDescription *string `json:"repost_link_description,omitempty"`
 	RepostLinkImage       *string `json:"repost_link_image,omitempty"`
 	RepostLinkDomain      *string `json:"repost_link_domain,omitempty"`
+	// AGORA-258: custom emoji (shortcode -> image URL) for this post's author
+	// name, this post's own content, and (if this is a repost/quote-share) the
+	// reposted post's author name/content — each independently sourced from
+	// that specific AP object's own "tag" array, never derived from one
+	// another.
+	AuthorEmojis        json.RawMessage `json:"author_emojis,omitempty"`
+	ContentEmojis       json.RawMessage `json:"content_emojis,omitempty"`
+	RepostAuthorEmojis  json.RawMessage `json:"repost_author_emojis,omitempty"`
+	RepostContentEmojis json.RawMessage `json:"repost_content_emojis,omitempty"`
+}
+
+// nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
+// to a literal "{}" when empty (AGORA-258) — the column's own DEFAULT is
+// '{}' so this is mostly defensive, but a raw empty string isn't valid JSON
+// and would break json.RawMessage's contract that its bytes are always
+// well-formed JSON when the struct itself gets re-marshaled for the API
+// response.
+func nonEmptyEmojisJSON(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
 }
 
 func scanPosts(rows interface {
@@ -2631,6 +2677,7 @@ func scanPosts(rows interface {
 	var posts []Post
 	for rows.Next() {
 		var p Post
+		var authorEmojis, contentEmojis, repostAuthorEmojis, repostContentEmojis string
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
@@ -2645,8 +2692,13 @@ func scanPosts(rows interface {
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,
+			&authorEmojis, &contentEmojis, &repostAuthorEmojis, &repostContentEmojis,
 		)
 		p.ReactionCounts = map[string]int{}
+		p.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		p.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
+		p.RepostAuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(repostAuthorEmojis))
+		p.RepostContentEmojis = json.RawMessage(nonEmptyEmojisJSON(repostContentEmojis))
 		posts = append(posts, p)
 	}
 	if posts == nil { return []Post{} }

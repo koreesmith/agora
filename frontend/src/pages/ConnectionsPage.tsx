@@ -102,7 +102,7 @@ export default function ConnectionsPage() {
   const { data: bskyFollowingData } = useQuery({
     queryKey: ['bluesky-following'],
     queryFn: () => atprotoApi.listBlueskyFollowing().then(r => r.data),
-    enabled: tab === 'bluesky',
+    enabled: tab === 'bluesky' || tab === 'lists',
   })
   const bskyFollowing: any[] = bskyFollowingData?.following ?? []
 
@@ -174,14 +174,19 @@ export default function ConnectionsPage() {
   const lists    = listsData?.groups || []
   const pendingCount = incoming.length
 
-  // AGORA-182: Friend Lists aren't friendship-only anymore — an accepted
-  // fediverse follow (with a resolved cached user row) can join a list too,
-  // read-side only. Merged here so ListCard doesn't need to know there are
-  // two underlying relationship types.
+  // AGORA-182/AGORA-257: Friend Lists aren't friendship-only anymore — an
+  // accepted fediverse follow, or a native Bluesky follow (no "accepted"
+  // concept there, AT Proto follows are unilateral), each with a resolved
+  // cached user row, can join a list too, read-side only. Merged here so
+  // ListCard doesn't need to know there are three underlying relationship
+  // types.
   const fediverseConnections = following
     .filter((f: any) => f.accepted && f.user_id)
     .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: f.instance }))
-  const connections = [...friends, ...fediverseConnections]
+  const bskyConnections = bskyFollowing
+    .filter((f: any) => f.user_id)
+    .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: 'bsky.app' }))
+  const connections = [...friends, ...fediverseConnections, ...bskyConnections]
 
   const tabs = [
     { id: 'friends',   label: `Friends (${friends.length})` },

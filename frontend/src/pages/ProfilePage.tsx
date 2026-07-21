@@ -339,7 +339,16 @@ export default function ProfilePage() {
               <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
             )}
           </h1>
-          <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+          <div className="flex items-center gap-2">
+            <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+            {/* AGORA-249: fediverse/Bluesky mutual-follow indicator — meaningful
+                regardless of whether the viewer follows them back. */}
+            {(isFediverse || isBluesky) && profile.follows_back && (
+              <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5">
+                <UserCheck size={11} /> Follows you
+              </span>
+            )}
+          </div>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio)}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
             <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>

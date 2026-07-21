@@ -351,7 +351,19 @@ export default function ProfilePage() {
           </div>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio)}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
-            <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+            {/* AGORA-253: a remote account's own post/follower/following
+                counts, same layout Bluesky itself shows on a profile — in
+                place of "friends", which Agora has no concept of for an
+                account it doesn't actually track the social graph of. */}
+            {(isFediverse || isBluesky) && profile.remote_follower_count != null ? (
+              <>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_post_count ?? 0}</strong> posts</span>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_follower_count ?? 0}</strong> followers</span>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_following_count ?? 0}</strong> following</span>
+              </>
+            ) : (
+              <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+            )}
             {profile.location && <span>{profile.location}</span>}
             {profile.website && <a href={profile.website} className="text-agora-600 hover:underline" target="_blank" rel="noreferrer">{profile.website}</a>}
           </div>

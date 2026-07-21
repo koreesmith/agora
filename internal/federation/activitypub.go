@@ -2038,6 +2038,12 @@ type remoteActorProfile struct {
 	Summary           string
 	IconURL           string
 	ImageURL          string
+	// AGORA-253: collection URLs for a remote actor's follower/following/post
+	// counts. Standard ActivityStreams fields Mastodon/Pleroma actors already
+	// expose — never parsed before because nothing needed them until now.
+	FollowersURL string
+	FollowingURL string
+	OutboxURL    string
 }
 
 // fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
@@ -2219,6 +2225,11 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Image struct {
 			URL string `json:"url"`
 		} `json:"image"`
+		// AGORA-253: followers/following/outbox are plain collection URLs on
+		// the actor object itself (not nested), per standard ActivityStreams.
+		Followers string `json:"followers"`
+		Following string `json:"following"`
+		Outbox    string `json:"outbox"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
 		return nil, err
@@ -2233,7 +2244,78 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Summary:           actor.Summary,
 		IconURL:           actor.Icon.URL,
 		ImageURL:          actor.Image.URL,
+		FollowersURL:      actor.Followers,
+		FollowingURL:      actor.Following,
+		OutboxURL:         actor.Outbox,
 	}, nil
+}
+
+// fetchCollectionTotal dereferences an ActivityStreams (Ordered)Collection
+// URL — a remote actor's followers/following/outbox — and returns its
+// totalItems, signed the same way an actor-document fetch is (AGORA-253):
+// an instance that enforces "authorized fetch" for actor docs plausibly
+// does the same for these. Best-effort: any failure (network, non-200,
+// missing field, an instance that simply doesn't expose the count) just
+// reports "unknown" rather than erroring the whole stats fetch.
+func (s *Service) fetchCollectionTotal(userID, collectionURL string) (int, bool) {
+	if collectionURL == "" || !strings.HasPrefix(collectionURL, "https://") {
+		return 0, false
+	}
+	var username, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT username, federation_public_key, federation_private_key FROM users WHERE id = $1`, userID).
+		Scan(&username, &pubPEM, &privPEM); err != nil {
+		return 0, false
+	}
+	_, _, privKey, err := s.getOrCreateUserKeyPair(userID, pubPEM, privPEM)
+	if err != nil {
+		return 0, false
+	}
+
+	req, err := http.NewRequest(http.MethodGet, collectionURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Accept", "application/activity+json")
+	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+		return 0, false
+	}
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var col struct {
+		TotalItems *int `json:"totalItems"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&col); err != nil || col.TotalItems == nil {
+		return 0, false
+	}
+	return *col.TotalItems, true
+}
+
+// GetRemoteActorStats fetches a fediverse account's live follower/following/
+// post counts and bio (AGORA-253) — Agora only ever tracks its own follow
+// relationship with a remote account, never their full social graph, so
+// there's no local table these could come from; this is always a live
+// fetch, for GetProfile's benefit. Each collection fetch is independently
+// best-effort (an instance hiding its followers list, say, just leaves that
+// one count unknown rather than failing the whole profile view).
+func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool) {
+	signerID := s.signerUserIDForActorFetch(actorURL)
+	if signerID == "" {
+		return 0, 0, 0, "", false
+	}
+	profile, err := s.fetchActorProfileSigned(signerID, actorURL)
+	if err != nil {
+		return 0, 0, 0, "", false
+	}
+	followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL)
+	following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL)
+	posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL)
+	return followers, following, posts, HTMLToPlainText(profile.Summary), true
 }
 
 // resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger

@@ -538,7 +538,7 @@ export default function ConnectionsPage() {
             <h2 className="font-semibold text-sm">Your follows</h2>
             {bskyFollowing.length > 0 && (
               <p className="text-xs text-agora-400">
-                <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
               </p>
             )}
             {bskyFollowing.length === 0 && (
@@ -577,6 +577,14 @@ export default function ConnectionsPage() {
                     <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
                       <UserCheck size={12} /> Follows you
                     </span>
+                  )}
+                  {f.user_id && (
+                    <button
+                      onClick={() => setListModalFriend({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url })}
+                      className="flex-shrink-0 p-1.5 rounded-full text-agora-400 hover:text-agora-600 transition-colors"
+                      title="Add to a friend list">
+                      <List size={15} />
+                    </button>
                   )}
                   <button
                     onClick={() => toggleBskyShowInFeed.mutate({ id: f.id, showInFeed: !f.show_in_feed })}

@@ -37,19 +37,26 @@ func displayNameOr(displayName, fallback string) string {
 // rather than handle, since a Bluesky handle can change while the DID
 // never does — the same reasoning ap_actor_url uses a stable actor URI
 // instead of a display name.
-func (s *Service) getOrCreateRemoteATUser(did, handle, displayName, avatarURL string) (string, error) {
+//
+// coverURL is frequently empty: only resolveBlueskyActor's detailed profile
+// fetch ever has a banner to offer (ProfileViewBasic, all this function's
+// other callers have, carries no banner field at all) — an empty value here
+// intentionally leaves any previously-cached cover_url alone rather than
+// blanking it out, the same COALESCE-style tradeoff avatarURL doesn't need
+// since every caller already has *some* avatar to offer.
+func (s *Service) getOrCreateRemoteATUser(did, handle, displayName, avatarURL, coverURL string) (string, error) {
 	if handle == "" {
 		handle = "user"
 	}
 	var id string
 	err := s.db.QueryRow(`
-		INSERT INTO users (username, email, password_hash, display_name, avatar_url,
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url,
 		                   email_verified, is_remote, remote_instance, atproto_remote_did, profile_private)
-		VALUES ($1, $1, '', $2, $3, true, true, 'bsky.app', $4, false)
+		VALUES ($1, $1, '', $2, $3, $4, true, true, 'bsky.app', $5, false)
 		ON CONFLICT (atproto_remote_did) WHERE atproto_remote_did != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, username = $1, profile_private = false
+		  SET display_name = $2, avatar_url = $3, cover_url = COALESCE(NULLIF($4, ''), users.cover_url), username = $1, profile_private = false
 		RETURNING id
-	`, handle, displayNameOr(displayName, handle), avatarURL, did).Scan(&id)
+	`, handle, displayNameOr(displayName, handle), avatarURL, coverURL, did).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -140,7 +147,7 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 		if s.isBlueskyActorBlocked(did, handle) {
 			continue
 		}
-		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
+		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL, "")
 		if err != nil {
 			log.Printf("atproto: could not upsert remote user for %s: %v", did, err)
 			continue

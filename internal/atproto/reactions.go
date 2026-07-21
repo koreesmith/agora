@@ -102,7 +102,7 @@ func (s *Service) pollLikesFor(ctx context.Context, postID, uri, recordCid strin
 		if s.isBlueskyActorBlocked(did, handle) {
 			continue
 		}
-		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
+		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL, "")
 		if err != nil {
 			continue
 		}
@@ -181,7 +181,7 @@ func (s *Service) pollRepostsFor(ctx context.Context, postID, uri, recordCid str
 		if s.isBlueskyActorBlocked(did, handle) {
 			continue
 		}
-		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
+		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL, "")
 		if err != nil {
 			continue
 		}

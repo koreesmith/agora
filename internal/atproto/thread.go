@@ -142,7 +142,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 		if s.isBlueskyActorBlocked(did, handle) {
 			continue
 		}
-		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL)
+		authorID, err := s.getOrCreateRemoteATUser(did, handle, displayName, avatarURL, "")
 		if err != nil {
 			continue
 		}

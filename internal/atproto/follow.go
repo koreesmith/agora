@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -43,6 +44,7 @@ type blueskyPreview struct {
 	Handle      string `json:"handle"`
 	DisplayName string `json:"display_name"`
 	AvatarURL   string `json:"avatar_url"`
+	CoverURL    string `json:"cover_url"`
 	Description string `json:"description"`
 }
 
@@ -57,6 +59,14 @@ func (s *Service) resolveBlueskyActor(ctx context.Context, actor string) (*blues
 	}
 	if profile.Avatar != nil {
 		p.AvatarURL = *profile.Avatar
+	}
+	// Banner only exists on the detailed profile view (ActorGetProfile) this
+	// resolves — the ProfileViewBasic embedded in feed/post authors
+	// (ingestAuthorFeed, reactions.go, thread.go) has no banner field at all,
+	// so this is the only place a Bluesky account's cover photo is ever
+	// available to cache.
+	if profile.Banner != nil {
+		p.CoverURL = *profile.Banner
 	}
 	if profile.Description != nil {
 		p.Description = *profile.Description
@@ -173,6 +183,19 @@ func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) 
 	ops := []*comatproto.SyncSubscribeRepos_RepoOp{{Action: "create", Path: path, Cid: &link}}
 	if err := s.commitAndPersist(ctx, userID, did, repo, bs, priv, repoRev, ops); err != nil {
 		return "", nil, &followErr{500, "could not commit follow"}
+	}
+
+	// Cache the cover photo now — this is the only point in the whole
+	// ingestion pipeline where a full detailed profile (with a banner) was
+	// ever fetched. Without this, a followed account's `users` row is only
+	// ever created later by ingestAuthorFeed off ProfileViewBasic (no banner
+	// field at all), and only once they have a post to ingest in the first
+	// place — so the cover photo would either never appear, or not until
+	// long after avatar/display name already had, from a completely
+	// unrelated code path. Best-effort: a cache miss here just means the
+	// cover shows up whenever a later ingest path happens to touch this row.
+	if _, err := s.getOrCreateRemoteATUser(profile.DID, profile.Handle, profile.DisplayName, profile.AvatarURL, profile.CoverURL); err != nil {
+		log.Printf("atproto: could not cache remote profile for %s: %v", profile.DID, err)
 	}
 
 	var id string

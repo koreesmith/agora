@@ -74,6 +74,33 @@ func (s *Service) resolveBlueskyActor(ctx context.Context, actor string) (*blues
 	return p, nil
 }
 
+// GetRemoteActorStats fetches a Bluesky account's live follower/following/
+// post counts and bio (AGORA-253), for GetProfile's benefit — mirrors
+// federation's method of the same name. Agora never tracks a followed
+// Bluesky account's own social graph locally (at_following only records
+// this instance's own follows of them), so there's no local count to read;
+// the AppView's own profile view already returns all four fields in one
+// call, the same one resolveBlueskyActor already uses.
+func (s *Service) GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
+	profile, err := bsky.ActorGetProfile(context.Background(), s.appviewClient(), did)
+	if err != nil || profile == nil {
+		return 0, 0, 0, "", false
+	}
+	if profile.FollowersCount != nil {
+		followers = int(*profile.FollowersCount)
+	}
+	if profile.FollowsCount != nil {
+		following = int(*profile.FollowsCount)
+	}
+	if profile.PostsCount != nil {
+		posts = int(*profile.PostsCount)
+	}
+	if profile.Description != nil {
+		bio = *profile.Description
+	}
+	return followers, following, posts, bio, true
+}
+
 // ResolveBlueskyHandle serves the "search a Bluesky handle" step (AGORA-195)
 // — the AT Proto counterpart to federation's APLookup, resolving a handle or
 // DID to a live preview before the caller decides to follow.

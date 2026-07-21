@@ -34,6 +34,7 @@ type apUser struct {
 	DisplayName string
 	Bio         string
 	AvatarURL   string
+	CoverURL    string
 	PubKeyPEM   string
 	PrivKeyPEM  string
 }
@@ -52,12 +53,12 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 	}
 	var u apUser
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, bio, avatar_url,
+		SELECT id, username, display_name, bio, avatar_url, cover_url,
 		       federation_public_key, federation_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
 		  AND activitypub_enabled = true AND deletion_scheduled_at IS NULL
-	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.PubKeyPEM, &u.PrivKeyPEM)
+	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM)
 	if err != nil {
 		return nil, false
 	}
@@ -326,6 +327,13 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 	if u.AvatarURL != "" {
 		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
 	}
+	// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
+	// the profile header/banner, the "icon" field's counterpart — was never
+	// set at all, so a remote follower's client never had a cover photo to
+	// show for this user regardless of anything on the receiving end.
+	if u.CoverURL != "" {
+		obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
 	json.NewEncoder(w).Encode(obj)
@@ -377,6 +385,9 @@ func (s *Service) BroadcastActorUpdate(userID string) {
 	}
 	if u.AvatarURL != "" {
 		person["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
+	}
+	if u.CoverURL != "" {
+		person["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
 	}
 
 	activity := map[string]any{
@@ -1796,14 +1807,14 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	// public by definition (ingestFollowedPost only ever ingests public
 	// posts), so the stub itself has no reason to read as private.
 	err := s.db.QueryRow(`
-		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
 		                   ap_actor_url, ap_inbox_url, profile_private)
-		VALUES ($1, $1, '', $2, $3, $4, true, true, $5, $6, NOW(), $7, $8, false)
+		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
+		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false
 		RETURNING id
-	`, syntheticUsername, displayName, profile.IconURL, HTMLToPlainText(profile.Summary),
+	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox,
 	).Scan(&id)
 	if err != nil {
@@ -2026,6 +2037,7 @@ type remoteActorProfile struct {
 	Name              string
 	Summary           string
 	IconURL           string
+	ImageURL          string
 }
 
 // fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
@@ -2200,6 +2212,13 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Icon              struct {
 			URL string `json:"url"`
 		} `json:"icon"`
+		// "image" is the ActivityStreams Actor field Mastodon/Pleroma populate
+		// with the profile header/banner — was never parsed at all, so a
+		// remote account's cover photo never made it into the cached stub
+		// regardless of what the remote server actually served.
+		Image struct {
+			URL string `json:"url"`
+		} `json:"image"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
 		return nil, err
@@ -2213,6 +2232,7 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Name:              actor.Name,
 		Summary:           actor.Summary,
 		IconURL:           actor.Icon.URL,
+		ImageURL:          actor.Image.URL,
 	}, nil
 }
 

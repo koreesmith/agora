@@ -380,6 +380,15 @@ func (s *Service) UploadCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.Exec(`UPDATE users SET cover_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
+	// The AP actor document now has an "image" field for the cover photo
+	// (previously it didn't exist at all, which is why this wasn't wired up
+	// alongside UploadAvatar's identical broadcast back at AGORA-242) — a
+	// cover-only change still never touches display_name/bio, so without an
+	// explicit Update here a follower's cached copy of this actor would never
+	// pick up a cover change on its own.
+	if s.fed != nil {
+		go s.fed.BroadcastActorUpdate(userID)
+	}
 	// AGORA-233: same reasoning as UploadAvatar above — a cover-only change
 	// otherwise never reaches the AT Proto profile record either.
 	if s.atproto != nil {

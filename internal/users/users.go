@@ -24,6 +24,11 @@ import (
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
 	BroadcastActorUpdate(userID string)
+	// GetRemoteActorStats fetches a fediverse account's live follower/
+	// following/post counts and bio (AGORA-253) — Agora never tracks a
+	// remote account's own social graph locally, only its follow
+	// relationship with them, so GetProfile needs a live fetch to show this.
+	GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool)
 }
 
 // atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
@@ -37,6 +42,9 @@ type atprotoSyncer interface {
 	// ap_followers lookup, except AT Proto has no local inbound-follow table
 	// to query, so this always costs a live AppView call.
 	FollowsMe(viewerUserID, theirDID string) bool
+	// GetRemoteActorStats mirrors fedSender's method of the same name, for a
+	// Bluesky account (AGORA-253).
+	GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool)
 }
 
 type Service struct {
@@ -112,6 +120,15 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// or Bluesky — surfaced regardless of whether the viewer follows them
 		// (unlike FollowID/FollowNotify, which only make sense once you do).
 		FollowsBack bool `json:"follows_back"`
+		// AGORA-253: a remote profile's live follower/following/post counts —
+		// Agora only ever tracks its own follow relationship with a remote
+		// account, never their full social graph, so unlike FriendCount these
+		// can't come from a local column; nil (omitted) rather than 0 when
+		// the live fetch fails, so the frontend can tell "zero" from
+		// "unknown" instead of showing a wrong-looking "0".
+		RemoteFollowerCount  *int `json:"remote_follower_count,omitempty"`
+		RemoteFollowingCount *int `json:"remote_following_count,omitempty"`
+		RemotePostCount      *int `json:"remote_post_count,omitempty"`
 	}
 
 	err := s.db.QueryRow(`
@@ -137,6 +154,28 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	// already-clean text, so this is safe to run on every read.
 	if u.IsRemote {
 		u.Bio = federation.HTMLToPlainText(u.Bio)
+	}
+
+	// AGORA-253: live follower/following/post counts, fediverse or Bluesky —
+	// same "Agora doesn't track a remote account's full social graph, so this
+	// has to be a live fetch" reasoning as FollowsBack above, but unconditional
+	// on viewer (unlike friend-relationship fields) since it's just profile
+	// info, the same as bio. Prefers the freshly-fetched bio over the cached
+	// column when available, since this call already returns it for free.
+	if u.APActorURL != "" && s.fed != nil {
+		if followers, following, posts, bio, ok := s.fed.GetRemoteActorStats(u.APActorURL); ok {
+			u.RemoteFollowerCount, u.RemoteFollowingCount, u.RemotePostCount = &followers, &following, &posts
+			if bio != "" {
+				u.Bio = bio
+			}
+		}
+	} else if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" && s.atproto != nil {
+		if followers, following, posts, bio, ok := s.atproto.GetRemoteActorStats(u.AtprotoRemoteDID); ok {
+			u.RemoteFollowerCount, u.RemoteFollowingCount, u.RemotePostCount = &followers, &following, &posts
+			if bio != "" {
+				u.Bio = bio
+			}
+		}
 	}
 
 	// Block check — make it appear as if the user doesn't exist

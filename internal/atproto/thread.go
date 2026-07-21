@@ -162,7 +162,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 		}
 		known[post.Uri] = commentID
 
-		s.storeInboundEmbed(commentID, post.Embed)
+		s.storeInboundEmbed(ctx, commentID, post.Embed)
 		s.storeHashtagsFromFacets(commentID, rec.Facets) // AGORA-213
 
 		if s.notif != nil && parentAuthorID != "" && parentAuthorID != authorID {

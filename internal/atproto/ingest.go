@@ -83,11 +83,14 @@ func (s *Service) storeInboundImages(postID string, imageURLs []string) {
 // shared link and a picked GIF are indistinguishable at the lexicon level —
 // Bluesky has no native GIF attachment type, its GIF picker just embeds a
 // Tenor URL as a normal app.bsky.embed.external, same as any link card — so
-// both fall out of the External case with no special-casing. Quote-post
-// embeds (EmbedRecord_View / the Record half of RecordWithMedia) aren't
-// touched here; Agora doesn't model inbound Bluesky quote-posts at all yet,
-// a separate feature from this fix.
-func (s *Service) storeInboundEmbed(postID string, embed *bsky.FeedDefs_PostView_Embed) {
+// both fall out of the External case with no special-casing (AGORA-250).
+//
+// A quote-post embed (EmbedRecord_View, or the Record half of
+// RecordWithMedia) resolves the quoted post and wires it up exactly the way
+// a local quote-share already works: repost_of_id pointing at the quoted
+// post, this post's own text left in content as the quoter's commentary
+// (AGORA-239/247's shape, applied to Bluesky's version of the same concept).
+func (s *Service) storeInboundEmbed(ctx context.Context, postID string, embed *bsky.FeedDefs_PostView_Embed) {
 	if embed == nil {
 		return
 	}
@@ -98,6 +101,8 @@ func (s *Service) storeInboundEmbed(postID string, embed *bsky.FeedDefs_PostView
 		s.storeInboundVideo(postID, embed.EmbedVideo_View)
 	case embed.EmbedExternal_View != nil:
 		s.storeInboundLink(postID, embed.EmbedExternal_View)
+	case embed.EmbedRecord_View != nil:
+		s.storeInboundQuote(ctx, postID, embed.EmbedRecord_View)
 	case embed.EmbedRecordWithMedia_View != nil:
 		media := embed.EmbedRecordWithMedia_View.Media
 		switch {
@@ -108,7 +113,86 @@ func (s *Service) storeInboundEmbed(postID string, embed *bsky.FeedDefs_PostView
 		case media.EmbedExternal_View != nil:
 			s.storeInboundLink(postID, media.EmbedExternal_View)
 		}
+		s.storeInboundQuote(ctx, postID, embed.EmbedRecordWithMedia_View.Record)
 	}
+}
+
+// storeInboundQuote resolves a quote-post embed's target and, if it
+// actually names a post (as opposed to a blocked/deleted/detached record, or
+// a quote of a feed generator/list/labeler/starter pack — none of which have
+// a post to point a repost_of_id at), sets postID's repost_of_id to it.
+func (s *Service) storeInboundQuote(ctx context.Context, postID string, view *bsky.EmbedRecord_View) {
+	if view == nil || view.Record == nil || view.Record.EmbedRecord_ViewRecord == nil {
+		return
+	}
+	quotedID := s.ingestQuotedPost(ctx, view.Record.EmbedRecord_ViewRecord)
+	if quotedID == "" {
+		return
+	}
+	s.db.ExecContext(ctx, `UPDATE posts SET repost_of_id = $1 WHERE id = $2`, quotedID, postID)
+}
+
+// ingestQuotedPost upserts a quoted post as a real, locally stored post —
+// the same (remote_post_id, remote_instance) identity/dedup scheme every
+// other inbound Bluesky post uses — and returns its local id. The
+// "DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id" is a no-op update
+// used only to make RETURNING fire on conflict too: unlike top-level
+// ingestion (which only cares that ON CONFLICT DO NOTHING means "already
+// seen, nothing to do"), this needs the local id back either way, since the
+// quoting post's repost_of_id has to be set whether the quoted post was
+// already known or is being ingested for the first time right now.
+//
+// Only resolves one level deep: a quoted post's own embeds are stored (so
+// its images/link/video still show), but a further nested quote-of-a-quote
+// isn't chased — enough to cover the reported gap without open-ended
+// recursion.
+func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_ViewRecord) string {
+	if rec == nil || rec.Author == nil {
+		return ""
+	}
+	post, ok := rec.Value.Val.(*bsky.FeedPost)
+	if !ok || post == nil {
+		return ""
+	}
+	if s.isBlueskyActorBlocked(rec.Author.Did, rec.Author.Handle) {
+		return ""
+	}
+
+	var displayName, avatarURL string
+	if rec.Author.DisplayName != nil {
+		displayName = *rec.Author.DisplayName
+	}
+	if rec.Author.Avatar != nil {
+		avatarURL = *rec.Author.Avatar
+	}
+	authorID, err := s.getOrCreateRemoteATUser(rec.Author.Did, rec.Author.Handle, displayName, avatarURL, "")
+	if err != nil {
+		return ""
+	}
+
+	var postID string
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		RETURNING id
+	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels)).Scan(&postID)
+	if err != nil || postID == "" {
+		return ""
+	}
+
+	if len(rec.Embeds) > 0 && rec.Embeds[0] != nil {
+		e := rec.Embeds[0]
+		switch {
+		case e.EmbedImages_View != nil:
+			s.storeInboundBskyImages(postID, e.EmbedImages_View)
+		case e.EmbedVideo_View != nil:
+			s.storeInboundVideo(postID, e.EmbedVideo_View)
+		case e.EmbedExternal_View != nil:
+			s.storeInboundLink(postID, e.EmbedExternal_View)
+		}
+	}
+	return postID
 }
 
 func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_View) {
@@ -243,7 +327,7 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
 
-		s.storeInboundEmbed(postID, post.Embed)
+		s.storeInboundEmbed(ctx, postID, post.Embed)
 		s.storeHashtagsFromFacets(postID, rec.Facets) // AGORA-213
 
 		// AGORA-198: notify local users who actively follow this DID, have

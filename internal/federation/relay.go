@@ -3,6 +3,7 @@ package federation
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -433,10 +434,17 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 // local user — a relay-sourced author has no natural "signer" the way a
 // reply's recipient or an existing follower does.
 func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, error) {
-	var id string
-	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
-	if id != "" {
+	var id, inboxURL string
+	s.db.QueryRow(`SELECT id, ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id, &inboxURL)
+	// AGORA-254: same self-healing reasoning as getOrCreateRemoteAPUser — a
+	// cache hit with no inbox is a broken/stale stub, and short-circuiting on
+	// it forever means every outbound delivery to this actor silently no-ops
+	// with nothing logged anywhere.
+	if id != "" && inboxURL != "" {
 		return id, nil
+	}
+	if id != "" {
+		log.Printf("federation: cached actor %s has no inbox URL, re-fetching to repair", actorURL)
 	}
 	profile, err := s.fetchActorProfileSignedAsInstance(actorURL)
 	if err != nil {

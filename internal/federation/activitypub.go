@@ -1768,10 +1768,22 @@ func localPostIDFromURL(u, instanceDomain string) string {
 // (a reply's recipient, an existing follower, etc.) — the fetch is signed as
 // them so authorized-fetch instances like Threads don't blanket-404 it.
 func (s *Service) getOrCreateRemoteAPUser(actorURL, signerUserID string) (string, error) {
-	var id string
-	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
-	if id != "" {
+	var id, inboxURL string
+	s.db.QueryRow(`SELECT id, ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id, &inboxURL)
+	// AGORA-254: a cache hit with no inbox URL is a broken/stale stub — every
+	// outbound delivery keyed off it (Like, Announce, a repost's own
+	// Create) silently no-ops forever via lookupRemoteTarget's ok=false,
+	// with nothing logged anywhere, since a plain id match short-circuited
+	// here before ever re-checking completeness. Self-heal by falling
+	// through to a fresh fetch+upsert instead of trusting the stale row
+	// indefinitely — upsertRemoteAPUser's ON CONFLICT patches the existing
+	// row's ap_inbox_url (among other fields) rather than erroring on the
+	// now-duplicate ap_actor_url.
+	if id != "" && inboxURL != "" {
 		return id, nil
+	}
+	if id != "" {
+		log.Printf("federation: cached actor %s has no inbox URL, re-fetching to repair", actorURL)
 	}
 
 	profile, err := s.fetchActorProfileSigned(signerUserID, actorURL)
@@ -3048,8 +3060,24 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1
 	`, postID).Scan(&isRemote, &actorURL, &inboxURL, &remotePostID)
-	if err != nil || !isRemote || actorURL == "" || inboxURL == "" || remotePostID == "" {
+	if err != nil || !isRemote || actorURL == "" || remotePostID == "" {
 		return "", "", "", false
+	}
+	if inboxURL == "" {
+		// AGORA-254: a stale/broken cached stub with no inbox would silently
+		// block every outbound delivery (Like, Announce, a repost's own
+		// Create) to this author forever — nothing else on this path ever
+		// re-fetches it, and getOrCreateRemoteAPUser*'s own self-heal only
+		// fires on that actor's *next* inbound activity, which might never
+		// come. Repair right here instead, so a repost/like against an
+		// already-broken stub can succeed on its very next attempt rather
+		// than waiting on the remote actor to post again.
+		if _, err := s.getOrCreateRemoteAPUserAsInstance(actorURL); err != nil {
+			return "", "", "", false
+		}
+		if err := s.db.QueryRow(`SELECT ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&inboxURL); err != nil || inboxURL == "" {
+			return "", "", "", false
+		}
 	}
 	return actorURL, inboxURL, remotePostID, true
 }

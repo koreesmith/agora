@@ -1016,4 +1016,23 @@ var schema = []string{
 	// ap_following.show_in_feed (AGORA-182) exactly — off by default, same
 	// per-follow noise-control shape as the fediverse side.
 	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-255: FEP-044f quote-post approval. A Mastodon (or other
+	// FEP-044f-aware) server sends a QuoteRequest to a post's author's inbox
+	// before it'll let its own user's quote of that post render anywhere;
+	// the author's server has to answer with an Accept whose "result" is a
+	// dereferenceable QuoteAuthorization URL. This table is that
+	// dereferenceable record — one row per (post, quoting post), so a
+	// redelivered QuoteRequest just re-resolves the same authorization
+	// (unique constraint) instead of minting a new URL every retry, and
+	// other servers re-fetching the URL later to re-verify the stamp always
+	// see the same content.
+	`CREATE TABLE IF NOT EXISTS quote_authorizations (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		post_id            UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		quoting_actor_url  TEXT        NOT NULL,
+		quoting_object_url TEXT        NOT NULL,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (post_id, quoting_object_url)
+	)`,
 }

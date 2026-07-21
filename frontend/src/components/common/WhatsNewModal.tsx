@@ -2,55 +2,48 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 
-const SEEN_KEY = 'agora_seen_v2'
+const SEEN_KEY = 'agora_seen_v3'
 
 const FEATURES = [
   {
-    emoji: '🌐',
-    title: 'Fediverse (ActivityPub)',
-    desc: "Your public posts are now discoverable and followable from Mastodon and other fediverse apps, and replies go both ways. Off by default for private posts, on by default for public ones — there's a toggle in Settings → Fediverse if you'd rather opt out.",
-    link: '/connections?tab=fediverse',
-    linkText: 'Explore the Fediverse →',
+    emoji: '🦋',
+    title: 'Native Bluesky account',
+    desc: "Every Agora account is now also a real Bluesky account — no bridge, no separate signup required. Your public posts sync both ways, and you can follow any Bluesky account natively, right alongside your fediverse and Agora connections.",
+    link: '/connections?tab=bluesky',
+    linkText: 'Explore Bluesky →',
   },
   {
-    emoji: '📖',
-    title: 'Pages',
-    desc: 'Follow public Pages from bands, businesses, creators, and organisations. Their posts appear in your feed.',
-    link: '/pages',
-    linkText: 'Explore Pages →',
-  },
-  {
-    emoji: '🎬',
-    title: 'Video posts',
-    desc: 'Post videos up to 2 minutes. Attach a video the same way you attach photos — just click the 🎬 button.',
-    link: '/feed',
-    linkText: 'Go to feed →',
-  },
-  {
-    emoji: '✨',
-    title: 'Smart Ranking for Custom Feeds',
-    desc: 'Enable Smart Ranking in any custom feed to surface posts from people you interact with most.',
-    link: '/my-feeds',
-    linkText: 'My Feeds →',
-  },
-  {
-    emoji: '📷',
-    title: 'Up to 10 photos per post',
-    desc: 'Attach up to 10 photos in a single post. Paste images directly from your clipboard too.',
-    link: null,
-    linkText: null,
-  },
-  {
-    emoji: '+',
-    title: 'Tag groups in posts',
-    desc: 'Type +group-name in any post to tag a group. Group admins are notified.',
-    link: null,
-    linkText: null,
+    emoji: '🗂️',
+    title: 'Unified Connections & Friend Lists',
+    desc: 'Friends, Fediverse follows, and Bluesky follows now live together on one Connections page — and Friend Lists can include accounts from either network, not just Agora friends.',
+    link: '/connections?tab=lists',
+    linkText: 'See your lists →',
   },
   {
     emoji: '💬',
-    title: 'Quick comments',
-    desc: 'A comment box now appears directly below each post — no need to click the comment icon first.',
+    title: 'Quote posts',
+    desc: 'Mastodon and other fediverse apps can now quote your Agora posts, not just boost them.',
+    link: null,
+    linkText: null,
+  },
+  {
+    emoji: '😀',
+    title: 'Custom emoji',
+    desc: "A Mastodon custom emoji like :your_team_logo: now renders as a real inline image in names, bios, and posts, instead of showing the literal shortcode text.",
+    link: null,
+    linkText: null,
+  },
+  {
+    emoji: '🔍',
+    title: 'Unified search',
+    desc: 'Search now covers Agora, the Fediverse, and Bluesky in one place — accounts, posts, and hashtags.',
+    link: '/search',
+    linkText: 'Try it →',
+  },
+  {
+    emoji: '⚠️',
+    title: 'Trigger warnings on shares',
+    desc: "Add your own content warning when sharing someone else's post, independent of the original post's own visibility.",
     link: null,
     linkText: null,
   },
@@ -97,7 +90,7 @@ export default function WhatsNewModal({ forceShow, onClose }: Props = {}) {
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-6 pb-3">
           <div>
-            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v2.0.0</div>
+            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v3.0.0</div>
             <h2 className="text-xl font-bold text-agora-900 dark:text-agora-100">What's New in Agora</h2>
           </div>
           <button onClick={dismiss} className="text-agora-400 hover:text-agora-600 transition-colors ml-4 flex-shrink-0">

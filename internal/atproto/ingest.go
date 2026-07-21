@@ -78,6 +78,85 @@ func (s *Service) storeInboundImages(postID string, imageURLs []string) {
 	}
 }
 
+// storeInboundEmbed persists whatever richer content a Bluesky post's embed
+// carries beyond plain text. Images were already handled (AGORA-197); a
+// shared link and a picked GIF are indistinguishable at the lexicon level —
+// Bluesky has no native GIF attachment type, its GIF picker just embeds a
+// Tenor URL as a normal app.bsky.embed.external, same as any link card — so
+// both fall out of the External case with no special-casing. Quote-post
+// embeds (EmbedRecord_View / the Record half of RecordWithMedia) aren't
+// touched here; Agora doesn't model inbound Bluesky quote-posts at all yet,
+// a separate feature from this fix.
+func (s *Service) storeInboundEmbed(postID string, embed *bsky.FeedDefs_PostView_Embed) {
+	if embed == nil {
+		return
+	}
+	switch {
+	case embed.EmbedImages_View != nil:
+		s.storeInboundBskyImages(postID, embed.EmbedImages_View)
+	case embed.EmbedVideo_View != nil:
+		s.storeInboundVideo(postID, embed.EmbedVideo_View)
+	case embed.EmbedExternal_View != nil:
+		s.storeInboundLink(postID, embed.EmbedExternal_View)
+	case embed.EmbedRecordWithMedia_View != nil:
+		media := embed.EmbedRecordWithMedia_View.Media
+		switch {
+		case media.EmbedImages_View != nil:
+			s.storeInboundBskyImages(postID, media.EmbedImages_View)
+		case media.EmbedVideo_View != nil:
+			s.storeInboundVideo(postID, media.EmbedVideo_View)
+		case media.EmbedExternal_View != nil:
+			s.storeInboundLink(postID, media.EmbedExternal_View)
+		}
+	}
+}
+
+func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_View) {
+	var imageURLs []string
+	for _, img := range imgs.Images {
+		if img.Fullsize != "" {
+			imageURLs = append(imageURLs, img.Fullsize)
+		}
+	}
+	s.storeInboundImages(postID, imageURLs)
+}
+
+// storeInboundLink maps a Bluesky link/GIF card onto Agora's own link
+// preview columns — the same shape a locally-created post's link preview
+// already populates. Thumb/Uri are already fully-resolved CDN URLs on the
+// hydrated View type the AppView returns, not blob refs needing a separate
+// fetch, the same way EmbedImages_View.Fullsize already is.
+func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) {
+	if ext == nil || ext.External == nil || ext.External.Uri == "" {
+		return
+	}
+	e := ext.External
+	var thumb string
+	if e.Thumb != nil {
+		thumb = *e.Thumb
+	}
+	s.db.Exec(`
+		UPDATE posts SET link_url = $1, link_title = $2, link_description = $3, link_image = $4, link_domain = $5
+		WHERE id = $6
+	`, e.Uri, e.Title, e.Description, thumb, domainFromURL(e.Uri), postID)
+}
+
+// storeInboundVideo maps a native app.bsky.embed.video onto Agora's own
+// video_url/video_thumb_url columns. Playlist is an HLS (.m3u8) stream URL
+// from Bluesky's video CDN rather than a single mp4 file — playback support
+// varies by client/browser, but that's still strictly better than the empty
+// gap this closes.
+func (s *Service) storeInboundVideo(postID string, v *bsky.EmbedVideo_View) {
+	if v == nil || v.Playlist == "" {
+		return
+	}
+	var thumb string
+	if v.Thumbnail != nil {
+		thumb = *v.Thumbnail
+	}
+	s.db.Exec(`UPDATE posts SET video_url = $1, video_thumb_url = $2 WHERE id = $3`, v.Playlist, thumb, postID)
+}
+
 // storeHashtagsFromFacets (AGORA-213) mirrors federation's storeHashtags/
 // hashtagsFromAPTags pair, but reads an AT Proto record's own "facets"
 // array directly — a #tag facet's Tag field is already bare (no leading #
@@ -164,15 +243,7 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
 
-		var imageURLs []string
-		if post.Embed != nil && post.Embed.EmbedImages_View != nil {
-			for _, img := range post.Embed.EmbedImages_View.Images {
-				if img.Fullsize != "" {
-					imageURLs = append(imageURLs, img.Fullsize)
-				}
-			}
-		}
-		s.storeInboundImages(postID, imageURLs)
+		s.storeInboundEmbed(postID, post.Embed)
 		s.storeHashtagsFromFacets(postID, rec.Facets) // AGORA-213
 
 		// AGORA-198: notify local users who actively follow this DID, have

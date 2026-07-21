@@ -2569,7 +2569,11 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.show_in_feed, af.created_at,
 		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
-		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
+		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, ''),
+		       EXISTS(
+		         SELECT 1 FROM ap_followers apf
+		         WHERE apf.followed_user_id = $1 AND apf.follower_actor_url = af.followed_actor_url
+		       )
 		FROM ap_following af
 		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
 		WHERE af.follower_user_id = $1
@@ -2593,13 +2597,18 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name,omitempty"`
 		AvatarURL   string `json:"avatar_url,omitempty"`
 		Instance    string `json:"instance,omitempty"`
+		// AGORA-249: whether this account follows the caller back — a plain
+		// local lookup here (unlike the AT Proto side), since an inbound
+		// ActivityPub Follow is delivered straight to our own inbox and
+		// already lives in ap_followers.
+		FollowsBack bool `json:"follows_back"`
 	}
 	var list []followingEntry
 	for rows.Next() {
 		var f followingEntry
 		var createdAt time.Time
 		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &f.ShowInFeed, &createdAt,
-			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance); err != nil {
+			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack); err != nil {
 			continue
 		}
 		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)

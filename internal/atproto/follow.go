@@ -288,20 +288,91 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 		// id) to link to /profile/:username, the same shape ListFollowing
 		// already gives the fediverse tab.
 		Username string `json:"username,omitempty"`
+		// AGORA-249: whether this account follows the caller back. Unlike the
+		// fediverse side's ap_followers (an inbound follow's Follow activity
+		// is delivered to our own inbox, so it's already a local table), AT
+		// Proto has no equivalent — a Bluesky follow is just a repo record on
+		// the follower's own PDS, never delivered to us. followsMeBatch below
+		// is a live app.bsky.graph.getRelationships call, the only way to
+		// answer this.
+		FollowsBack bool `json:"follows_back"`
 	}
 	var list []entry
+	var dids []string
 	for rows.Next() {
 		var e entry
 		var createdAt time.Time
 		if rows.Scan(&e.ID, &e.DID, &e.Handle, &e.DisplayName, &e.AvatarURL, &createdAt, &e.Notify, &e.ShowInFeed, &e.UserID, &e.Username) == nil {
 			e.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 			list = append(list, e)
+			dids = append(dids, e.DID)
 		}
 	}
 	if list == nil {
 		list = []entry{}
 	}
+
+	followsBack := s.followsMeBatch(r.Context(), userID, dids)
+	for i := range list {
+		list[i].FollowsBack = followsBack[list[i].DID]
+	}
+
 	writeJSON(w, 200, map[string]any{"following": list})
+}
+
+// getRelationshipsBatchSize caps each app.bsky.graph.getRelationships call's
+// "others" list — the lexicon doesn't document a hard limit the way
+// getProfiles' 25 is spelled out, but batching defensively avoids ever
+// finding out the hard way with a large follow list.
+const getRelationshipsBatchSize = 30
+
+// followsMeBatch reports, for each of theirDIDs, whether that account
+// currently follows viewerUserID back — the AT Proto side has no local
+// inbound-follow table (see the entry.FollowsBack comment above), so this is
+// always a live AppView call, chunked to stay under getRelationshipsBatchSize.
+// Best-effort: an AppView error for one chunk just leaves those DIDs absent
+// from the result (reported as not-following-back) rather than failing the
+// whole request.
+func (s *Service) followsMeBatch(ctx context.Context, viewerUserID string, theirDIDs []string) map[string]bool {
+	result := make(map[string]bool, len(theirDIDs))
+	if len(theirDIDs) == 0 {
+		return result
+	}
+
+	var ourDID string
+	s.db.QueryRow(`SELECT atproto_did FROM users WHERE id = $1`, viewerUserID).Scan(&ourDID)
+	if ourDID == "" {
+		return result
+	}
+
+	client := s.appviewClient()
+	for start := 0; start < len(theirDIDs); start += getRelationshipsBatchSize {
+		end := start + getRelationshipsBatchSize
+		if end > len(theirDIDs) {
+			end = len(theirDIDs)
+		}
+		out, err := bsky.GraphGetRelationships(ctx, client, ourDID, theirDIDs[start:end])
+		if err != nil {
+			log.Printf("atproto: could not fetch relationships for %s: %v", viewerUserID, err)
+			continue
+		}
+		for _, r := range out.Relationships {
+			if r.GraphDefs_Relationship != nil {
+				result[r.GraphDefs_Relationship.Did] = r.GraphDefs_Relationship.FollowedBy != nil
+			}
+		}
+	}
+	return result
+}
+
+// FollowsMe is followsMeBatch's single-account form, for GetProfile (called
+// from internal/users across the atprotoSyncer interface) rather than the
+// follow-list page.
+func (s *Service) FollowsMe(viewerUserID, theirDID string) bool {
+	if theirDID == "" {
+		return false
+	}
+	return s.followsMeBatch(context.Background(), viewerUserID, []string{theirDID})[theirDID]
 }
 
 // ToggleShowInFeed flips whether a specific followed Bluesky account's

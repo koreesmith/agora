@@ -415,6 +415,11 @@ export default function ConnectionsPage() {
                       : <p className="font-medium text-sm truncate">{f.display_name || f.actor_url}</p>}
                     {f.username && <p className="text-xs text-agora-400 truncate">@{f.username}</p>}
                   </div>
+                  {f.accepted && f.follows_back && (
+                    <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                      <UserCheck size={12} /> Follows you
+                    </span>
+                  )}
                   {!f.accepted && (
                     <span className="flex items-center gap-1 text-xs text-agora-400 flex-shrink-0">
                       <Clock size={12} /> Requested
@@ -562,6 +567,11 @@ export default function ConnectionsPage() {
                       : <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>}
                     <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
                   </div>
+                  {f.follows_back && (
+                    <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                      <UserCheck size={12} /> Follows you
+                    </span>
+                  )}
                   <button
                     onClick={() => toggleBskyShowInFeed.mutate({ id: f.id, showInFeed: !f.show_in_feed })}
                     disabled={toggleBskyShowInFeed.isPending}

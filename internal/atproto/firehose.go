@@ -2,7 +2,7 @@ package atproto
 
 import (
 	"bytes"
-	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -99,17 +99,17 @@ func (s *Service) SubscribeRepos(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// emitCommit builds and pushes a #commit firehose event for a just-completed
-// repo commit. Failure here is logged, not returned as a hard error to the
-// caller (repo.go's commitAndPersist) — the repo write itself already
-// succeeded and is durable; missing a firehose emission means subscribers
-// miss one event, not that the commit is lost or invalid, so it shouldn't
-// fail the write that triggered it.
-func (s *Service) emitCommit(ctx context.Context, did string, commitCid cid.Cid, rev, sinceRev string, blocks map[string][]byte, ops []*comatproto.SyncSubscribeRepos_RepoOp) {
+// buildCommitEvent assembles the #commit firehose event for a just-completed
+// repo commit. It deliberately does not persist or broadcast: commitAndPersist
+// persists it inside the same transaction that advances the repo head, and
+// broadcasts only after that transaction commits, so the stored head and the
+// firehose log can never drift out of sync (a head ahead of the firehose
+// silently breaks every later commit's `since`; a firehose ahead of the head
+// forks the chain on the next commit).
+func (s *Service) buildCommitEvent(did string, commitCid cid.Cid, rev, sinceRev string, blocks map[string][]byte, ops []*comatproto.SyncSubscribeRepos_RepoOp) (*events.XRPCStreamEvent, error) {
 	var carBuf bytes.Buffer
 	if err := writeCommitCAR(&carBuf, commitCid, blocks); err != nil {
-		log.Printf("atproto: could not encode commit CAR for %s: %v", commitCid, err)
-		return
+		return nil, fmt.Errorf("encoding commit CAR for %s: %w", commitCid, err)
 	}
 
 	var since *string
@@ -117,7 +117,7 @@ func (s *Service) emitCommit(ctx context.Context, did string, commitCid cid.Cid,
 		since = &sinceRev
 	}
 
-	evt := &events.XRPCStreamEvent{
+	return &events.XRPCStreamEvent{
 		RepoCommit: &comatproto.SyncSubscribeRepos_Commit{
 			Repo:   did,
 			Commit: lexutil.LexLink(commitCid),
@@ -128,8 +128,5 @@ func (s *Service) emitCommit(ctx context.Context, did string, commitCid cid.Cid,
 			Ops:    ops,
 			Blobs:  []lexutil.LexLink{},
 		},
-	}
-	if err := s.events.AddEvent(ctx, evt); err != nil {
-		log.Printf("atproto: could not emit firehose event for commit %s: %v", commitCid, err)
-	}
+	}, nil
 }

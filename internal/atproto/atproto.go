@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/bluesky-social/indigo/events"
@@ -26,14 +27,39 @@ import (
 )
 
 type Service struct {
-	db     *store.DB
-	cfg    *config.Config
-	events *events.EventManager
-	notif  *notifications.Service
+	db        *store.DB
+	cfg       *config.Config
+	events    *events.EventManager
+	persister *pgEventPersister
+	notif     *notifications.Service
+
+	// repoLocks serializes commit activity per user (keyed by user id). A
+	// user's AT Proto repo is a single-writer object: every write does a
+	// read-head → open → commit → advance-head → emit-firehose sequence, and
+	// two of those interleaving forks the commit chain — both read the same
+	// head and both emit a #commit citing the same `since`, which a relay
+	// can't reconcile, so it stops applying that repo's commits and every
+	// later post silently stops propagating. See lockRepo.
+	repoLocks sync.Map // user id -> *sync.Mutex
 }
 
 func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
-	return &Service{db: db, cfg: cfg, events: events.NewEventManager(newPgEventPersister(db)), notif: notif}
+	persister := newPgEventPersister(db)
+	return &Service{db: db, cfg: cfg, events: events.NewEventManager(persister), persister: persister, notif: notif}
+}
+
+// lockRepo takes the per-user commit lock and returns its release function,
+// used as `defer s.lockRepo(userID)()` at the top of every repo-mutating
+// path — acquired before the caller reads atproto_repo_head so the head can't
+// go stale between that read and the commit that advances it. Keyed per user
+// because commits to different users' repos are wholly independent; two
+// writers to the *same* repo must run one at a time. Each goroutine only ever
+// holds a single user's lock, so there is no lock-ordering deadlock.
+func (s *Service) lockRepo(userID string) func() {
+	m, _ := s.repoLocks.LoadOrStore(userID, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // RegisterRoutes wires the public, unauthenticated AT Proto identity and

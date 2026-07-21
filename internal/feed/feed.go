@@ -209,6 +209,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
+			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 			       p.video_url, p.video_thumb_url
@@ -257,6 +258,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
+			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 			       p.video_url, p.video_thumb_url
@@ -602,6 +604,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 		       p.video_url, p.video_thumb_url
@@ -727,6 +730,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 		       p.video_url, p.video_thumb_url
@@ -933,6 +937,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 		       p.video_url, p.video_thumb_url
@@ -1272,6 +1277,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 		       p.video_url, p.video_thumb_url
@@ -2607,6 +2613,15 @@ type Post struct {
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
 	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
+	// AGORA-252: the quoted post's own link preview — distinct from the
+	// quoting post's own link_url/etc (already scanned separately below),
+	// needed so a quote of a link-only post (no image, e.g. a Bluesky quote
+	// of a news article) doesn't render as an empty card.
+	RepostLinkURL         *string `json:"repost_link_url,omitempty"`
+	RepostLinkTitle       *string `json:"repost_link_title,omitempty"`
+	RepostLinkDescription *string `json:"repost_link_description,omitempty"`
+	RepostLinkImage       *string `json:"repost_link_image,omitempty"`
+	RepostLinkDomain      *string `json:"repost_link_domain,omitempty"`
 }
 
 func scanPosts(rows interface {
@@ -2626,6 +2641,7 @@ func scanPosts(rows interface {
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
+			&p.RepostLinkURL, &p.RepostLinkTitle, &p.RepostLinkDescription, &p.RepostLinkImage, &p.RepostLinkDomain,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,

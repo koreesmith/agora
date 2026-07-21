@@ -42,6 +42,11 @@ interface Post {
   repost_author_pronouns?: string
   repost_content?: string
   repost_image_url?: string
+  repost_link_url?: string
+  repost_link_title?: string
+  repost_link_description?: string
+  repost_link_image?: string
+  repost_link_domain?: string
   like_count: number
   comment_count: number
   repost_count: number
@@ -806,6 +811,38 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   )}
                   {post.repost_image_url && (
                     <img src={post.repost_image_url} alt="" className="mt-2 rounded-lg max-h-64 object-cover w-full" />
+                  )}
+                  {/* AGORA-252: the quoted post's own link preview — e.g. a
+                      Bluesky quote of a link-only news article has no
+                      repost_image_url, only this. onClick's closest('a')
+                      check above lets this open externally instead of
+                      navigating to the quoted post. */}
+                  {post.repost_link_url && (
+                    <a
+                      href={post.repost_link_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 flex gap-3 border border-agora-200 dark:border-agora-600 rounded-xl overflow-hidden hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                    >
+                      {post.repost_link_image && (
+                        <img
+                          src={post.repost_link_image}
+                          alt=""
+                          className="w-16 h-16 object-cover flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                          onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        />
+                      )}
+                      <div className="flex-1 min-w-0 p-2 space-y-0.5">
+                        <p className="text-xs text-agora-400 flex items-center gap-1">
+                          <ExternalLink size={10} /> {post.repost_link_domain}
+                        </p>
+                        {post.repost_link_title && (
+                          <p className="text-sm font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">
+                            {post.repost_link_title}
+                          </p>
+                        )}
+                      </div>
+                    </a>
                   )}
                 </div>
               )}

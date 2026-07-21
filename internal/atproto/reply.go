@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -110,9 +111,10 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
+	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + commentID
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          content,
+		Text:          truncateForBluesky(content, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, commentID),
 		Labels:        labelsForContentWarning(contentWarning),
@@ -195,9 +197,10 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
+	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + commentID
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          content,
+		Text:          truncateForBluesky(content, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, commentID),
 		Labels:        labelsForContentWarning(contentWarning),

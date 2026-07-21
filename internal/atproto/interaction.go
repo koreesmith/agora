@@ -52,6 +52,10 @@ func (s *Service) deliverInteraction(userID, postID, kind string) {
 		return
 	}
 
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
+
 	var username, did, storedPriv, repoHead, repoRev string
 	var atprotoEnabled bool
 	if err := s.db.QueryRowContext(ctx, `
@@ -115,6 +119,9 @@ func (s *Service) deliverInteraction(userID, postID, kind string) {
 
 func (s *Service) undoInteraction(userID, postID, kind string) {
 	ctx := context.Background()
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
 
 	var did, storedPriv, repoHead, repoRev, rkey string
 	if err := s.db.QueryRowContext(ctx, `

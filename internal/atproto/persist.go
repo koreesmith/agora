@@ -3,6 +3,7 @@ package atproto
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/bluesky-social/indigo/events"
@@ -29,13 +30,72 @@ func newPgEventPersister(db *store.DB) *pgEventPersister {
 // Persist assigns the next sequence number, serializes the event with that
 // seq already baked into its payload (so a replayed event round-trips with
 // the same seq the original subscriber saw it as), and durably stores it
-// before broadcasting to live subscribers.
+// before broadcasting to live subscribers. This satisfies indigo's
+// EventPersistence interface; commit events instead go through persistTx so
+// they share a transaction with the repo-head update (see repo.go's
+// commitAndPersist), but keeping this correct guards any other AddEvent path.
 func (p *pgEventPersister) Persist(ctx context.Context, e *events.XRPCStreamEvent) error {
 	var seq int64
 	if err := p.db.QueryRowContext(ctx, `SELECT nextval('atproto_firehose_seq')`).Scan(&seq); err != nil {
 		return fmt.Errorf("reserving firehose seq: %w", err)
 	}
+	if err := setEventSeq(e, seq); err != nil {
+		return err
+	}
 
+	var buf bytes.Buffer
+	if err := e.Serialize(&buf); err != nil {
+		return fmt.Errorf("serializing event: %w", err)
+	}
+	if _, err := p.db.ExecContext(ctx, `
+		INSERT INTO atproto_firehose_events (seq, data) VALUES ($1, $2)
+	`, seq, buf.Bytes()); err != nil {
+		return fmt.Errorf("persisting event: %w", err)
+	}
+
+	p.broadcastEvent(e)
+	return nil
+}
+
+// persistTx assigns the next sequence number and durably appends the event
+// within the caller's transaction, WITHOUT broadcasting — the piece
+// commitAndPersist runs in the same transaction as the repo-head update so
+// the stored head and the firehose log can never disagree. Broadcasting is
+// deferred to broadcastEvent, called only after that transaction commits, so
+// a live subscriber never sees an event that isn't yet durable.
+func (p *pgEventPersister) persistTx(ctx context.Context, tx *sql.Tx, e *events.XRPCStreamEvent) error {
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `SELECT nextval('atproto_firehose_seq')`).Scan(&seq); err != nil {
+		return fmt.Errorf("reserving firehose seq: %w", err)
+	}
+	if err := setEventSeq(e, seq); err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	if err := e.Serialize(&buf); err != nil {
+		return fmt.Errorf("serializing event: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO atproto_firehose_events (seq, data) VALUES ($1, $2)
+	`, seq, buf.Bytes()); err != nil {
+		return fmt.Errorf("persisting event: %w", err)
+	}
+	return nil
+}
+
+// broadcastEvent hands a persisted event to live subscribers (the callback
+// indigo's EventManager wired in via SetEventBroadcaster).
+func (p *pgEventPersister) broadcastEvent(e *events.XRPCStreamEvent) {
+	if p.broadcast != nil {
+		p.broadcast(e)
+	}
+}
+
+// setEventSeq stamps the reserved sequence number onto whichever event
+// variant is set, so the seq is baked into the serialized payload a
+// reconnecting subscriber replays.
+func setEventSeq(e *events.XRPCStreamEvent, seq int64) error {
 	switch {
 	case e.RepoCommit != nil:
 		e.RepoCommit.Seq = seq
@@ -49,20 +109,6 @@ func (p *pgEventPersister) Persist(ctx context.Context, e *events.XRPCStreamEven
 		e.LabelLabels.Seq = seq
 	default:
 		return fmt.Errorf("no event set on XRPCStreamEvent")
-	}
-
-	var buf bytes.Buffer
-	if err := e.Serialize(&buf); err != nil {
-		return fmt.Errorf("serializing event: %w", err)
-	}
-	if _, err := p.db.ExecContext(ctx, `
-		INSERT INTO atproto_firehose_events (seq, data) VALUES ($1, $2)
-	`, seq, buf.Bytes()); err != nil {
-		return fmt.Errorf("persisting event: %w", err)
-	}
-
-	if p.broadcast != nil {
-		p.broadcast(e)
 	}
 	return nil
 }

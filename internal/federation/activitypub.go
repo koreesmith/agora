@@ -574,6 +574,17 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		"published":    published,
 		"to":           []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"cc":           []string{actor + "/followers"},
+		// AGORA-255: FEP-044f — without an explicit interactionPolicy,
+		// Mastodon 4.4+ won't offer a quote button on this post at all
+		// (boosts are unaffected; they predate this and aren't gated by it).
+		// automaticApproval: Public mirrors how open reposting/boosting of
+		// these same posts already is — anyone who could boost it can quote
+		// it too, no separate manual-approval queue.
+		"interactionPolicy": map[string]any{
+			"canQuote": map[string]any{
+				"automaticApproval": "https://www.w3.org/ns/activitystreams#Public",
+			},
+		},
 	}
 	if inReplyTo != "" {
 		note["inReplyTo"] = inReplyTo
@@ -904,9 +915,10 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	// fields are not cryptographically tied to the signature and are only
 	// used below where they don't need to be trusted on their own.
 	var a struct {
-		ID     string          `json:"id"`
-		Type   string          `json:"type"`
-		Object json.RawMessage `json:"object"`
+		ID         string          `json:"id"`
+		Type       string          `json:"type"`
+		Object     json.RawMessage `json:"object"`
+		Instrument json.RawMessage `json:"instrument"`
 	}
 	if err := json.Unmarshal(body, &a); err != nil {
 		writeError(w, 400, "invalid activity")
@@ -967,6 +979,8 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		s.handleInboundAcceptFollow(verifiedActor, a.Object)
 	case "Reject":
 		s.handleInboundRejectFollow(verifiedActor, a.Object)
+	case "QuoteRequest":
+		s.handleInboundQuoteRequest(a.ID, verifiedActor, a.Object, a.Instrument)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -1942,6 +1956,115 @@ func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMess
 		}
 		s.notif.Create(postAuthorID, remoteUserID, notifType, postID, "")
 	}
+}
+
+// handleInboundQuoteRequest answers a FEP-044f QuoteRequest — sent to a
+// post's author's inbox by the quoting user's own server, before it'll let
+// that quote render anywhere. buildNoteObject already advertises
+// automaticApproval: Public for canQuote (AGORA-255), so there's no manual
+// review queue here: every structurally valid request against one of our
+// own eligible posts is granted immediately, recorded so the same request
+// (redelivered, or re-checked later by a third server) always resolves to
+// the same dereferenceable QuoteAuthorization, and answered with the
+// Accept/result the requesting server needs to actually show the quote.
+func (s *Service) handleInboundQuoteRequest(requestID, verifiedActor string, objectRaw, instrumentRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
+	if !ok {
+		return
+	}
+	var instrument struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(instrumentRaw, &instrument)
+	if instrument.ID == "" {
+		return
+	}
+
+	var authID string
+	err := s.db.QueryRow(`
+		INSERT INTO quote_authorizations (post_id, quoting_actor_url, quoting_object_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (post_id, quoting_object_url) DO UPDATE SET quoting_actor_url = $2
+		RETURNING id
+	`, postID, verifiedActor, instrument.ID).Scan(&authID)
+	if err != nil || authID == "" {
+		return
+	}
+
+	var username string
+	s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, postAuthorID).Scan(&username)
+	if username == "" {
+		return
+	}
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+	var inboxURL string
+	s.db.QueryRow(`SELECT ap_inbox_url FROM users WHERE id = $1`, remoteUserID).Scan(&inboxURL)
+	if inboxURL == "" {
+		return
+	}
+
+	actor := s.actorURL(username)
+	quoteAuthContext := []any{
+		"https://www.w3.org/ns/activitystreams",
+		map[string]string{"QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"},
+	}
+	accept := map[string]any{
+		"@context": quoteAuthContext,
+		"id":       actor + "/posts/" + postID + "/quote-accepts/" + authID,
+		"type":     "Accept",
+		"actor":    actor,
+		"object": map[string]any{
+			"type": "QuoteRequest",
+			"id":   requestID,
+		},
+		"result": actor + "/posts/" + postID + "/quote-authorizations/" + authID,
+	}
+	s.enqueueAPDelivery(postAuthorID, inboxURL, accept)
+}
+
+// GetQuoteAuthorization serves the dereferenceable FEP-044f QuoteAuthorization
+// object a quoting server's Accept "result" points at — the stamp other
+// servers check to verify a rendered quote was actually granted by the
+// quoted post's author, not merely claimed.
+func (s *Service) GetQuoteAuthorization(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	postID := chi.URLParam(r, "postID")
+	authID := chi.URLParam(r, "authID")
+
+	var quotingObjectURL string
+	err := s.db.QueryRow(`
+		SELECT qa.quoting_object_url
+		FROM quote_authorizations qa
+		JOIN posts p ON p.id = qa.post_id
+		JOIN users u ON u.id = p.author_id
+		WHERE qa.id = $1 AND qa.post_id = $2 AND u.username = $3
+	`, authID, postID, handle).Scan(&quotingObjectURL)
+	if err != nil || quotingObjectURL == "" {
+		writeError(w, 404, "quote authorization not found")
+		return
+	}
+
+	actor := s.actorURL(handle)
+	obj := map[string]any{
+		"@context": []any{
+			"https://www.w3.org/ns/activitystreams",
+			map[string]string{"QuoteAuthorization": "https://w3id.org/fep/044f#QuoteAuthorization"},
+		},
+		"id":                actor + "/posts/" + postID + "/quote-authorizations/" + authID,
+		"type":              "QuoteAuthorization",
+		"attributedTo":      actor,
+		"interactionTarget": actor + "/posts/" + postID,
+		"interactingObject": quotingObjectURL,
+	}
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(obj)
 }
 
 func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.RawMessage) {

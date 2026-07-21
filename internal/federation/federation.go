@@ -43,6 +43,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/users/{handle}",  s.GetUser)
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
 	r.Get("/federation/users/{handle}/followers", s.Followers)
+	// AGORA-255: FEP-044f dereferenceable quote-authorization stamp — other
+	// servers fetch this to verify a quote of one of this user's posts was
+	// actually granted, not just claimed by the quoting post.
+	r.Get("/federation/users/{handle}/posts/{postID}/quote-authorizations/{authID}", s.GetQuoteAuthorization)
 	r.Get("/federation/search",          s.Search)
 	// AGORA-115: page actors — always ActivityPub JSON, no legacy-protocol
 	// fallback needed since pages never had one.

@@ -400,12 +400,16 @@ func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// AGORA-182: list membership isn't friendship-only anymore — a followed
-	// fediverse (or, once AGORA-195 lands, Bluesky) account can join a list
-	// too, read-side only. There's no mutual "accept" for a one-way follow,
-	// so the bar is just "the caller follows them and it's been accepted",
-	// checked via the cached remote-actor row ListFollowing already joins
-	// against (ap_following.followed_actor_url = users.ap_actor_url).
+	// AGORA-182/AGORA-257: list membership isn't friendship-only — a
+	// followed fediverse or Bluesky account can join a list too, read-side
+	// only. There's no mutual "accept" for a one-way follow, so the bar is
+	// just "the caller follows them" — for fediverse that's an accepted
+	// ap_following row (matching ListFollowing's own join against
+	// ap_following.followed_actor_url = users.ap_actor_url); for Bluesky
+	// there's no accept concept at all (AT Proto follows are unilateral),
+	// mirroring the at_following/atproto_remote_did join feed.go's Custom
+	// Feeds "atproto_account" filter already uses for the same eligibility
+	// question.
 	var ok bool
 	s.db.QueryRow(`
 		SELECT EXISTS(
@@ -416,10 +420,14 @@ func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 			SELECT 1 FROM ap_following af
 			JOIN users u ON u.ap_actor_url = af.followed_actor_url
 			WHERE af.follower_user_id = $1 AND af.accepted = true AND u.id = $2
+		) OR EXISTS(
+			SELECT 1 FROM at_following af
+			JOIN users u ON u.atproto_remote_did = af.remote_did
+			WHERE af.local_user_id = $1 AND u.id = $2
 		)
 	`, userID, friendID).Scan(&ok)
 	if !ok {
-		writeError(w, 400, "can only add friends or followed fediverse accounts to lists")
+		writeError(w, 400, "can only add friends or followed fediverse/bluesky accounts to lists")
 		return
 	}
 

@@ -32,6 +32,11 @@ type fedSender interface {
 // actor document already is, so it needs its own explicit trigger on edit.
 type atprotoSyncer interface {
 	SyncProfile(userID string)
+	// FollowsMe reports whether a Bluesky account follows viewerUserID back
+	// (AGORA-249) — GetProfile's counterpart to the fediverse side's plain
+	// ap_followers lookup, except AT Proto has no local inbound-follow table
+	// to query, so this always costs a live AppView call.
+	FollowsMe(viewerUserID, theirDID string) bool
 }
 
 type Service struct {
@@ -103,6 +108,10 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		FollowID     string `json:"follow_id,omitempty"`
 		Following    bool   `json:"following"`
 		FollowNotify bool   `json:"follow_notify"`
+		// AGORA-249: whether this profile follows the viewer back, fediverse
+		// or Bluesky — surfaced regardless of whether the viewer follows them
+		// (unlike FollowID/FollowNotify, which only make sense once you do).
+		FollowsBack bool `json:"follows_back"`
 	}
 
 	err := s.db.QueryRow(`
@@ -206,6 +215,16 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 				u.Following = true
 				u.FollowNotify = notify
 			}
+		}
+
+		// AGORA-249: does this remote profile follow the viewer back?
+		// Deliberately outside the Following blocks above — this is
+		// meaningful (and shown) whether or not the viewer follows them.
+		if u.APActorURL != "" {
+			s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2)`,
+				viewerID, u.APActorURL).Scan(&u.FollowsBack)
+		} else if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" && s.atproto != nil {
+			u.FollowsBack = s.atproto.FollowsMe(viewerID, u.AtprotoRemoteDID)
 		}
 	}
 

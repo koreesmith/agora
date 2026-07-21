@@ -31,6 +31,8 @@ const FILTER_TYPES = [
   { value: 'exclude_friend',    label: 'Exclude Friend' },
   { value: 'exclude_group',     label: 'Exclude Community Group' },
   { value: 'exclude_page',      label: 'Exclude Page' },
+  { value: 'exclude_fediverse_account', label: 'Exclude Fediverse Account' },
+  { value: 'exclude_atproto_account',   label: 'Exclude Bluesky Account' },
 ]
 
 // fediverse_all/atproto_all have no meaningful "value" to pick — they mean
@@ -123,6 +125,7 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
       case 'exclude_page':
         return myPages.map((p: any) => ({ id: p.id, label: p.display_name }))
       case 'fediverse_account':
+      case 'exclude_fediverse_account':
         // A followed account only gets a local stub (users.id) once its first
         // post has been ingested — nothing to filter by before that, so it's
         // left out of the picker until then.
@@ -130,6 +133,7 @@ export default function FeedBuilderModal({ feed, onClose }: Props) {
           .filter((f: any) => f.user_id)
           .map((f: any) => ({ id: f.user_id, label: f.display_name || f.username || f.actor_url }))
       case 'atproto_account':
+      case 'exclude_atproto_account':
         // Same reasoning as fediverse_account — a followed Bluesky account
         // only has a users.id stub once its first post has been ingested.
         return bskyFollowing

@@ -759,7 +759,7 @@ var schema = []string{
 	// Extend the list in place here going forward.
 	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
 	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all'))`,
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all','exclude_fediverse_account','exclude_atproto_account'))`,
 
 	// AGORA-164: remote-actor stubs (created by upsertRemoteAPUser) never
 	// explicitly set profile_private, which defaults to TRUE — every

@@ -382,6 +382,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
 	var includePageIDs, excludePageIDs, fediverseAccountIDs, atprotoAccountIDs []string
+	var excludeFediverseAccountIDs, excludeAtprotoAccountIDs []string
 	var fediverseAll, atprotoAll bool
 	for filterRows.Next() {
 		var ft, val string
@@ -409,6 +410,10 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			atprotoAccountIDs = append(atprotoAccountIDs, val)
 		case "atproto_all":
 			atprotoAll = true
+		case "exclude_fediverse_account":
+			excludeFediverseAccountIDs = append(excludeFediverseAccountIDs, val)
+		case "exclude_atproto_account":
+			excludeAtprotoAccountIDs = append(excludeAtprotoAccountIDs, val)
 		}
 	}
 	filterRows.Close()
@@ -512,6 +517,30 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	if len(excludeFriendIDs) > 0 {
 		phs := make([]string, len(excludeFriendIDs))
 		for i, id := range excludeFriendIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`p.author_id NOT IN (%s)`, strings.Join(phs, ",")))
+	}
+	// Exclude a specific followed fediverse/Bluesky account — same shape as
+	// exclude_friend, just keyed off the remote account's own cached
+	// users.id stub rather than a local friend's. No re-verification of
+	// follow status the way fediverse_account/atproto_account's inclusion
+	// filters do: excluding an id that isn't actually followed is harmless
+	// (it just never matched anything to begin with), unlike an inclusion
+	// filter where skipping that check would let a stale/stale-looking value
+	// surface an account the viewer no longer follows.
+	if len(excludeFediverseAccountIDs) > 0 {
+		phs := make([]string, len(excludeFediverseAccountIDs))
+		for i, id := range excludeFediverseAccountIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`p.author_id NOT IN (%s)`, strings.Join(phs, ",")))
+	}
+	if len(excludeAtprotoAccountIDs) > 0 {
+		phs := make([]string, len(excludeAtprotoAccountIDs))
+		for i, id := range excludeAtprotoAccountIDs {
 			phs[i] = nextP(id)
 		}
 		extraClauses = append(extraClauses, fmt.Sprintf(

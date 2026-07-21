@@ -280,7 +280,8 @@ func validFilterType(t string) bool {
 	switch t {
 	case "friend_group", "community_group", "exclude_friend", "exclude_group", "post_type",
 		"include_page", "exclude_page", "fediverse_account", "fediverse_all",
-		"atproto_account", "atproto_all":
+		"atproto_account", "atproto_all",
+		"exclude_fediverse_account", "exclude_atproto_account":
 		return true
 	}
 	return false

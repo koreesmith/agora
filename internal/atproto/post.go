@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -10,6 +11,35 @@ import (
 	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/ipfs/go-cid"
 )
+
+// blueskyMaxGraphemes is app.bsky.feed.post's own lexicon limit on the "text"
+// field (AGORA-256) — unlike ActivityPub, which has no such cap, Bluesky's
+// AppView validates every incoming record against its lexicon and silently
+// drops (never indexes) anything over this, with no error surfaced back to
+// us anywhere: the record still commits fine to the user's own repo, it just
+// never appears on Bluesky. rune count is used as a stand-in for Bluesky's
+// actual grapheme-cluster count — close enough for plain text; only complex
+// emoji/combining sequences would count differently, and being off by a
+// handful of runes there just shifts the truncation point slightly.
+const blueskyMaxGraphemes = 300
+
+// truncateForBluesky shortens content to fit Bluesky's post-length limit,
+// replacing the cut portion with a link back to the full post on Agora
+// instead of silently dropping the post from Bluesky entirely (matching how
+// other cross-posting tools handle the same limit). Returns content
+// unchanged if it already fits.
+func truncateForBluesky(content, permalinkURL string) string {
+	runes := []rune(content)
+	if len(runes) <= blueskyMaxGraphemes {
+		return content
+	}
+	suffix := "…\n\n" + permalinkURL
+	budget := blueskyMaxGraphemes - len([]rune(suffix))
+	if budget < 0 {
+		budget = 0
+	}
+	return strings.TrimRight(string(runes[:budget]), " \n\t") + suffix
+}
 
 // BroadcastPost federates a new public post as an app.bsky.feed.post record
 // (AGORA-190) — the AT Proto counterpart to federation.BroadcastPublicPost.
@@ -52,9 +82,10 @@ func (s *Service) BroadcastPost(userID, postID string) {
 
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
+	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          content,
+		Text:          truncateForBluesky(content, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
@@ -127,9 +158,10 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
+	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          content,
+		Text:          truncateForBluesky(content, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),

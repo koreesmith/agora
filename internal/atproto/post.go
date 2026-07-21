@@ -24,6 +24,9 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		return
 	}
 	ctx := context.Background()
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
 
 	var username, content, contentWarning, did, storedPriv, repoHead, repoRev string
 	var visibility string
@@ -94,6 +97,9 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		return
 	}
 	ctx := context.Background()
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
 
 	var username, content, contentWarning, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
 	var visibility string
@@ -167,6 +173,9 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 // silently if the post was never federated (no atproto_posts row).
 func (s *Service) BroadcastPostDelete(userID, postID string) {
 	ctx := context.Background()
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
 
 	var did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
 	err := s.db.QueryRowContext(ctx, `

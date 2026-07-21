@@ -63,8 +63,8 @@ func TestWriteCAR(t *testing.T) {
 	}
 }
 
-// writeCommitCAR is writeCAR's single-root special case (the shape emitCommit
-// needs) — confirm it actually produces that shape rather than drifting.
+// writeCommitCAR is writeCAR's single-root special case (the shape
+// buildCommitEvent needs) — confirm it produces that shape rather than drifting.
 func TestWriteCommitCAR(t *testing.T) {
 	b := blocks.NewBlock([]byte("the commit block"))
 	data := map[string][]byte{b.Cid().String(): b.RawData()}

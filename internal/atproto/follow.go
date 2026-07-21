@@ -126,14 +126,6 @@ func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) 
 	if !s.atprotoEnabled() {
 		return "", nil, &followErr{404, "AT Proto not enabled"}
 	}
-	var username, did, storedPriv, repoHead, repoRev string
-	var atprotoEnabled bool
-	if err := s.db.QueryRow(`
-		SELECT username, atproto_did, atproto_private_key, atproto_repo_head, atproto_repo_rev, atproto_enabled
-		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
-	`, userID).Scan(&username, &did, &storedPriv, &repoHead, &repoRev, &atprotoEnabled); err != nil || !atprotoEnabled {
-		return "", nil, &followErr{404, "AT Proto not enabled"}
-	}
 
 	profile, err := s.resolveBlueskyActor(ctx, actor)
 	if err != nil {
@@ -143,6 +135,21 @@ func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) 
 	// APLookup's own isInstanceBlocked check on the fediverse side.
 	if s.isBlueskyActorBlocked(profile.DID, profile.Handle) {
 		return "", nil, &followErr{404, "could not resolve that Bluesky account"}
+	}
+
+	// Serialize with every other commit to this user's repo. Taken only after
+	// the network resolve above (which needs no repo state), so the lock is
+	// never held across an AppView round-trip, and held across the head read
+	// below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
+
+	var username, did, storedPriv, repoHead, repoRev string
+	var atprotoEnabled bool
+	if err := s.db.QueryRow(`
+		SELECT username, atproto_did, atproto_private_key, atproto_repo_head, atproto_repo_rev, atproto_enabled
+		FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL
+	`, userID).Scan(&username, &did, &storedPriv, &repoHead, &repoRev, &atprotoEnabled); err != nil || !atprotoEnabled {
+		return "", nil, &followErr{404, "AT Proto not enabled"}
 	}
 
 	did, priv, err := s.ensureIdentity(userID, username, did, storedPriv)
@@ -188,6 +195,9 @@ func (s *Service) followBlueskyActor(ctx context.Context, userID, actor string) 
 func (s *Service) UnfollowBlueskyAccount(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	id := chi.URLParam(r, "id")
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	defer s.lockRepo(userID)()
 
 	var did, storedPriv, repoHead, repoRev, rkey string
 	if err := s.db.QueryRow(`

@@ -35,10 +35,19 @@ func (s *Service) getOrCreateRepo(ctx context.Context, userID, did, repoHead str
 	return arepo.NewRepo(ctx, did, bs), bs
 }
 
-// commitAndPersist signs the repo's pending writes, saves the resulting
-// commit CID/rev as the user's new repo head, and emits the commit on the
-// firehose (AGORA-191) — the AT Proto repo write path's equivalent of a
-// database transaction commit plus a change-notification event.
+// commitAndPersist signs the repo's pending writes, then atomically advances
+// the user's stored repo head/rev and appends the firehose #commit event in a
+// single transaction (AGORA-191), broadcasting to live subscribers only once
+// that's durable. The atomicity is load-bearing: a stored head ahead of the
+// firehose makes every later commit's `since` cite a rev no subscriber saw,
+// and a firehose ahead of the stored head forks the chain on the next commit
+// — either way propagation silently stops.
+//
+// The caller MUST already hold s.lockRepo(userID), taken before it read
+// atproto_repo_head: this read-modify-write of a single-writer repo is not
+// safe to interleave with another commit to the same repo (concurrent commits
+// read the same head, then each emit a #commit citing the same `since`, which
+// forks the chain a relay can't reconcile).
 func (s *Service) commitAndPersist(
 	ctx context.Context, userID, did string, repo *arepo.Repo, bs *pgBlockstore,
 	priv *atcrypto.PrivateKeyK256, sinceRev string, ops []*comatproto.SyncSubscribeRepos_RepoOp,
@@ -54,13 +63,50 @@ func (s *Service) commitAndPersist(
 	}
 	recorded := bs.stopRecording()
 
-	if _, err := s.db.ExecContext(ctx, `
+	// Recording only captures what repo.Commit itself writes — the new MST
+	// nodes and the signed commit block. Each op's *record* block was written
+	// through to the blockstore earlier, by the CreateRecord/PutRecord/
+	// UpdateRecord call in the caller, before recording started, so it's
+	// durable but absent from `recorded`. A #commit's CAR must carry the
+	// record block for every create/update op inline (blobs are the one
+	// exception — they travel out-of-band via getBlob), or a subscriber can't
+	// index the op from the firehose event alone. Backfill any missing ones.
+	for _, op := range ops {
+		if op.Cid == nil {
+			continue // delete ops reference no record block
+		}
+		c := cid.Cid(*op.Cid)
+		if _, ok := recorded[c.String()]; ok {
+			continue
+		}
+		if blk, err := bs.Get(ctx, c); err == nil {
+			recorded[c.String()] = blk.RawData()
+		}
+	}
+
+	evt, err := s.buildCommitEvent(did, commitCid, rev, sinceRev, recorded, ops)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.persister.persistTx(ctx, tx, evt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE users SET atproto_repo_head = $1, atproto_repo_rev = $2 WHERE id = $3
 	`, commitCid.String(), rev, userID); err != nil {
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 
-	s.emitCommit(ctx, did, commitCid, rev, sinceRev, recorded, ops)
+	s.persister.broadcastEvent(evt)
 	return nil
 }
 
@@ -81,6 +127,12 @@ func (s *Service) SyncProfile(userID string) {
 		return
 	}
 	ctx := context.Background()
+	// Serialize with every other commit to this user's repo, held across the
+	// head read below through commitAndPersist (see lockRepo/commitAndPersist).
+	// This is the path AGORA-233 newly fires on every avatar/cover upload, so
+	// without it a photo change racing a post (or a second photo change) forks
+	// the shared commit chain and strands the user's posts on the relay.
+	defer s.lockRepo(userID)()
 
 	var username, displayName, bio, avatarURL, coverURL, did, storedPriv, repoHead, repoRev string
 	var isRemote, profilePrivate, atprotoEnabled bool

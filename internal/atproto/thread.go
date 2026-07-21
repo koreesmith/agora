@@ -162,15 +162,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 		}
 		known[post.Uri] = commentID
 
-		var imageURLs []string
-		if post.Embed != nil && post.Embed.EmbedImages_View != nil {
-			for _, img := range post.Embed.EmbedImages_View.Images {
-				if img.Fullsize != "" {
-					imageURLs = append(imageURLs, img.Fullsize)
-				}
-			}
-		}
-		s.storeInboundImages(commentID, imageURLs)
+		s.storeInboundEmbed(commentID, post.Embed)
 		s.storeHashtagsFromFacets(commentID, rec.Facets) // AGORA-213
 
 		if s.notif != nil && parentAuthorID != "" && parentAuthorID != authorID {

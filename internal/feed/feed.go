@@ -902,12 +902,15 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at,
 		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
 		       p.video_url, p.video_thumb_url
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL

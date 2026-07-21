@@ -1035,4 +1035,17 @@ var schema = []string{
 		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		UNIQUE (post_id, quoting_object_url)
 	)`,
+
+	// AGORA-258: Mastodon custom emoji — a remote actor's display_name/bio (or
+	// a post/comment's content) can reference a shortcode like ":stl_blues:"
+	// that only resolves to an image via a separate "tag" array on the same
+	// AP object (entries with type "Emoji", carrying the shortcode and an
+	// icon URL). The shortcode text itself is already stored as-is in
+	// display_name/bio/content; this column is just the resolved
+	// shortcode->image-URL map alongside it, so a renderer can substitute
+	// inline images without needing a second network fetch. Bluesky has no
+	// equivalent protocol concept, so this is fediverse-only in practice —
+	// always '{}' for a native Bluesky stub/post.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
 }

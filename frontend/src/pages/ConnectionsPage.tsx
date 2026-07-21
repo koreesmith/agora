@@ -5,6 +5,7 @@ import { friendsApi, federationApi, atprotoApi } from '../api'
 import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import { renderName } from '../components/feed/CommentsSection'
 
 // AGORA-196: a fediverse actor federated through Bridgy Fed's bsky.brid.gy
 // (or any *.brid.gy) is a Bluesky account, not a real fediverse one.
@@ -182,7 +183,7 @@ export default function ConnectionsPage() {
   // types.
   const fediverseConnections = following
     .filter((f: any) => f.accepted && f.user_id)
-    .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: f.instance }))
+    .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: f.instance, emojis: f.emojis }))
   const bskyConnections = bskyFollowing
     .filter((f: any) => f.user_id)
     .map((f: any) => ({ id: f.user_id, username: f.username, display_name: f.display_name, avatar_url: f.avatar_url, is_remote: true, remote_instance: 'bsky.app' }))
@@ -234,7 +235,7 @@ export default function ConnectionsPage() {
             <div key={f.id} className="card p-3 flex items-center gap-3">
               <Avatar u={f} />
               <div className="flex-1 min-w-0">
-                <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name || f.username}</Link>
+                <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
                 <p className="text-xs text-agora-400">{handle(f.username, f.is_remote, f.remote_instance)}</p>
               </div>
               <button onClick={() => { if (confirm('Unfriend?')) unfriend.mutate(f.id) }} className="btn-ghost p-1.5 text-agora-400 hover:text-red-500">
@@ -416,8 +417,8 @@ export default function ConnectionsPage() {
                       </div>}
                   <div className="flex-1 min-w-0">
                     {f.username
-                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.username}</Link>
-                      : <p className="font-medium text-sm truncate">{f.display_name || f.actor_url}</p>}
+                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name ? renderName(f.display_name, f.emojis) : f.actor_url}</p>}
                     {f.username && <p className="text-xs text-agora-400 truncate">@{f.username}</p>}
                   </div>
                   {f.accepted && f.follows_back && (
@@ -666,7 +667,7 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{(m.display_name || m.username)[0].toUpperCase()}</span>}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm font-medium truncate">{m.display_name || m.username}</span>
+                    <span className="text-sm font-medium truncate">{m.display_name ? renderName(m.display_name, m.emojis) : m.username}</span>
                     <span className="text-xs text-agora-400 ml-1.5">{handle(m.username, m.is_remote, m.remote_instance)}</span>
                   </div>
                   <button onClick={() => onRemove(m.id)} className="btn-ghost p-1 text-agora-300 hover:text-red-500" title="Remove from list">
@@ -689,7 +690,7 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{(f.display_name || f.username)[0].toUpperCase()}</span>}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm font-medium truncate">{f.display_name || f.username}</span>
+                    <span className="text-sm font-medium truncate">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</span>
                     <span className="text-xs text-agora-400 ml-1.5">{handle(f.username, f.is_remote, f.remote_instance)}</span>
                   </div>
                   <button onClick={() => onAdd(f.id)} className="btn-ghost p-1 text-agora-400 hover:text-agora-600 dark:hover:text-agora-200" title="Add to list">

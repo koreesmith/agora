@@ -5,7 +5,7 @@ import { searchApi, friendsApi, federationApi, pagesApi, atprotoApi } from '../a
 import { useAuthStore } from '../store/auth'
 import { handle } from '../utils/handle'
 import { formatDistanceToNow } from 'date-fns'
-import { renderContent } from '../components/feed/CommentsSection'
+import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2, BookOpen, ExternalLink } from 'lucide-react'
 import { useMutation as useSubscribeMutation } from '@tanstack/react-query'
 
@@ -288,7 +288,7 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
       </Link>
       <div className="flex-1 min-w-0">
         <Link to={`/profile/${u.username}`} className="font-medium text-sm hover:underline block truncate">
-          {u.display_name || u.username}
+          {u.display_name ? renderName(u.display_name, u.emojis) : u.username}
         </Link>
         <p className="text-xs text-agora-400 truncate">
           {handle(u.username, u.is_remote, u.remote_instance)}
@@ -349,7 +349,7 @@ function PostResult({ post: p, query }: { post: any, query: string }) {
             ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
             : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{(p.display_name||p.username)[0].toUpperCase()}</span>}
         </div>
-        <span className="text-sm font-medium">{p.display_name || p.username}</span>
+        <span className="text-sm font-medium">{p.display_name ? renderName(p.display_name, p.author_emojis) : p.username}</span>
         <span className="text-xs text-agora-400">@{p.username}</span>
         <span className="text-xs text-agora-400 ml-auto flex items-center gap-1">
           <Clock size={11} />

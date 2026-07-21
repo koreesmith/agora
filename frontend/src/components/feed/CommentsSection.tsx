@@ -98,7 +98,7 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
-                      {r.display_name || r.username}
+                      {r.display_name ? renderName(r.display_name, r.emojis) : r.username}
                     </p>
                     <p className="text-xs text-agora-400">@{r.username}</p>
                   </div>
@@ -112,15 +112,37 @@ function CommentReactionsModal({ commentId, onClose }: { commentId: string; onCl
   )
 }
 
-// Render text with @mentions as profile links and URLs as clickable links
-export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all") {
+// AGORA-258: Mastodon custom emoji — a shortcode like ":stl_blues:" in a
+// display name/bio/post only resolves to an image via a map fetched
+// alongside the text it appears in (never derivable from the text itself).
+export type EmojiMap = Record<string, string> | null | undefined
+
+// emojiImg renders one recognized shortcode as a small inline image, sized
+// to sit on the text baseline like Mastodon's own rendering — not exported,
+// used by both renderContent and renderName below.
+function emojiImg(shortcode: string, url: string, key: string | number) {
+  return (
+    <img
+      key={key}
+      src={url}
+      alt={shortcode}
+      title={shortcode}
+      className="inline-block h-[1.2em] w-[1.2em] align-text-bottom object-contain"
+    />
+  )
+}
+
+// Render text with @mentions as profile links, URLs as clickable links, and
+// (AGORA-258) recognized :shortcode: custom emoji as inline images.
+export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap) {
   // Split on @mentions (local @username or fediverse @handle@instance.tld —
   // AGORA-163, ordered before the bare-local pattern so a full remote handle
-  // is captured as one token, not just its handle portion), +group-tags, and
-  // URLs. No nested capturing groups within any alternative — String.split
-  // splices every capture group's result into the output, so an inner group
-  // here would corrupt the parts array.
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+)/g)
+  // is captured as one token, not just its handle portion), +group-tags,
+  // URLs, and :shortcode: custom-emoji tokens. No nested capturing groups
+  // within any alternative — String.split splices every capture group's
+  // result into the output, so an inner group here would corrupt the parts
+  // array.
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)/g)
   return parts.map((part, i) => {
     // Fediverse mention (@handle@instance.tld) — links to the same
     // synthetic-username profile route already used everywhere else a
@@ -141,6 +163,13 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     if (/^#[a-zA-Z0-9_]+$/.test(part)) {
       return <Link key={i} to={`/search?tab=posts&q=${encodeURIComponent(part)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
+    // AGORA-258: only substitute a shortcode this specific post/comment's own
+    // emoji map actually resolves — anything else matching the pattern (a
+    // literal ":shrug:" someone typed with no such custom emoji) stays as
+    // plain text, same as it always has.
+    if (emojis && /^:[a-zA-Z0-9_]+:$/.test(part) && emojis[part]) {
+      return emojiImg(part, emojis[part], i)
+    }
     if (/^https?:\/\//i.test(part)) {
       const url = part.replace(/[.,!?)]+$/, '')
       const trailing = part.slice(url.length)
@@ -153,6 +182,16 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     }
     return <span key={i}>{part}</span>
   })
+}
+
+// renderName (AGORA-258) substitutes recognized :shortcode: custom emoji in
+// a display name — deliberately simpler than renderContent: a name is never
+// user-composed rich text, so no @mention/#hashtag/URL handling applies,
+// just the literal name with any emoji shortcodes swapped for images.
+export function renderName(name: string, emojis?: EmojiMap) {
+  if (!emojis || Object.keys(emojis).length === 0) return name
+  const parts = name.split(/(:[a-zA-Z0-9_]+:)/g)
+  return parts.map((part, i) => (emojis[part] ? emojiImg(part, emojis[part], i) : part))
 }
 
 export default function CommentsSection({ postId, postAuthorId }: { postId: string, postAuthorId: string }) {
@@ -443,7 +482,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
       <div className="flex-1 min-w-0">
         <div className="bg-agora-50 dark:bg-agora-700/50 rounded-xl px-3 py-2">
           <Link to={`/profile/${c.username}`} className="text-xs font-semibold text-agora-800 dark:text-agora-200 hover:underline">
-            {c.display_name || c.username}
+            {c.display_name ? renderName(c.display_name, c.author_emojis) : c.username}
           </Link>
           {c.pronouns && (
             <span className="text-agora-400 dark:text-agora-500 text-xs ml-1">({c.pronouns})</span>
@@ -475,7 +514,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             </div>
           ) : (
             <>
-              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content)}</p>
+              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content, undefined, c.content_emojis)}</p>
               {c.image_url && (
                 isGifUrl(c.image_url) ? (
                   <div className="mt-1 rounded-lg overflow-hidden">

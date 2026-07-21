@@ -372,7 +372,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	imageURLs, videoURL := matchAttachments(note.Attachment)
-	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag))
+	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
 }
 
 // fetchRemoteNoteSignedAsInstance dereferences a relay-announced post URL,
@@ -464,7 +464,7 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.
-func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string) {
+func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string, emojis map[string]string) {
 	if actorURL == "" || noteID == "" {
 		return
 	}
@@ -476,11 +476,11 @@ func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, i
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second subscribed relay forwarding the same

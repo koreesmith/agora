@@ -38,7 +38,7 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio,
-		       u.is_remote, u.remote_instance,
+		       u.is_remote, u.remote_instance, COALESCE(u.emojis::text,'{}'),
 		       COALESCE(
 		           CASE
 		               WHEN u.id = $1 THEN 'self'
@@ -74,21 +74,24 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Result struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		Bio            string `json:"bio"`
-		IsRemote       bool   `json:"is_remote"`
-		RemoteInstance string `json:"remote_instance,omitempty"`
-		FriendStatus   string `json:"friendship_status"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		Bio            string          `json:"bio"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
+		FriendStatus   string          `json:"friendship_status"`
 	}
 
 	var results []Result
 	for rows.Next() {
 		var u Result
+		var emojis string
 		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio,
-			&u.IsRemote, &u.RemoteInstance, &u.FriendStatus)
+			&u.IsRemote, &u.RemoteInstance, &emojis, &u.FriendStatus)
+		u.Emojis = json.RawMessage(emojis)
 		results = append(results, u)
 	}
 	if results == nil { results = []Result{} }
@@ -145,7 +148,8 @@ const postResultColumns = `
 	p.is_remote, p.remote_instance,
 	(SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 	(SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
-	EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked`
+	EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
+	COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')`
 
 func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
@@ -199,29 +203,35 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type PostResult struct {
-		ID             string `json:"id"`
-		AuthorID       string `json:"author_id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		Content        string `json:"content"`
-		ImageURL       string `json:"image_url"`
-		Visibility     string `json:"visibility"`
-		CreatedAt      string `json:"created_at"`
-		IsRemote       bool   `json:"is_remote"`
-		RemoteInstance string `json:"remote_instance,omitempty"`
-		LikeCount      int    `json:"like_count"`
-		CommentCount   int    `json:"comment_count"`
-		Liked          bool   `json:"liked"`
+		ID             string          `json:"id"`
+		AuthorID       string          `json:"author_id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		Content        string          `json:"content"`
+		ImageURL       string          `json:"image_url"`
+		Visibility     string          `json:"visibility"`
+		CreatedAt      string          `json:"created_at"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		LikeCount      int             `json:"like_count"`
+		CommentCount   int             `json:"comment_count"`
+		Liked          bool            `json:"liked"`
+		AuthorEmojis   json.RawMessage `json:"author_emojis,omitempty"`
+		ContentEmojis  json.RawMessage `json:"content_emojis,omitempty"`
 	}
 
 	var posts []PostResult
 	for rows.Next() {
 		var p PostResult
+		var authorEmojis, contentEmojis string
 		rows.Scan(&p.ID, &p.AuthorID, &p.Username, &p.DisplayName, &p.AvatarURL,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt,
 			&p.IsRemote, &p.RemoteInstance,
-			&p.LikeCount, &p.CommentCount, &p.Liked)
+			&p.LikeCount, &p.CommentCount, &p.Liked,
+			&authorEmojis, &contentEmojis)
+		p.AuthorEmojis = json.RawMessage(authorEmojis)
+		p.ContentEmojis = json.RawMessage(contentEmojis)
 		posts = append(posts, p)
 	}
 	if posts == nil { posts = []PostResult{} }

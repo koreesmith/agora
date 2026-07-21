@@ -129,22 +129,28 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		RemoteFollowerCount  *int `json:"remote_follower_count,omitempty"`
 		RemoteFollowingCount *int `json:"remote_following_count,omitempty"`
 		RemotePostCount      *int `json:"remote_post_count,omitempty"`
+		// AGORA-258: custom emoji (shortcode -> image URL) referenced in
+		// DisplayName/Bio, sourced from the actor's own "tag" array at
+		// ingestion time.
+		Emojis json.RawMessage `json:"emojis,omitempty"`
 	}
+	var emojisRaw string
 
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
 		       location, website, profile_private, hide_timeline, is_remote, remote_instance, ap_actor_url,
-		       atproto_remote_did, created_at
+		       atproto_remote_did, created_at, COALESCE(emojis::text,'{}')
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
-		&u.AtprotoRemoteDID, &u.CreatedAt,
+		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw,
 	)
 	if err != nil {
 		writeError(w, 404, "user not found")
 		return
 	}
+	u.Emojis = json.RawMessage(emojisRaw)
 
 	// Defensive re-clean, not just belt-and-suspenders: a remote actor's bio
 	// is only reprocessed through federation.HTMLToPlainText when its cache
@@ -276,6 +282,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 			"avatar_url":   u.AvatarURL,
 			"profile_private": true,
 			"friend_status": u.FriendStatus,
+			"emojis":       u.Emojis,
 		})
 		return
 	}
@@ -784,13 +791,14 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimPrefix(r.URL.Query().Get("q"), "@")
 
 	type UserHit struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		IsFriend       bool   `json:"is_friend"`
-		IsRemote       bool   `json:"is_remote,omitempty"`
-		RemoteInstance string `json:"remote_instance,omitempty"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		IsFriend       bool            `json:"is_friend"`
+		IsRemote       bool            `json:"is_remote,omitempty"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 	type GroupHit struct {
 		Slug      string `json:"slug"`
@@ -853,7 +861,7 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 		qPattern = q + "%"
 	}
 	rRows, rerr := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url, u.remote_instance
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.remote_instance, COALESCE(u.emojis::text,'{}')
 		FROM ap_following af
 		JOIN users u ON u.ap_actor_url = af.followed_actor_url
 		WHERE af.follower_user_id = $1
@@ -865,8 +873,10 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 		defer rRows.Close()
 		for rRows.Next() {
 			var u UserHit
+			var emojis string
 			u.IsRemote = true
-			rRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.RemoteInstance)
+			rRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.RemoteInstance, &emojis)
+			u.Emojis = json.RawMessage(emojis)
 			users = append(users, u)
 		}
 	}

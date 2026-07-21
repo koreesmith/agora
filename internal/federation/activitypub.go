@@ -1273,13 +1273,52 @@ type apAttachment struct {
 	URL       string `json:"url"`
 }
 
-// apTagEntry (AGORA-213) is a Note's "tag" array element — shared shape for
-// both Mention and Hashtag entries (resolveFediverseMentions builds the
-// outbound Mention side of this same array; this is the inbound-parsing
-// counterpart, and only cares about Hashtag entries).
+// apTagEntry (AGORA-213, extended AGORA-258) is a Note's or actor's "tag"
+// array element — shared shape for Mention, Hashtag, and Emoji entries.
+// Icon is only ever populated on an Emoji entry (Mention/Hashtag never set
+// it), which is exactly the field hashtagsFromAPTags ignores and
+// emojisFromAPTags reads.
 type apTagEntry struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
+	Icon struct {
+		URL string `json:"url"`
+	} `json:"icon"`
+}
+
+// emojisFromAPTags extracts a shortcode->image-URL map from a Note's or
+// actor's own "tag" array (AGORA-258) — mirrors hashtagsFromAPTags' shape
+// for the Emoji-type entries that function ignores. Returns nil (not an
+// empty map) when there's nothing to store, so callers can cheaply check
+// len() without allocating on the common no-custom-emoji path.
+func emojisFromAPTags(entries []apTagEntry) map[string]string {
+	var emojis map[string]string
+	for _, t := range entries {
+		if t.Type != "Emoji" || t.Name == "" || t.Icon.URL == "" {
+			continue
+		}
+		if emojis == nil {
+			emojis = map[string]string{}
+		}
+		emojis[t.Name] = t.Icon.URL
+	}
+	return emojis
+}
+
+// emojisJSON marshals an emoji map for storage in the emojis JSONB column,
+// normalizing a nil/empty map to a literal "{}" rather than SQL NULL/JSON
+// null — the column's own DEFAULT is '{}', and consumers (frontend
+// rendering, other backend readers) only ever need to handle "is this key
+// present", not a three-way nil/null/empty distinction.
+func emojisJSON(m map[string]string) []byte {
+	if len(m) == 0 {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
 }
 
 // hashtagsFromAPTags extracts distinct, lowercased tag names from a Note's
@@ -1449,7 +1488,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// practice (no real AP client posts a poll as a reply), so poll data
 	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag))
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
 		return
 	}
 
@@ -1474,11 +1513,12 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	domain := domainFromURL(note.ID)
 	var commentID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
-		VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary)).Scan(&commentID)
+	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary),
+		emojisJSON(emojisFromAPTags(note.Tag))).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1542,9 +1582,9 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
-		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
+		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW(), emojis = $4
 		WHERE id = $3
-	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID)
+	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID, emojisJSON(emojisFromAPTags(note.Tag)))
 	// Attachments are fully replaced, not merged — clear the old multi-image
 	// rows before reapplying whatever the edit currently carries, mirroring
 	// EditPost's own replace-not-append handling of image_urls.
@@ -1623,7 +1663,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1638,11 +1678,11 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -1835,13 +1875,13 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
-		                   ap_actor_url, ap_inbox_url, profile_private)
-		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false)
+		                   ap_actor_url, ap_inbox_url, profile_private, emojis)
+		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false
+		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10
 		RETURNING id
 	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
-		handle, domain, actorURL, profile.Inbox,
+		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis),
 	).Scan(&id)
 	if err != nil {
 		return "", err
@@ -2179,6 +2219,9 @@ type remoteActorProfile struct {
 	FollowersURL string
 	FollowingURL string
 	OutboxURL    string
+	// AGORA-258: shortcode (":stl_blues:") -> image URL, parsed from the
+	// actor's own "tag" array. nil/empty for an actor with no custom emoji.
+	Emojis map[string]string
 }
 
 // fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
@@ -2365,6 +2408,10 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Followers string `json:"followers"`
 		Following string `json:"following"`
 		Outbox    string `json:"outbox"`
+		// AGORA-258: custom emoji shortcodes referenced in Name/Summary (e.g.
+		// "Koree A. Smith :stl_blues:") resolve to an image only via this
+		// separate tag array — the shortcode text alone is meaningless.
+		Tag []apTagEntry `json:"tag"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
 		return nil, err
@@ -2382,6 +2429,7 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		FollowersURL:      actor.Followers,
 		FollowingURL:      actor.Following,
 		OutboxURL:         actor.Outbox,
+		Emojis:            emojisFromAPTags(actor.Tag),
 	}, nil
 }
 
@@ -2790,7 +2838,8 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(
 		         SELECT 1 FROM ap_followers apf
 		         WHERE apf.followed_user_id = $1 AND apf.follower_actor_url = af.followed_actor_url
-		       )
+		       ),
+		       COALESCE(u.emojis::text, '{}')
 		FROM ap_following af
 		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
 		WHERE af.follower_user_id = $1
@@ -2818,17 +2867,20 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		// local lookup here (unlike the AT Proto side), since an inbound
 		// ActivityPub Follow is delivered straight to our own inbox and
 		// already lives in ap_followers.
-		FollowsBack bool `json:"follows_back"`
+		FollowsBack bool            `json:"follows_back"`
+		Emojis      json.RawMessage `json:"emojis,omitempty"`
 	}
 	var list []followingEntry
 	for rows.Next() {
 		var f followingEntry
 		var createdAt time.Time
+		var emojis string
 		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &f.ShowInFeed, &createdAt,
-			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack); err != nil {
+			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack, &emojis); err != nil {
 			continue
 		}
 		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		f.Emojis = json.RawMessage(emojis)
 		list = append(list, f)
 	}
 
@@ -2846,8 +2898,10 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		list[i].UserID = uid
-		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance FROM users WHERE id = $1`, uid).
-			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance)
+		var emojis string
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance, COALESCE(emojis::text,'{}') FROM users WHERE id = $1`, uid).
+			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance, &emojis)
+		list[i].Emojis = json.RawMessage(emojis)
 	}
 
 	if list == nil {

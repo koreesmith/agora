@@ -38,6 +38,7 @@ type rawNotification struct {
 	ActorUsername    *string
 	ActorDisplayName *string
 	ActorAvatarURL   *string
+	ActorEmojis      string
 	PostID           *string
 	Data             string
 	Read             bool
@@ -46,10 +47,11 @@ type rawNotification struct {
 
 // NotifActor is a single actor within a grouped notification.
 type NotifActor struct {
-	ID          string  `json:"id"`
-	Username    string  `json:"username"`
-	DisplayName string  `json:"display_name"`
-	AvatarURL   *string `json:"avatar_url"`
+	ID          string          `json:"id"`
+	Username    string          `json:"username"`
+	DisplayName string          `json:"display_name"`
+	AvatarURL   *string         `json:"avatar_url"`
+	Emojis      json.RawMessage `json:"emojis,omitempty"`
 }
 
 // NotificationItem is the unified response shape for both grouped and ungrouped notifications.
@@ -66,11 +68,12 @@ type NotificationItem struct {
 	Actors []NotifActor `json:"actors,omitempty"`
 	Count  int          `json:"count,omitempty"`
 	// Ungrouped-only fields
-	ActorID          *string `json:"actor_id,omitempty"`
-	ActorUsername    *string `json:"actor_username,omitempty"`
-	ActorDisplayName *string `json:"actor_display_name,omitempty"`
-	ActorAvatarURL   *string `json:"actor_avatar_url,omitempty"`
-	FriendStatus     string  `json:"friend_status,omitempty"`
+	ActorID          *string         `json:"actor_id,omitempty"`
+	ActorUsername    *string         `json:"actor_username,omitempty"`
+	ActorDisplayName *string         `json:"actor_display_name,omitempty"`
+	ActorAvatarURL   *string         `json:"actor_avatar_url,omitempty"`
+	ActorEmojis      json.RawMessage `json:"actor_emojis,omitempty"`
+	FriendStatus     string          `json:"friend_status,omitempty"`
 }
 
 // groupableTypes are notification types collapsed by (type, post_id).
@@ -105,7 +108,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT n.id, n.type,
-		       n.actor_id, u.username, u.display_name, u.avatar_url,
+		       n.actor_id, u.username, u.display_name, u.avatar_url, COALESCE(u.emojis::text,'{}'),
 		       n.post_id, n.data, n.read, n.created_at
 		FROM notifications n
 		LEFT JOIN users u ON u.id = n.actor_id
@@ -122,7 +125,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var n rawNotification
 		rows.Scan(&n.ID, &n.Type, &n.ActorID, &n.ActorUsername, &n.ActorDisplayName,
-			&n.ActorAvatarURL, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
+			&n.ActorAvatarURL, &n.ActorEmojis, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
 		raw = append(raw, n)
 	}
 
@@ -172,6 +175,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 							Username:    derefStr(n.ActorUsername),
 							DisplayName: derefStr(n.ActorDisplayName),
 							AvatarURL:   n.ActorAvatarURL,
+							Emojis:      json.RawMessage(n.ActorEmojis),
 						})
 					}
 				}
@@ -193,6 +197,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 						Username:    derefStr(n.ActorUsername),
 						DisplayName: derefStr(n.ActorDisplayName),
 						AvatarURL:   n.ActorAvatarURL,
+						Emojis:      json.RawMessage(n.ActorEmojis),
 					}}
 				}
 				groupMap[key] = item
@@ -212,6 +217,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 				ActorUsername:    n.ActorUsername,
 				ActorDisplayName: n.ActorDisplayName,
 				ActorAvatarURL:   n.ActorAvatarURL,
+				ActorEmojis:      json.RawMessage(n.ActorEmojis),
 			}
 			if n.Type == "friend_request" && n.ActorID != nil {
 				var status, requesterID string

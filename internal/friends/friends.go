@@ -53,7 +53,7 @@ func (s *Service) ListFriends(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
 		SELECT u.id, u.username, u.display_name, u.avatar_url,
-		       u.bio, u.is_remote, u.remote_instance, f.created_at
+		       u.bio, u.is_remote, u.remote_instance, f.created_at, COALESCE(u.emojis::text,'{}')
 		FROM friendships f
 		JOIN users u ON (
 			CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
@@ -69,21 +69,24 @@ func (s *Service) ListFriends(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Friend struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		Bio            string `json:"bio"`
-		IsRemote       bool   `json:"is_remote"`
-		RemoteInstance string `json:"remote_instance,omitempty"`
-		FriendsSince   string `json:"friends_since"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		Bio            string          `json:"bio"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		FriendsSince   string          `json:"friends_since"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 
 	var friends []Friend
 	for rows.Next() {
 		var f Friend
+		var emojis string
 		rows.Scan(&f.ID, &f.Username, &f.DisplayName, &f.AvatarURL,
-			&f.Bio, &f.IsRemote, &f.RemoteInstance, &f.FriendsSince)
+			&f.Bio, &f.IsRemote, &f.RemoteInstance, &f.FriendsSince, &emojis)
+		f.Emojis = json.RawMessage(emojis)
 		friends = append(friends, f)
 	}
 	if friends == nil { friends = []Friend{} }
@@ -361,7 +364,7 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, _ := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_remote, u.remote_instance
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_remote, u.remote_instance, COALESCE(u.emojis::text,'{}')
 		FROM friend_group_members m
 		JOIN users u ON u.id = m.friend_id
 		WHERE m.group_id = $1
@@ -370,17 +373,20 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Member struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		IsRemote       bool   `json:"is_remote"`
-		RemoteInstance string `json:"remote_instance"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 	var members []Member
 	for rows.Next() {
 		var m Member
-		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance)
+		var emojis string
+		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance, &emojis)
+		m.Emojis = json.RawMessage(emojis)
 		members = append(members, m)
 	}
 	if members == nil { members = []Member{} }

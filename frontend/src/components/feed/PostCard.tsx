@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import CommentsSection, { renderContent } from './CommentsSection'
+import CommentsSection, { renderContent, renderName } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
 import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
@@ -81,6 +81,11 @@ interface Post {
   page_avatar_url?: string
   created_at: string
   edited_at?: string
+  // Custom emoji (AGORA-258)
+  author_emojis?: Record<string, string>
+  content_emojis?: Record<string, string>
+  repost_author_emojis?: Record<string, string>
+  repost_content_emojis?: Record<string, string>
 }
 
 const visIcons: Record<string, React.ReactNode> = {
@@ -207,7 +212,7 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
-                      {r.display_name || r.username}
+                      {r.display_name ? renderName(r.display_name, r.emojis) : r.username}
                     </p>
                     <p className="text-xs text-agora-400">@{r.username}</p>
                   </div>
@@ -349,7 +354,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
                           : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(v.display_name||v.username)[0].toUpperCase()}</span>}
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{v.display_name || v.username}</p>
+                        <p className="text-sm font-medium truncate">{v.display_name ? renderName(v.display_name, v.emojis) : v.username}</p>
                         <p className="text-xs text-agora-400">@{v.username}</p>
                       </div>
                     </Link>
@@ -558,7 +563,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         <div className="flex items-center gap-1.5 text-xs text-agora-500 dark:text-agora-400 mb-3">
           <ArrowRight size={13} />
           <Link to={`/profile/${post.author_username}`} className="font-medium hover:underline">
-            {post.author_display_name || post.author_username}
+            {post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}
           </Link>
           <span>→</span>
           <Link to={`/profile/${post.wall_username}`} className="font-medium hover:underline">
@@ -598,7 +603,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               ) : (
                 <Link to={`/profile/${post.author_username}`}
                   className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
-                  {post.author_display_name}
+                  {renderName(post.author_display_name, post.author_emojis)}
                 </Link>
               )}
               {!post.page_id && post.author_pronouns && (
@@ -776,7 +781,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Content — the author's own words (their commentary, when this is a repost) */}
               {post.content && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-                  {renderContent(post.content)}
+                  {renderContent(post.content, undefined, post.content_emojis)}
                 </p>
               )}
 
@@ -797,7 +802,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                     </div>
                     <Link to={`/profile/${post.repost_author_username}`}
                       className="font-semibold text-agora-800 dark:text-agora-200 hover:underline text-sm">
-                      {post.repost_author_display_name || post.repost_author_username}
+                      {post.repost_author_display_name ? renderName(post.repost_author_display_name, post.repost_author_emojis) : post.repost_author_username}
                     </Link>
                     {post.repost_author_pronouns && (
                       <span className="text-agora-400 dark:text-agora-500 text-xs">({post.repost_author_pronouns})</span>
@@ -806,7 +811,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   </div>
                   {post.repost_content && (
                     <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">
-                      {renderContent(post.repost_content)}
+                      {renderContent(post.repost_content, undefined, post.repost_content_emojis)}
                     </p>
                   )}
                   {post.repost_image_url && (
@@ -1155,10 +1160,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                       ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(post.author_display_name || post.author_username || '?')[0].toUpperCase()}</span>}
                   </div>
-                  <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name || post.author_username}</span>
+                  <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}</span>
                   <span className="text-xs text-agora-400">@{post.author_username}</span>
                 </div>
-                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{post.content}</p>}
+                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis)}</p>}
                 {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
               </div>
 

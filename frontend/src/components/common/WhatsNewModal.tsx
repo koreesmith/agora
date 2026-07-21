@@ -27,13 +27,6 @@ const FEATURES = [
     linkText: null,
   },
   {
-    emoji: '😀',
-    title: 'Custom emoji',
-    desc: "A Mastodon custom emoji like :your_team_logo: now renders as a real inline image in names, bios, and posts, instead of showing the literal shortcode text.",
-    link: null,
-    linkText: null,
-  },
-  {
     emoji: '🔍',
     title: 'Unified search',
     desc: 'Search now covers Agora, the Fediverse, and Bluesky in one place — accounts, posts, and hashtags.',

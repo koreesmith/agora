@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueries, useQueryClient } from '@tanstack/react-query'
 import { friendsApi } from '../../api'
 import { X, Plus, Check } from 'lucide-react'
 
@@ -15,7 +15,7 @@ export default function FriendListModal({ friend, onClose }: Props) {
   // against it (add newly-checked lists, remove newly-unchecked ones)
   // instead of blindly re-adding every currently-checked list every time.
   const [initialSelected, setInitialSelected] = useState<Set<string>>(new Set())
-  const [membershipLoaded, setMembershipLoaded] = useState(false)
+  const [seeded, setSeeded] = useState(false)
   const [newListName, setNewListName] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -29,28 +29,41 @@ export default function FriendListModal({ friend, onClose }: Props) {
   // Load which of these lists this account is already a member of, so the
   // checkboxes reflect reality instead of always starting unchecked —
   // previously this modal had no idea whether the account it was opened
-  // for was already on any list.
+  // for was already on any list. Uses the same ['list-members', id] query
+  // key ConnectionsPage's own ListCard uses, so an already-expanded list's
+  // membership is shared from cache rather than re-fetched.
+  //
+  // This replaced an earlier hand-rolled Promise.all-in-a-useEffect version
+  // that could hang forever showing "Loading current lists…": a background
+  // refetch of the ['friend-groups'] query (React Query refetches on window
+  // focus by default) changed the effect's own dependency mid-flight,
+  // tearing down the in-flight fetch via its cancelled-flag cleanup before
+  // it ever got to call setState. useQueries lets React Query itself own
+  // that lifecycle instead of a manual flag, so it can't get stuck.
+  const membershipQueries = useQueries({
+    queries: lists.map(list => ({
+      queryKey: ['list-members', list.id],
+      queryFn: () => friendsApi.listFriendListMembers(list.id).then(r => r.data),
+    })),
+  })
+  const membershipLoaded = lists.length === 0 || membershipQueries.every(q => q.isSuccess || q.isError)
+  const membershipQueryError = membershipQueries.some(q => q.isError)
+
   useEffect(() => {
-    if (!listsData) return
-    let cancelled = false
-    setMembershipLoaded(false)
-    Promise.all(
-      lists.map(list =>
-        friendsApi.listFriendListMembers(list.id).then(r => ({
-          listID: list.id,
-          isMember: (r.data?.members || []).some((m: any) => m.id === friend.id),
-        }))
-      )
-    ).then(results => {
-      if (cancelled) return
-      const memberOf = new Set(results.filter(r => r.isMember).map(r => r.listID))
-      setSelected(memberOf)
-      setInitialSelected(memberOf)
-      setMembershipLoaded(true)
+    if (seeded || !membershipLoaded) return
+    const memberOf = new Set<string>()
+    lists.forEach((list, i) => {
+      const members: any[] = membershipQueries[i]?.data?.members || []
+      if (members.some((m: any) => m.id === friend.id)) memberOf.add(list.id)
     })
-    return () => { cancelled = true }
+    setSelected(memberOf)
+    setInitialSelected(memberOf)
+    setSeeded(true)
+    if (membershipQueryError) {
+      setError("Couldn't load this account's current lists — some may be missing below.")
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listsData, friend.id])
+  }, [membershipLoaded, seeded])
 
   const createList = useMutation({
     mutationFn: (name: string) => friendsApi.createFriendList(name),

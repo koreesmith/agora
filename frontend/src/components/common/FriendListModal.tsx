@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { friendsApi } from '../../api'
 import { X, Plus, Check } from 'lucide-react'
@@ -11,14 +11,46 @@ interface Props {
 export default function FriendListModal({ friend, onClose }: Props) {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  // The membership state as of when the modal opened, so Save can diff
+  // against it (add newly-checked lists, remove newly-unchecked ones)
+  // instead of blindly re-adding every currently-checked list every time.
+  const [initialSelected, setInitialSelected] = useState<Set<string>>(new Set())
+  const [membershipLoaded, setMembershipLoaded] = useState(false)
   const [newListName, setNewListName] = useState('')
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
 
   const { data: listsData } = useQuery({
     queryKey: ['friend-groups'],
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const lists: any[] = listsData?.groups || []
+
+  // Load which of these lists this account is already a member of, so the
+  // checkboxes reflect reality instead of always starting unchecked —
+  // previously this modal had no idea whether the account it was opened
+  // for was already on any list.
+  useEffect(() => {
+    if (!listsData) return
+    let cancelled = false
+    setMembershipLoaded(false)
+    Promise.all(
+      lists.map(list =>
+        friendsApi.listFriendListMembers(list.id).then(r => ({
+          listID: list.id,
+          isMember: (r.data?.members || []).some((m: any) => m.id === friend.id),
+        }))
+      )
+    ).then(results => {
+      if (cancelled) return
+      const memberOf = new Set(results.filter(r => r.isMember).map(r => r.listID))
+      setSelected(memberOf)
+      setInitialSelected(memberOf)
+      setMembershipLoaded(true)
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listsData, friend.id])
 
   const createList = useMutation({
     mutationFn: (name: string) => friendsApi.createFriendList(name),
@@ -39,17 +71,28 @@ export default function FriendListModal({ friend, onClose }: Props) {
     })
   }
 
+  const toAdd = [...selected].filter(id => !initialSelected.has(id))
+  const toRemove = [...initialSelected].filter(id => !selected.has(id))
+  const hasChanges = toAdd.length > 0 || toRemove.length > 0
+
   const handleSave = async () => {
-    if (selected.size === 0) { onClose(); return }
+    if (!hasChanges) { onClose(); return }
     setSaving(true)
+    setError('')
     try {
-      await Promise.all([...selected].map(listID =>
-        friendsApi.addToFriendList(listID, friend.id)
-      ))
+      await Promise.all([
+        ...toAdd.map(listID => friendsApi.addToFriendList(listID, friend.id)),
+        ...toRemove.map(listID => friendsApi.removeFromFriendList(listID, friend.id)),
+      ])
       qc.invalidateQueries({ queryKey: ['friend-groups'] })
+      for (const listID of [...toAdd, ...toRemove]) {
+        qc.invalidateQueries({ queryKey: ['list-members', listID] })
+      }
+      onClose()
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Could not update lists — please try again.')
     } finally {
       setSaving(false)
-      onClose()
     }
   }
 
@@ -99,7 +142,10 @@ export default function FriendListModal({ friend, onClose }: Props) {
           {lists.length === 0 && !createList.isPending && (
             <p className="text-sm text-agora-400 text-center py-3">No lists yet — create one below</p>
           )}
-          {lists.map((list: any) => {
+          {lists.length > 0 && !membershipLoaded && (
+            <p className="text-sm text-agora-400 text-center py-3">Loading current lists…</p>
+          )}
+          {membershipLoaded && lists.map((list: any) => {
             const isSelected = selected.has(list.id)
             return (
               <button
@@ -145,6 +191,8 @@ export default function FriendListModal({ friend, onClose }: Props) {
           </div>
         </div>
 
+        {error && <p className="text-sm text-red-500 px-4 pb-2">{error}</p>}
+
         {/* Footer actions */}
         <div className="flex gap-2 px-4 pb-4">
           <button onClick={onClose} className="btn-secondary flex-1 text-sm">
@@ -152,10 +200,10 @@ export default function FriendListModal({ friend, onClose }: Props) {
           </button>
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || !membershipLoaded}
             className="btn-primary flex-1 text-sm"
           >
-            {saving ? 'Saving…' : selected.size > 0 ? `Add to ${selected.size} list${selected.size > 1 ? 's' : ''}` : 'Done'}
+            {saving ? 'Saving…' : hasChanges ? 'Save changes' : 'Done'}
           </button>
         </div>
       </div>

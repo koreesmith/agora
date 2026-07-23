@@ -3,6 +3,14 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    /* Bumps every rem-based Tailwind text-* size (the whole app's type
+       scale — nothing overrides Tailwind's default fontSize theme) up
+       ~12% from the 16px browser default, matching mobile's own
+       across-the-board fontSize bump. A single lever here instead of
+       touching every text-* className individually. */
+    font-size: 18px;
+  }
   body {
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;

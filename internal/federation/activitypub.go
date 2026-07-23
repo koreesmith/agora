@@ -2984,18 +2984,46 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 // rather than reusing that helper.
 func (s *Service) quotedPostURL(postID string) string {
 	var isRemote bool
-	var username, remotePostID string
+	var username, remoteInstance, remotePostID string
 	if err := s.db.QueryRow(`
-		SELECT u.is_remote, u.username, p.remote_post_id
+		SELECT u.is_remote, u.username, p.remote_instance, p.remote_post_id
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
-	`, postID).Scan(&isRemote, &username, &remotePostID); err != nil {
+	`, postID).Scan(&isRemote, &username, &remoteInstance, &remotePostID); err != nil {
 		return ""
 	}
 	if isRemote {
+		// AGORA-263: a Bluesky-origin post's remote_post_id is its at://
+		// URI (AT Protocol's own record identifier, e.g.
+		// "at://did:plc:xxx/app.bsky.feed.post/rkey") — meaningful to us,
+		// but not a URL a human (or linkifyURLs' http(s)-only regex below)
+		// can do anything with; it showed up on the receiving Mastodon
+		// client as inert, unlinked at:// text. Bluesky's own web app
+		// resolves that same shape at bsky.app/profile/{did}/post/{rkey},
+		// so convert to that instead — the DID alone resolves fine there,
+		// no handle lookup needed.
+		if remoteInstance == "bsky.app" {
+			if webURL, ok := blueskyATURIToWebURL(remotePostID); ok {
+				return webURL
+			}
+		}
 		return remotePostID
 	}
 	return s.actorURL(username) + "/posts/" + postID
+}
+
+// blueskyATURIToWebURL converts an at://did/app.bsky.feed.post/rkey AT-URI
+// into the equivalent bsky.app web URL.
+func blueskyATURIToWebURL(atURI string) (string, bool) {
+	rest := strings.TrimPrefix(atURI, "at://")
+	if rest == atURI {
+		return "", false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] != "app.bsky.feed.post" || parts[2] == "" {
+		return "", false
+	}
+	return "https://bsky.app/profile/" + parts[0] + "/post/" + parts[2], true
 }
 
 // BroadcastUpdatePost delivers a signed Update activity when a previously-

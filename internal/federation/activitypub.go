@@ -3128,20 +3128,20 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2
 	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
+		log.Printf("federation: DeliverReply %s: author lookup failed or activitypub disabled for user (err=%v)", commentID, err)
 		return
 	}
 
-	var targetIsRemote bool
-	var targetActorURL, targetInboxURL, targetRemotePostID string
-	s.db.QueryRow(`
-		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
-		FROM posts p JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1
-	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
-	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
+	// Reuse lookupRemoteTarget (shared with DeliverLike/DeliverAnnounce) rather
+	// than re-querying inline, so a stale cached stub with no inbox URL gets
+	// the same AGORA-254 self-heal here that it already gets for a Like or
+	// Announce — this path had drifted out of sync with that fix and was
+	// silently giving up on exactly the "broken stub" case AGORA-254 targeted.
+	targetActorURL, targetInboxURL, targetRemotePostID, targetOK := s.lookupRemoteTarget(replyToID)
 
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	if !targetOK && len(mentionedActorURLs) == 0 {
+		log.Printf("federation: DeliverReply %s: parent %s is not a remote target and no fediverse mentions found, skipping", commentID, replyToID)
 		return
 	}
 
@@ -3200,20 +3200,16 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2
 	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
+		log.Printf("federation: DeliverReplyUpdate %s: author lookup failed or activitypub disabled for user (err=%v)", commentID, err)
 		return
 	}
 
-	var targetIsRemote bool
-	var targetActorURL, targetInboxURL, targetRemotePostID string
-	s.db.QueryRow(`
-		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
-		FROM posts p JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1
-	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
-	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
+	// See DeliverReply: reuse lookupRemoteTarget for its AGORA-254 self-heal.
+	targetActorURL, targetInboxURL, targetRemotePostID, targetOK := s.lookupRemoteTarget(replyToID)
 
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	if !targetOK && len(mentionedActorURLs) == 0 {
+		log.Printf("federation: DeliverReplyUpdate %s: parent %s is not a remote target and no fediverse mentions found, skipping", commentID, replyToID)
 		return
 	}
 
@@ -3266,6 +3262,7 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 		WHERE p.id = $1
 	`, postID).Scan(&isRemote, &actorURL, &inboxURL, &remotePostID)
 	if err != nil || !isRemote || actorURL == "" || remotePostID == "" {
+		log.Printf("federation: lookupRemoteTarget %s: not a remote target (err=%v isRemote=%v actorURL=%q remotePostID=%q)", postID, err, isRemote, actorURL, remotePostID)
 		return "", "", "", false
 	}
 	if inboxURL == "" {
@@ -3278,9 +3275,11 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 		// already-broken stub can succeed on its very next attempt rather
 		// than waiting on the remote actor to post again.
 		if _, err := s.getOrCreateRemoteAPUserAsInstance(actorURL); err != nil {
+			log.Printf("federation: lookupRemoteTarget %s: self-heal fetch of actor %s failed: %v", postID, actorURL, err)
 			return "", "", "", false
 		}
 		if err := s.db.QueryRow(`SELECT ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&inboxURL); err != nil || inboxURL == "" {
+			log.Printf("federation: lookupRemoteTarget %s: actor %s still has no inbox URL after self-heal (err=%v)", postID, actorURL, err)
 			return "", "", "", false
 		}
 	}
@@ -3293,6 +3292,7 @@ func (s *Service) DeliverLike(userID, postID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
+		log.Printf("federation: DeliverLike %s: not a remote target, skipping", postID)
 		return
 	}
 
@@ -3300,6 +3300,7 @@ func (s *Service) DeliverLike(userID, postID string) {
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverLike %s: liker %s lookup failed or activitypub disabled (err=%v)", postID, userID, err)
 		return
 	}
 
@@ -3325,11 +3326,13 @@ func (s *Service) DeliverUnlike(userID, postID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
+		log.Printf("federation: DeliverUnlike %s: not a remote target, skipping", postID)
 		return
 	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		log.Printf("federation: DeliverUnlike %s: unliker %s lookup failed (err=%v)", postID, userID, err)
 		return
 	}
 
@@ -3359,6 +3362,7 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
 	if !ok {
+		log.Printf("federation: DeliverAnnounce %s: original post %s is not a remote target, skipping direct delivery", repostID, originalPostID)
 		return
 	}
 
@@ -3366,6 +3370,7 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverAnnounce %s: reposter %s lookup failed or activitypub disabled (err=%v)", repostID, userID, err)
 		return
 	}
 
@@ -3395,11 +3400,13 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
 	if !ok {
+		log.Printf("federation: DeliverUnannounce %s: original post %s is not a remote target, skipping", repostID, originalPostID)
 		return
 	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		log.Printf("federation: DeliverUnannounce %s: unreposter %s lookup failed (err=%v)", repostID, userID, err)
 		return
 	}
 

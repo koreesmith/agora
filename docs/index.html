@@ -203,19 +203,22 @@ document.getElementById('doc').addEventListener('click', e => {
   const href = a.getAttribute('href');
   if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('#')) return;
   e.preventDefault();
-  // Strip .md extension, then resolve any relative ../ segments against the current doc path
+  // Strip .md extension, then resolve relative to the current doc's directory —
+  // same as a browser resolves a relative link, whether or not it's prefixed
+  // with "./" or "../". A bare sibling link like "pages.md" needs this just as
+  // much as "../pages.md" does; previously only the latter was resolved, so a
+  // plain relative link clicked from any subdirectory doc (user/, backend/,
+  // api/, frontend/) landed on the wrong page or a 404.
   let target = href.replace(/\.md$/, '');
-  if (target.startsWith('.') || target.includes('/../') || target.startsWith('../')) {
-    const currentDoc = (location.hash.slice(1) || 'overview');
-    const base = currentDoc.includes('/') ? currentDoc.substring(0, currentDoc.lastIndexOf('/')) : '';
-    const parts = (base ? base + '/' + target : target).split('/');
-    const resolved = [];
-    for (const p of parts) {
-      if (p === '..') resolved.pop();
-      else if (p && p !== '.') resolved.push(p);
-    }
-    target = resolved.join('/');
+  const currentDoc = (location.hash.slice(1) || 'overview');
+  const base = currentDoc.includes('/') ? currentDoc.substring(0, currentDoc.lastIndexOf('/')) : '';
+  const parts = (base ? base + '/' + target : target).split('/');
+  const resolved = [];
+  for (const p of parts) {
+    if (p === '..') resolved.pop();
+    else if (p && p !== '.') resolved.push(p);
   }
+  target = resolved.join('/');
   navigate(target);
 });
 

@@ -54,17 +54,29 @@ Any authenticated user can submit a report.
 
 ---
 
-## Instance Bans 🛡️
+## Instance Bans & Blocked DIDs 🛡️
+
+Instance bans are enforced against both ActivityPub actors on the banned domain and, for the AT Proto side, a Bluesky handle's own domain — see [Federation Service](../backend/federation.md#inbound-activities) and [AT Protocol Service](../backend/atproto.md#blocking).
 
 ### `GET /api/moderation/instance-bans`
-**Response 200:** `[{ "id", "domain", "reason", "created_at" }]`
+**Response 200:** `{ "bans": [{ "id", "instance", "reason", "notes", "created_at", "banned_by" }] }`
 
 ### `POST /api/moderation/instance-bans`
-**Body:** `{"domain": "string", "reason": "string"}`
-**Response 201**
+**Body:** `{"instance": "bad.instance.com", "reason": "string", "notes": "string"}`
+**Response 201:** `{ "id": "...", "message": "instance banned" }`
 
 ### `DELETE /api/moderation/instance-bans/{id}`
-**Response 204**
+**Response 200:** `{ "message": "instance unbanned" }`
+
+### `GET /api/moderation/blocked-dids`
+**Response 200:** `{ "blocks": [{ "id", "did", "reason", "notes", "created_at", "blocked_by" }] }`
+
+### `POST /api/moderation/blocked-dids`
+**Body:** `{"did": "did:plc:...", "reason": "string", "notes": "string"}`
+**Response 201:** `{ "id": "...", "message": "DID blocked" }`
+
+### `DELETE /api/moderation/blocked-dids/{id}`
+**Response 200:** `{ "message": "DID unblocked" }`
 
 ---
 

@@ -1,6 +1,6 @@
 # Federation API
 
-Two protocols share this surface: **standard ActivityPub** (talks to Mastodon and the rest of the real fediverse) and a **legacy custom Agora-to-Agora protocol** (older, only talks to other Agora instances, not extended further). Public endpoints don't require auth — signature verification (HTTP Signatures for ActivityPub, Ed25519 for the legacy protocol) substitutes for it.
+Two protocols share this surface: **standard ActivityPub** (talks to Mastodon and the rest of the real fediverse) and a **legacy custom Agora-to-Agora protocol** (older, only talks to other Agora instances, not extended further). Public endpoints don't require auth — signature verification (HTTP Signatures for ActivityPub, Ed25519 for the legacy protocol) substitutes for it. For the third protocol Agora speaks — native AT Protocol/Bluesky — see [AT Protocol API](atproto.md).
 
 ---
 
@@ -91,6 +91,24 @@ A `Collection` of the user's followers (count + first page of actor URLs).
 ### `GET /federation/pages/{slug}`, `.../outbox`, `.../followers`
 
 Same three shapes, for a page's own actor — always ActivityPub JSON, no legacy fallback.
+
+---
+
+### `GET /federation/instance`, `GET /federation/instance/outbox`
+
+The instance-wide actor (AGORA-219) — used for relay subscriptions and other instance-level operations, not attributable to any one user. `.../outbox` is always an empty `OrderedCollection`.
+
+---
+
+### `GET /federation/users/{handle}/posts/{postID}/quote-authorizations/{authID}`
+
+Dereferenceable FEP-044f `QuoteAuthorization` object (AGORA-255) — other servers verify a quote-post against this before rendering it.
+
+**Response 200:**
+```json
+{ "@context": "...", "id": "...", "type": "QuoteAuthorization", "interactingObject": "...", "interactionTarget": "...", "attributedTo": "..." }
+```
+**Response 404** if the post, or an authorization for that particular quoter, doesn't exist.
 
 ---
 

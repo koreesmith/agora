@@ -6,23 +6,24 @@
 agora/
 ├── cmd/server/main.go          # Entry point — wires all services, starts HTTP server
 ├── internal/                   # All backend packages
-│   ├── config/                 # Environment-variable configuration
-│   ├── store/                  # PostgreSQL connection + schema migrations
-│   ├── auth/                   # JWT auth, register, login, email verification
-│   ├── users/                  # User profiles, GDPR export/deletion
-│   ├── friends/                # Mutual friend requests + friend groups
-│   ├── feed/                   # Posts, comments, likes, reactions, reposts, polls
-│   ├── notifications/          # In-app + SMTP email notifications
-│   ├── search/                 # Local user & post search
-│   ├── moderation/             # Reports, suspension, banning
-│   ├── admin/                  # Instance settings, user management, invites, audit log
-│   ├── federation/             # Ed25519 cross-instance protocol
-│   ├── media/                  # File upload processing and serving
-│   ├── groups/                 # Community groups
-│   ├── albums/                 # Photo albums
-│   ├── dm/                     # Direct messages + WebSocket hub
-│   ├── blocks/                 # User blocking
-│   └── ctxkeys/                # Shared context key constants
+│   ├── config/                  # Environment-variable configuration
+│   ├── store/                   # PostgreSQL connection + schema migrations
+│   ├── auth/                    # JWT auth, register, login, email verification
+│   ├── users/                   # User profiles, GDPR export/deletion
+│   ├── friends/                 # Mutual friend requests + friend groups
+│   ├── feed/                    # Posts, comments, likes, reactions, reposts, polls
+│   ├── notifications/           # In-app + SMTP email notifications
+│   ├── search/                  # Local user & post search (+ hashtags)
+│   ├── moderation/              # Reports, suspension, banning, instance bans, DID blocks
+│   ├── admin/                   # Instance settings, user management, invites, audit log
+│   ├── federation/              # ActivityPub (fediverse) + legacy Ed25519 protocol + relays
+│   ├── atproto/                 # AT Protocol / Bluesky — Agora as its own PDS
+│   ├── media/                   # File upload processing and serving
+│   ├── groups/                  # Community groups
+│   ├── albums/                  # Photo albums
+│   ├── dm/                      # Direct messages + WebSocket hub
+│   ├── blocks/                  # User blocking
+│   └── ctxkeys/                 # Shared context key constants
 ├── frontend/
 │   ├── src/
 │   │   ├── api/index.ts        # Typed Axios API client (all endpoints)
@@ -80,14 +81,19 @@ main.go
   ├── search.NewService(db)                         ← searchSvc
   ├── moderation.NewService(db, notifSvc)           ← modSvc
   ├── admin.NewService(db, cfg, notifSvc)           ← adminSvc
-  ├── federation.NewService(db, cfg, feedSvc, userSvc) ← fedSvc
+  ├── federation.NewService(db, cfg)                ← fedSvc      (feed/users wire in via SetFed, not constructor args)
+  ├── atproto.NewService(db, cfg, notifSvc)          ← atprotoSvc
   ├── dm.New(db)                                    ← dmSvc
   ├── blocks.New(db)                                ← blocksSvc
   │
-  ├── friendSvc.SetFed(fedSvc)   ← broadcast friend events
-  ├── feedSvc.SetFed(fedSvc)     ← broadcast post events
-  └── userSvc.SetFed(fedSvc)     ← broadcast profile updates
+  ├── friendSvc.SetFed(fedSvc)        ← broadcast friend events (ActivityPub)
+  ├── feedSvc.SetFed(fedSvc)          ← broadcast post events (ActivityPub)
+  ├── feedSvc.SetAtproto(atprotoSvc)  ← broadcast post events (AT Proto)
+  ├── userSvc.SetFed(fedSvc)          ← broadcast profile updates (ActivityPub)
+  └── userSvc.SetAtproto(atprotoSvc)  ← broadcast profile updates (AT Proto)
 ```
+
+`feed.Service`/`users.Service` don't import `federation`/`atproto` directly — each declares a small structural interface (`fedSender`/`atprotoSender` etc.) satisfied by the real service, avoiding an import cycle. See [Federation Service](backend/federation.md) and [AT Protocol Service](backend/atproto.md).
 
 ## HTTP Router Structure
 
@@ -98,11 +104,14 @@ The chi router is configured in `cmd/server/main.go`:
 /uploads/*                          → static file server (media)
 /docs/*                             → static file server (documentation)
 
-/.well-known/agora-instance         → federation instance info
-/federation/inbox                   → receive signed activities
-/federation/users/{handle}          → federated user lookup
-/federation/search                  → cross-instance search
-/federation/lookup                  → resolve user@instance handle
+/.well-known/agora-instance          → legacy federation instance info
+/.well-known/webfinger, /host-meta, /nodeinfo, /nodeinfo/2.0  → ActivityPub discovery
+/.well-known/did.json, /atproto-did  → AT Proto identity (per-user, by Host header)
+/federation/inbox                    → receive signed activities (both ActivityPub and legacy)
+/federation/users/{handle}, /pages/{slug}, /instance   → actor documents (users, pages, instance actor)
+/federation/search                   → cross-instance search (legacy protocol)
+/federation/lookup, /ap-lookup        → resolve user@instance handle (legacy / standard ActivityPub)
+/xrpc/com.atproto.*                  → AT Proto sync/repo endpoints (public — relays, AppViews, clients)
 
 /api/
   ├── (public)
@@ -124,15 +133,23 @@ The chi router is configured in `cmd/server/main.go`:
   │   ├── /groups/*
   │   ├── /notifications/*
   │   ├── /search/*
-  │   ├── /reports, /moderation/*
+  │   ├── /reports
   │   ├── /media/upload
   │   ├── /albums/*
   │   ├── /conversations/*, /messages/*, /ws
-  │   └── /blocks/*
+  │   ├── /blocks/*
+  │   ├── /federation/ap-lookup, /follow, /following, /follow/{id}/notify   → fediverse follows (Agora's own frontend only)
+  │   └── /atproto/*                → Bluesky follows/search/lookup (Agora's own frontend only)
   │
-  └── (admin-only — requires role=admin|moderator)
-      └── /admin/*
+  ├── (moderator or admin — requires role=admin|moderator)
+  │   └── /moderation/*             → reports, suspensions, bans, instance bans, blocked DIDs
+  │
+  └── (admin-only — requires role=admin)
+      ├── /admin/*                  → settings, users, invites, audit log, legacy federated_instances
+      └── /admin/relays/*           → fediverse relay subscriptions (registered by internal/federation)
 ```
+
+See [Federation API](api/federation.md), [AT Protocol API](api/atproto.md), and [Moderation API](api/moderation.md) for full request/response shapes.
 
 ## Authentication Flow
 
@@ -145,6 +162,8 @@ The chi router is configured in `cmd/server/main.go`:
 ```
 
 ## Federation Flow
+
+The legacy Agora-to-Agora protocol, unchanged since before ActivityPub support — see [Federation Service → Legacy protocol](backend/federation.md#legacy-agora-to-agora-protocol) for how a shared `POST /federation/inbox` routes between this and standard ActivityPub:
 
 ```
 Outbound:
@@ -161,6 +180,28 @@ Inbound:
       └── route by activity.Type: post | delete_post | friend_request | friend_accept | profile_update
 ```
 
+Standard ActivityPub (Mastodon and the rest of the fediverse) uses per-actor RSA keys and HTTP Signatures instead, and AT Proto (Bluesky) uses a completely different model — a per-user signed repo, not activity delivery at all. See [Federation Service](backend/federation.md) and [AT Protocol Service](backend/atproto.md) for both.
+
+## AT Proto Flow
+
+```
+Outbound (a user's own repo):
+  Service (feed/users)
+      └── atprotoSvc.BroadcastPost / DeliverLike / SyncProfile / ...
+              └── lockRepo(userID) — per-user commit mutex
+              └── writes an app.bsky.* record, advances the repo head
+              └── appends a firehose #commit event — same DB transaction as the head update
+              └── broadcasts to any live subscribeRepos subscriber (e.g. bsky.network)
+
+Inbound (a followed Bluesky account's content):
+  StartBlueskyIngestion poller (every 5 min per followed DID)
+      └── app.bsky.feed.getAuthorFeed / getPostThread / getLikes / getRepostedBy
+              └── isBlueskyActorBlocked() check
+              └── ingest into posts / reactions, same tables ActivityPub ingestion uses
+```
+
+Agora never subscribes to Bluesky's own network-wide firehose — see [AT Protocol Service → Firehose](backend/atproto.md#firehose) for why.
+
 ## Real-Time Direct Messages
 
 ```
@@ -175,5 +216,8 @@ Client  ──WebSocket──→  /api/ws  →  dm.Hub
 
 | Job | Service | Interval |
 |-----|---------|----------|
-| Federation queue retry | `fedSvc.StartBackgroundSync()` | continuous |
+| Federation queue retry (legacy + ActivityPub + pages) | `fedSvc.StartBackgroundSync()` | continuous |
 | Account deletion cleanup | `userSvc.StartDeletionCleanup()` | periodic |
+| Interaction pruning | `interactionsSvc.StartPruner()` | periodic |
+| AT Proto relay crawl registration + reconfirmation | `atprotoSvc.StartRelayCrawl()` | on startup, backoff on failure (cap 24h), reconfirm every 6h |
+| AT Proto followed-account ingestion (posts/replies/likes/reposts) | `atprotoSvc.StartBlueskyIngestion()` | every 5 min per followed DID |

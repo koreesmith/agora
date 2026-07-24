@@ -8,7 +8,7 @@ Every post has a visibility setting:
 
 | Setting | Who can see it |
 |---|---|
-| **Public** | Anyone on this instance, and — unless you've turned it off — anyone on Mastodon and the rest of the fediverse. See [The Fediverse](fediverse.md). |
+| **Public** | Anyone on this instance, and — unless you've turned either off — anyone on Mastodon/the fediverse and anyone on Bluesky. See [The Fediverse](fediverse.md) and [Bluesky](bluesky.md). |
 | **Friends** | Only your accepted friends |
 | **Friend List** | Only members of a specific friend group you've created |
 | **Private** | Only you |
@@ -21,6 +21,10 @@ Go to **Settings → Privacy** to:
 - Make your profile **private** (friends-only) or public
 - Require approval before friends can post on your wall
 - Control who can send you direct messages
+
+## Fediverse and Bluesky opt-outs
+
+These have their own Settings tabs rather than living under Privacy — see **Settings → Fediverse** and **Settings → Bluesky**, or [The Fediverse](fediverse.md) / [Bluesky](bluesky.md) for what each toggle does.
 
 ## Blocking
 

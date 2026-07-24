@@ -3,7 +3,7 @@
 **Package:** `internal/moderation`
 **File:** `internal/moderation/moderation.go`
 
-Content reports, user suspension, banning, and instance bans.
+Content reports, user suspension, banning, fediverse instance bans, and AT Proto DID blocklists.
 
 ## Constructor
 
@@ -94,9 +94,24 @@ Permanent ban. User is logged out and cannot log back in.
 ### `BanInstance(w, r)`
 `POST /api/moderation/instance-bans`
 
-**Body:** `{"domain": "bad.instance.com", "reason": "string"}`
+**Body:** `{"instance": "bad.instance.com", "reason": "string", "notes": "string"}`
 
-Blocks all federation traffic from the given domain.
+Blocks all traffic from the given domain — inbound `Follow`/replies/`Like`/`Announce`, mention resolution, outbound follow, and the legacy protocol's inbox, regardless of whether this instance has ever interacted with it before (AGORA-177 unified what used to be two separately-checked, inconsistently-enforced mechanisms — see [Federation Service](federation.md#inbound-activities)). The input is normalized (scheme/trailing slash stripped, lowercased) so a pasted URL and a bare domain hit the same row. Also doubles as the AT Proto PDS-host block scope — see below.
 
 ### `UnbanInstance(w, r)`
 `DELETE /api/moderation/instance-bans/{id}`
+
+## Blocked Bluesky DIDs (AGORA-205)
+
+The AT Proto counterpart to instance bans, but DID-scoped rather than domain-scoped — AT Proto identity is DID-first, so blocking one specific Bluesky account doesn't require (and can't rely on) a domain. Enforced at every inbound AT Proto ingestion path (posts, replies, likes/reposts, search results) and against outbound follow — see [AT Protocol Service → Blocking](atproto.md#blocking).
+
+### `ListBlockedDIDs(w, r)`
+`GET /api/moderation/blocked-dids`
+
+### `BlockDID(w, r)`
+`POST /api/moderation/blocked-dids`
+
+**Body:** `{"did": "did:plc:...", "reason": "string", "notes": "string"}`
+
+### `UnblockDID(w, r)`
+`DELETE /api/moderation/blocked-dids/{id}`

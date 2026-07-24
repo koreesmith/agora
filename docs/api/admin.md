@@ -72,6 +72,8 @@ Creates a single-use invite code.
 
 ## Federation
 
+This section manages the legacy Agora-to-Agora `federated_instances` table only. For ActivityPub instance bans and AT Proto DID/domain blocklists, see [Moderation API](moderation.md#instance-bans--blocked-dids). For AT Proto's own instance-wide toggle and host overrides, see [AT Protocol Service](../backend/atproto.md#configuration).
+
 ### `GET /api/admin/federation/instances`
 **Response 200:** `[{ "id", "domain", "name", "public_key", "is_blocked", "last_seen_at" }]`
 
@@ -84,6 +86,36 @@ Creates a single-use invite code.
 
 ### `POST /api/admin/federation/instances/{id}/unblock`
 **Response 204**
+
+---
+
+## Relays
+
+Fediverse relay subscriptions (AGORA-220/223) — registered by `internal/federation.RegisterAdminRoutes`, not `internal/admin`, since subscribing requires signing as the instance actor. See [Federation Service → Fediverse relays](../backend/federation.md#fediverse-relays).
+
+### `GET /api/admin/relays`
+**Response 200:** `{ "relays": [{ "id", "inbox_url", "actor_url", "status", "created_at" }] }`
+
+`status` is one of `pending` (Follow sent, no Accept/Reject yet — not an error, some relays never reply), `enabled`, `disabled`, `rejected`.
+
+### `POST /api/admin/relays`
+**Body:** `{"inbox_url": "https://relay.example.com/inbox"}` — must be `https://`.
+
+Sends a `Follow` from the instance actor.
+
+**Response 201:** `{ "id": "...", "message": "relay follow requested" }`
+
+### `POST /api/admin/relays/{id}/enable`
+Re-subscribes a disabled relay (fresh `Follow`). No-op, not an error, if already enabled.
+**Response 200**
+
+### `POST /api/admin/relays/{id}/disable`
+Sends `Undo(Follow)`, keeps the row (unlike delete).
+**Response 200**
+
+### `DELETE /api/admin/relays/{id}`
+Sends `Undo(Follow)` first if the subscription might still be live, then removes the relay entirely.
+**Response 200**
 
 ---
 

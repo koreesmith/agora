@@ -37,3 +37,7 @@ When composing a post, set the visibility to **Friend List** and choose which li
 ### My Feeds
 
 You can also build a **Custom Feed** from a friend list — go to **My Feeds** and create a feed with a friend list filter. This lets you see only posts from that group in a dedicated tab.
+
+### Friend Lists aren't just for friends anymore
+
+A Friend List can also include accounts you follow on [the Fediverse](fediverse.md) or [Bluesky](bluesky.md), not just mutual Agora friends — look for the **List** icon next to any follow on the **Connections** page. This is useful for building a custom feed or a targeted-visibility post that mixes people across all three networks.

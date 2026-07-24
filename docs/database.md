@@ -30,11 +30,24 @@ Migrations run automatically at startup via `store.Migrate()` in `internal/store
 | `suspension_reason` | text | Reason shown to user |
 | `is_banned` | boolean | Permanently banned |
 | `ban_reason` | text | |
-| `is_remote` | boolean | User from federated instance |
-| `remote_instance` | text | Domain of remote instance |
+| `is_remote` | boolean | User from federated instance (fediverse or Bluesky) |
+| `remote_instance` | text | Domain of remote instance — literal `bsky.app` for a Bluesky account stub |
 | `remote_user_id` | text | ID on remote instance |
-| `public_key` | text | Ed25519 public key (base64) |
-| `private_key` | text | Ed25519 private key (admin user only) |
+| `public_key` | text | Ed25519 public key (base64) — legacy Agora-to-Agora protocol only |
+| `private_key` | text | Ed25519 private key (admin user only) — legacy Agora-to-Agora protocol only |
+| `ap_actor_url` | text | This user's own ActivityPub actor URL, or (for a remote stub) the followed/interacted-with actor's URL |
+| `ap_inbox_url` | text | Corresponding inbox URL |
+| `federation_public_key` / `federation_private_key` | text | Per-actor RSA keypair (PEM), used for standard ActivityPub HTTP Signatures — distinct from the instance-wide Ed25519 `public_key`/`private_key` above. Lazily generated on first use. |
+| `activitypub_enabled` | boolean | Per-account opt-out for standard ActivityPub (default `true`) |
+| `fediverse_notifications_enabled` | boolean | Global kill switch for notifications about *followed* fediverse accounts' new posts (default `true`) — independent of `activitypub_enabled`, which governs whether your own posts federate |
+| `emojis` | jsonb | Resolved Mastodon custom-emoji shortcode → image URL map for this user's `display_name`/`bio` (default `{}`) |
+| `atproto_did` | text | This user's `did:web:username.instance.tld` |
+| `atproto_private_key` | text | secp256k1 signing key, hex-encoded (not PEM) |
+| `atproto_repo_head` | text | Current signed AT Proto repo commit CID |
+| `atproto_repo_rev` | text | Last-emitted repo revision string |
+| `atproto_enabled` | boolean | Per-account opt-out for AT Proto/Bluesky (default `true`) |
+| `atproto_remote_did` | text | For a cached remote Bluesky stub, the followed/interacted-with account's DID (stable across handle changes — unique index `idx_users_atproto_remote_did`) |
+| `atproto_notifications_enabled` | boolean | Global kill switch for notifications about followed Bluesky accounts (default `true`) |
 | `email_verified` | boolean | |
 | `email_verify_token` | text | |
 | `email_change_token` | text | |
@@ -104,11 +117,15 @@ Migrations run automatically at startup via `store.Migrate()` in `internal/store
 | `link_image` | text | |
 | `link_domain` | text | |
 | `is_remote` | boolean | From federated instance |
-| `remote_post_id` | text | ID on remote instance |
-| `remote_instance` | text | Domain of remote instance |
+| `remote_post_id` | text | ID on remote instance — an AT-URI (`at://did/.../rkey`) for a Bluesky-origin post |
+| `remote_post_cid` | text | Record CID, paired with `remote_post_id` to make a full AT Proto strong-ref (Bluesky-origin posts only) |
+| `remote_instance` | text | Domain of remote instance — literal `bsky.app` for Bluesky |
+| `emojis` | jsonb | Resolved Mastodon custom-emoji shortcode → image URL map for this post's content (default `{}`) |
 | `edited_at` | timestamptz | |
 | `deleted_at` | timestamptz | Soft delete |
 | `created_at` | timestamptz | |
+
+**`post_hashtags`** — `post_id UUID FK→posts`, `tag TEXT` (lowercased, no `#`), `PRIMARY KEY (post_id, tag)`. Populated from AT Proto richtext facets and extracted fediverse/local content (AGORA-213); powers exact-match `#tag` search (`SearchPosts`).
 
 ---
 
@@ -373,9 +390,83 @@ Retried up to 10 times with backoff. Abandoned after 10 failures.
 | `domain` | text UNIQUE | |
 | `public_key` | text | Ed25519 public key (base64) |
 | `name` | text | Instance display name |
-| `is_blocked` | boolean | |
+| `is_blocked` | boolean | Legacy Agora-to-Agora protocol block — see `instance_bans` below for the unified fediverse block, which also covers ActivityPub |
 | `last_seen_at` | timestamptz | |
 | `created_at` | timestamptz | |
+
+---
+
+### `custom_feed_filters`
+
+Not fediverse/Bluesky-specific infrastructure, but this is how a followed fediverse or Bluesky account surfaces in a custom feed rather than getting a dedicated timeline of its own — `id` uuid PK, `feed_id` FK→custom_feeds, `filter_type`, `value`, `created_at`. `filter_type` includes (among others) `fediverse_account`/`fediverse_all`/`exclude_fediverse_account` and `atproto_account`/`atproto_all`/`exclude_atproto_account`.
+
+---
+
+## ActivityPub (fediverse) tables
+
+See [Federation Service](backend/federation.md) for how these fit together.
+
+### `ap_followers`
+
+Remote actors following a **local** user. `id` uuid PK, `followed_user_id` FK→users, `follower_actor_url`, `follower_inbox_url`, `created_at`. **Unique:** `(followed_user_id, follower_actor_url)`.
+
+### `ap_following`
+
+Local users following a **remote** fediverse actor — the reverse of `ap_followers`. `id` uuid PK, `follower_user_id` FK→users, `followed_actor_url`, `followed_inbox_url`, `accepted` boolean (false until the remote `Accept` arrives), `notify` boolean default `false` (per-follow notification opt-in, AGORA-166), `created_at`. **Unique:** `(follower_user_id, followed_actor_url)`.
+
+### `ap_delivery_queue` / `page_ap_delivery_queue` / `instance_ap_delivery_queue`
+
+Outbound ActivityPub delivery queues — separate from the legacy `federation_queue` because HTTP Signatures must be computed at *send* time (a fresh `Date` header per attempt), not once at enqueue. Same shape for all three, differing only in owner column: `actor_user_id` FK→users / `actor_page_id` FK→pages / none (there's only ever one instance actor). Columns: `id`, owner FK, `inbox_url`, `activity` jsonb, `attempts` int, `last_error`, `next_attempt`, `created_at`.
+
+### `ap_blocked_by`
+
+Records a remote actor's `Block` of a local user, keyed by inbox URL (not just actor URL) so `enqueueAPDelivery` can filter every outbound path from one central place. `id`, `local_user_id` FK→users, `blocker_actor_url`, `blocker_inbox_url`, `created_at`. **Unique:** `(local_user_id, blocker_actor_url)`.
+
+### `page_remote_subscribers`
+
+A Page's own followers, mirroring `ap_followers` but scoped to a Page instead of a user. `id`, `page_id` FK→pages, `follower_actor_url`, `follower_inbox_url`, `created_at`. **Unique:** `(page_id, follower_actor_url)`.
+
+### `quote_authorizations`
+
+FEP-044f quote-post grants (AGORA-255) — served at `GET /federation/users/{handle}/posts/{postID}/quote-authorizations/{authID}` for a remote server to verify a quote against. `id`, `post_id` FK→posts, `quoting_actor_url`, `quoting_object_url`, `created_at`. **Unique:** `(post_id, quoting_object_url)`.
+
+### `instance_bans`
+
+The unified fediverse instance-block list (AGORA-177) — also reused as the AT Proto PDS-host block scope. `id` uuid PK, `instance` text UNIQUE, `reason`, `notes`, `banned_by` FK→users, `created_at`.
+
+### `relays`
+
+Fediverse relay subscriptions (AGORA-220). `id` uuid PK, `inbox_url` text UNIQUE, `actor_url` (resolved lazily on first successful profile fetch), `status` (`pending`\|`enabled`\|`rejected`\|`disabled`), `added_by` FK→users, `created_at`.
+
+---
+
+## AT Protocol (Bluesky) tables
+
+Agora's own PDS state — see [AT Protocol Service](backend/atproto.md) for how these fit together.
+
+### `atproto_blocks`
+
+The content-addressed blockstore backing every user's repo Merkle Search Tree (MST) and blobs (avatars, post images). `user_id` FK→users, `cid` text, `data` bytea. **Primary key:** `(user_id, cid)`.
+
+### `atproto_posts`
+
+Maps an Agora post/comment to its AT Proto record. `post_id` uuid PK, FK→posts, `user_id` FK→users, `rkey`, `record_cid`, `created_at`.
+
+### `atproto_reactions`
+
+Outbound like/repost record mapping — the AT Proto equivalent of the legacy `likes` table and repost-via-`posts.repost_of_id`. `post_id` FK→posts, `user_id` FK→users, `kind` (`like`\|`repost`), `rkey`, `record_cid`, `created_at`. **Primary key:** `(post_id, user_id, kind)`.
+
+### `atproto_firehose_events`
+
+The durable, replayable log backing `com.atproto.sync.subscribeRepos` — every commit event this instance has ever emitted, so a reconnecting relay can resume from its own `cursor` instead of Agora replaying everything or dropping missed events. `seq` bigint PK (from `atproto_firehose_seq`), `data` bytea (a serialized `XRPCStreamEvent`), `created_at`.
+
+### `at_following`
+
+Local users' native (non-bridged) Bluesky follows — analogous to `ap_following`, but AT Proto follows are unilateral with no accept/reject handshake. `id` uuid PK, `local_user_id` FK→users, `remote_did`, `remote_handle`, `display_name`, `avatar_url`, `rkey`, `record_cid`, `notify` boolean default `false`, `show_in_feed` boolean default `false` (AGORA-236), `created_at`. **Unique:** `(local_user_id, remote_did)`.
+
+### `blocked_dids`
+
+DID-scoped AT Proto block list (AGORA-205) — the counterpart to `instance_bans`' domain scope, since AT Proto identity is DID-first. `id` uuid PK, `did` text UNIQUE, `reason`, `notes`, `blocked_by` FK→users, `created_at`.
 
 ---
 

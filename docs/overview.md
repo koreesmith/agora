@@ -14,7 +14,7 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 - **Direct messages** — real-time via WebSocket
 - **Wall posts** — post on another user's wall, with optional approval workflow
 - **Polls** — multi-choice with optional expiry
-- **Federation** — Ed25519-signed ActivityPub-style protocol between Agora instances
+- **Federation** — three protocols side by side: standard ActivityPub (the fediverse — Mastodon and friends), native AT Protocol (every Agora account is also a real Bluesky account, no bridge required), and a legacy Ed25519-signed Agora-to-Agora protocol
 - **Moderation** — reports, suspension, banning, instance bans
 - **GDPR** — data export (ZIP) and account deletion (30-day grace or immediate)
 
@@ -38,8 +38,9 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 | [Blocks](backend/blocks) | User blocking |
 | [Moderation](backend/moderation) | Reports, suspension, banning |
 | [Admin](backend/admin) | Instance settings, user management |
-| [Federation](backend/federation) | Cross-instance protocol |
-| [Search](backend/search) | User and post search |
+| [Federation](backend/federation) | ActivityPub (fediverse) + legacy Agora-to-Agora protocol |
+| [AT Protocol / Bluesky](backend/atproto) | Native Bluesky support — Agora as its own PDS |
+| [Search](backend/search) | User, post, and hashtag search (+ live Bluesky search) |
 | [Media](backend/media) | File uploads and serving |
 | **API Reference** | |
 | [Auth API](api/auth) | `/api/auth/*` endpoints |
@@ -53,6 +54,7 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 | [Moderation API](api/moderation) | `/api/reports/*`, `/api/moderation/*` |
 | [Admin API](api/admin) | `/api/admin/*` endpoints |
 | [Federation API](api/federation) | `/.well-known/agora-instance`, `/federation/*` |
+| [AT Protocol API](api/atproto) | `/.well-known/did.json`, `/xrpc/*`, `/api/atproto/*` |
 | [Search API](api/search) | `/api/search/*` endpoints |
 | [Media API](api/media) | `/api/media/upload` |
 | **Frontend** | |
@@ -73,4 +75,4 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 | Email | SMTP via gomail |
 | File storage | Local disk (`./data/uploads`) |
 | Reverse proxy | nginx |
-| Federation | Ed25519 signed REST activities |
+| Federation | ActivityPub (HTTP Signatures) + AT Protocol ([indigo](https://github.com/bluesky-social/indigo)) + legacy Ed25519 signed REST activities |

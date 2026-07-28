@@ -182,6 +182,14 @@ func main() {
 			atproto.RegisterAuthedRoutes(r, atprotoSvc)
 		})
 
+		// WebSocket upgrade — browsers can't set an Authorization header on
+		// the handshake, so this route alone accepts a ?token= query param
+		// (AGORA-207); every other route above requires the header.
+		r.Group(func(r chi.Router) {
+			r.Use(authSvc.WebSocketMiddleware)
+			dm.RegisterWebSocketRoute(r, dmSvc)
+		})
+
 		// Moderator or admin — content moderation actions
 		r.Group(func(r chi.Router) {
 			r.Use(authSvc.Middleware)

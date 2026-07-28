@@ -36,14 +36,33 @@ func NewService(db *store.DB, cfg *config.Config, notifSvc *notifications.Servic
 
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Support ?token= for WebSocket connections (can't set headers)
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "missing token"); return
+		}
+		tokenStr := strings.TrimPrefix(header, "Bearer ")
+		claims, err := s.parseToken(tokenStr)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid token"); return
+		}
+		ctx := context.WithValue(r.Context(), ctxkeys.UserID, claims.UserID)
+		ctx  = context.WithValue(ctx, ctxkeys.UserRole, claims.Role)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// WebSocketMiddleware is Middleware's counterpart for the WebSocket upgrade
+// route (/api/ws) specifically. Browsers cannot set an Authorization header
+// on a WebSocket handshake, so this route alone accepts the JWT via a
+// ?token= query parameter. Every other authenticated route must use
+// Middleware and reject query-param tokens: query strings leak into access
+// logs, proxy/CDN logs, browser history, and Referer headers in a way
+// headers do not.
+func (s *Service) WebSocketMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
-			header := r.Header.Get("Authorization")
-			if !strings.HasPrefix(header, "Bearer ") {
-				writeError(w, http.StatusUnauthorized, "missing token"); return
-			}
-			tokenStr = strings.TrimPrefix(header, "Bearer ")
+			writeError(w, http.StatusUnauthorized, "missing token"); return
 		}
 		claims, err := s.parseToken(tokenStr)
 		if err != nil {
@@ -61,12 +80,10 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 // for read routes that guests may access (public posts, profiles).
 func (s *Service) OptionalMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenStr := r.URL.Query().Get("token")
-		if tokenStr == "" {
-			header := r.Header.Get("Authorization")
-			if strings.HasPrefix(header, "Bearer ") {
-				tokenStr = strings.TrimPrefix(header, "Bearer ")
-			}
+		var tokenStr string
+		header := r.Header.Get("Authorization")
+		if strings.HasPrefix(header, "Bearer ") {
+			tokenStr = strings.TrimPrefix(header, "Bearer ")
 		}
 		if tokenStr != "" {
 			if claims, err := s.parseToken(tokenStr); err == nil {

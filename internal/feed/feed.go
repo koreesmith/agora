@@ -98,6 +98,11 @@ type fedSender interface {
 	// of handleInboundAnnounce (AGORA-153).
 	DeliverAnnounce(userID, repostID, originalPostID string)
 	DeliverUnannounce(userID, repostID, originalPostID string)
+	// DeliverVote (AGORA-268) sends an outbound Vote when a local user votes
+	// on a poll that originated from a remote Mastodon/ActivityPub actor —
+	// the reverse of the inbound Vote handling added alongside it for polls
+	// Agora itself originated and federated out.
+	DeliverVote(userID, postID, optionID string)
 }
 
 // atprotoSender is the AT Proto counterpart to fedSender (AGORA-190) — a
@@ -1557,6 +1562,14 @@ func (s *Service) PollVote(w http.ResponseWriter, r *http.Request) {
 
 	// Cast vote
 	s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, req.OptionID)
+
+	// AGORA-268: federate the vote if the poll originated from a remote
+	// Mastodon/ActivityPub actor — DeliverVote itself no-ops if postID isn't
+	// an AP remote target (e.g. a local poll, or a Bluesky-origin post),
+	// same as DeliverLike above.
+	if s.fed != nil {
+		go s.fed.DeliverVote(userID, postID, req.OptionID)
+	}
 
 	writeJSON(w, 200, map[string]string{"message": "voted"})
 }

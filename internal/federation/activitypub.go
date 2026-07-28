@@ -1458,6 +1458,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		OneOf        []apPollOption `json:"oneOf"`
 		AnyOf        []apPollOption `json:"anyOf"`
 		EndTime      string         `json:"endTime"`
+		Name         string         `json:"name"` // AGORA-268: set only on a poll-vote Note, never a normal reply
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1474,6 +1475,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// AGORA-148: an admin-blocked instance can't Follow, but until now could
 	// still reply into threads — apply the same block-list check Follow uses.
 	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
+		return
+	}
+
+	// AGORA-268: a poll vote is a bare Note with "name" set to the chosen
+	// option and inReplyTo the poll — never real reply content, so it must
+	// be intercepted before the normal reply-threading path below tries to
+	// ingest it as a comment.
+	if note.Name != "" && note.InReplyTo != "" && s.handleInboundVote(verifiedActor, note.InReplyTo, note.Name) {
 		return
 	}
 
@@ -3522,6 +3531,119 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	}
 	s.deliverToFollowers(userID, activity)
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// ── Outbound / Inbound Poll Vote (AGORA-268) ─────────────────────────────────
+//
+// A vote in ActivityPub isn't its own activity type — Mastodon's convention
+// (ActivityPub::VoteSerializer) wraps a bare Note in a Create, with the
+// chosen option's text in "name" instead of "content", inReplyTo the poll
+// (Question) object, and addressed directly to the poll's actor rather than
+// Public/followers. It's never rendered as a visible post anywhere, on
+// either side. A multiple-choice vote is one such Create per selected
+// option, not a single activity carrying several.
+
+// DeliverVote sends an outbound Vote when a local user votes on a poll that
+// originated from a remote Mastodon/ActivityPub actor. No-ops if postID
+// isn't an AP remote target (lookupRemoteTarget's ok=false covers both a
+// local poll and a Bluesky-origin post, neither of which has an ap_actor_url
+// to address this at) — feed.PollVote calls this unconditionally on every
+// vote, the same way it does for DeliverLike.
+func (s *Service) DeliverVote(userID, postID, optionID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	targetActorURL, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
+	if !ok {
+		log.Printf("federation: DeliverVote %s: not a remote target, skipping", postID)
+		return
+	}
+
+	var optionText string
+	if err := s.db.QueryRow(`SELECT text FROM poll_options WHERE id = $1 AND post_id = $2`, optionID, postID).
+		Scan(&optionText); err != nil || optionText == "" {
+		log.Printf("federation: DeliverVote %s: option %s lookup failed (err=%v)", postID, optionID, err)
+		return
+	}
+
+	var username string
+	var apEnabled bool
+	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
+		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverVote %s: voter %s lookup failed or activitypub disabled (err=%v)", postID, userID, err)
+		return
+	}
+
+	actor := s.actorURL(username)
+	note := map[string]any{
+		"id":           fmt.Sprintf("%s/votes/%s/%s", actor, postID, optionID),
+		"type":         "Note",
+		"attributedTo": actor,
+		"to":           []string{targetActorURL},
+		"inReplyTo":    targetRemotePostID,
+		"name":         optionText,
+	}
+	activity := map[string]any{
+		"@context":  "https://www.w3.org/ns/activitystreams",
+		"id":        fmt.Sprintf("%s/votes/%s/%s/activity", actor, postID, optionID),
+		"type":      "Create",
+		"actor":     actor,
+		"published": time.Now().UTC().Format(time.RFC3339),
+		"to":        []string{targetActorURL},
+		"object":    note,
+	}
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// handleInboundVote accepts a remote actor's vote on one of our own polls —
+// the reverse of DeliverVote above. Returns true whenever objectURL/name
+// were recognized as targeting one of our own local polls at all (a
+// matching post + option text), regardless of whether the vote was actually
+// recorded, so handleInboundCreate's caller knows not to also fall through
+// and ingest this as a normal reply/comment; returns false for anything that
+// isn't a vote on one of our polls, so it still gets a chance at the normal
+// reply-handling path.
+func (s *Service) handleInboundVote(verifiedActor, pollObjectURL, optionName string) bool {
+	postID := localPostIDFromURL(pollObjectURL, s.cfg.InstanceDomain)
+	if postID == "" {
+		return false
+	}
+	var optionID, postAuthorID string
+	var multipleChoice, isExpired bool
+	err := s.db.QueryRow(`
+		SELECT po.id, p.author_id, p.poll_multiple_choice, (p.poll_expires_at IS NOT NULL AND p.poll_expires_at < NOW())
+		FROM poll_options po JOIN posts p ON p.id = po.post_id
+		WHERE po.post_id = $1 AND po.text = $2 AND p.deleted_at IS NULL
+	`, postID, optionName).Scan(&optionID, &postAuthorID, &multipleChoice, &isExpired)
+	if err != nil {
+		return false // not a vote on one of our own polls — let the caller try the normal reply path
+	}
+	if isExpired {
+		log.Printf("federation: handleInboundVote %s: poll has ended, ignoring vote for %q", postID, optionName)
+		return true
+	}
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
+		return true
+	}
+
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	if err != nil || remoteUserID == "" {
+		log.Printf("federation: handleInboundVote %s: could not resolve voter %s: %v", postID, verifiedActor, err)
+		return true
+	}
+
+	if !multipleChoice {
+		// Single choice: replayed/changed vote replaces this actor's previous
+		// one, mirroring feed.PollVote's own single-choice handling.
+		s.db.Exec(`
+			DELETE FROM poll_votes
+			WHERE user_id = $1 AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
+		`, remoteUserID, postID)
+	}
+	// poll_votes' (user_id, option_id) primary key already makes a redelivered
+	// Vote idempotent — no separate dedup/replay tracking needed.
+	s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, remoteUserID, optionID)
+	return true
 }
 
 // ── Outbound: broadcast page posts to page followers (AGORA-115) ─────────────

@@ -32,6 +32,11 @@ func NewService(db *store.DB, cfg *config.Config, notifSvc *notifications.Servic
 	return &Service{db: db, cfg: cfg, notifSvc: notifSvc}
 }
 
+// dummyPasswordHash is a valid bcrypt hash of no known password, compared
+// against on login when the username/email doesn't match any account, so
+// that branch costs about as much time as a genuine wrong-password compare.
+const dummyPasswordHash = "$2a$10$ExB7Elp.05RKMLYFuiynf.sOW8e2BKLCBYKYWym4FNWv8fvmp5idG"
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 func (s *Service) Middleware(next http.Handler) http.Handler {
@@ -397,12 +402,23 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		&u.AvatarURL, &u.Role, &u.IsSuspended, &u.SuspensionReason,
 		&u.EmailVerified, &u.ProfilePrivate)
 	if err != nil {
+		// No such account — still run a bcrypt compare against a fixed dummy
+		// hash so this branch takes about as long as a real wrong-password
+		// compare, and return the exact same response either way. Without
+		// this, response content and timing would both leak whether the
+		// username/email is registered (AGORA-208).
+		bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(req.Password))
 		writeError(w, 401, "invalid credentials"); return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
 		writeError(w, 401, "invalid credentials"); return
 	}
+
+	// Only reveal *why* a login can't proceed once the password has already
+	// been confirmed correct — at that point the caller has demonstrated
+	// they hold the real credentials, so it's no longer an enumeration risk
+	// to tell them their account is suspended/unverified/waitlisted.
 	if u.IsSuspended {
 		writeError(w, 403, "account suspended: "+u.SuspensionReason); return
 	}

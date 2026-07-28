@@ -3014,10 +3014,23 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	// feature); appending a plain link here is the universally-compatible
 	// fallback that works on every receiver with no protocol support
 	// needed — plainTextToHTML/linkifyURLs (below) auto-linkifies it.
+	// AGORA-267: DeliverAnnounce already delivers the Announce half of a
+	// quote-share directly to the quoted remote author's inbox (via
+	// lookupRemoteTarget), but this Create(Note) — the half that actually
+	// carries the quoting user's commentary — never did, addressing only
+	// followers/mentions/relays. An Announce carries no content, so a quoted
+	// remote author with few/no local followers of the quoter never saw the
+	// quote text at all. Reuse the same lookupRemoteTarget DeliverAnnounce
+	// and DeliverReply already call, rather than re-deriving remoteness
+	// ad hoc the way quotedPostURL below does for its own, different purpose
+	// (a human-readable fallback link, not an addressee).
+	var quotedActorURL, quotedInboxURL string
+	quotedOK := false
 	if repostOfID != nil {
 		if quoteURL := s.quotedPostURL(*repostOfID); quoteURL != "" {
 			content = strings.TrimRight(content, " \n") + "\n\nRE: " + quoteURL
 		}
+		quotedActorURL, quotedInboxURL, _, quotedOK = s.lookupRemoteTarget(*repostOfID)
 	}
 
 	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
@@ -3025,20 +3038,32 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	// Public/followers audience — it doesn't replace it.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	log.Printf("federation: BroadcastPublicPost %s resolved %d fediverse mention(s)", postID, len(tags))
-	if len(tags) > 0 {
+	if len(tags) > 0 || quotedOK {
 		if note, ok := activity["object"].(map[string]any); ok {
-			note["tag"] = tags
-			if content, ok := note["content"].(string); ok {
-				note["content"] = linkifyMentionTags(content, tags)
+			if len(tags) > 0 {
+				note["tag"] = tags
+				if content, ok := note["content"].(string); ok {
+					note["content"] = linkifyMentionTags(content, tags)
+				}
 			}
-			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
+			to := []string{"https://www.w3.org/ns/activitystreams#Public"}
+			if quotedOK {
+				to = append(to, quotedActorURL)
+			}
+			to = append(to, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
 		}
 	}
 	s.deliverToFollowers(userID, activity)
-	for _, inboxURL := range mentionedInboxURLs {
-		s.enqueueAPDelivery(userID, inboxURL, activity)
+	if quotedOK {
+		s.enqueueAPDelivery(userID, quotedInboxURL, activity)
+	}
+	for i, actorURL := range mentionedActorURLs {
+		if quotedOK && actorURL == quotedActorURL {
+			continue // already delivered above
+		}
+		s.enqueueAPDelivery(userID, mentionedInboxURLs[i], activity)
 	}
 	// AGORA-221: a relay only forwards what instances actually publish to
 	// it — being subscribed (AGORA-220) alone doesn't make this post

@@ -2134,6 +2134,11 @@ func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, object
 	}
 	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
 	if !ok {
+		// Not one of our own posts. resolveFederatableTarget only ever
+		// resolves against Agora-originated content, so a followed actor
+		// boosting a post genuinely native to their own (or a third) instance
+		// used to fall through to a silent no-op here (AGORA-265).
+		s.handleInboundAnnounceOfRemotePost(activityID, verifiedActor, objectURL)
 		return
 	}
 	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
@@ -2157,6 +2162,73 @@ func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, object
 	if s.notif != nil && postAuthorID != remoteUserID {
 		s.notif.Create(postAuthorID, remoteUserID, "post_repost", postID, "")
 	}
+}
+
+// handleInboundAnnounceOfRemotePost is handleInboundAnnounce's fallback
+// (AGORA-265) for boosting content that didn't originate on Agora. Only
+// proceeds if some local user actually follows the boosting actor — same
+// audience gate ingestFollowedPost uses — since otherwise there's no local
+// follower whose feed the resulting repost should appear in. Dereferences
+// the boosted object signed as the instance (mirrors the relay path's
+// fetchRemoteNoteSignedAsInstance, since there's no single local user this
+// fetch is "on behalf of" the way a Like/reply's signerUserID is), ingests it
+// as a remote post if not already known, then attaches a repost row to it
+// attributed to the boosting actor's own remote-user stub — matching how the
+// Agora-originated case above already renders a "Reposted" boost.
+func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, objectURL string) {
+	var followerUserID string
+	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, verifiedActor).Scan(&followerUserID)
+	if followerUserID == "" {
+		return
+	}
+	if s.isInstanceBlocked(domainFromURL(objectURL)) {
+		return
+	}
+	note, err := s.fetchRemoteNoteSignedAsInstance(objectURL)
+	if err != nil || note == nil || note.ID == "" || note.AttributedTo == "" {
+		return
+	}
+	if s.isInstanceBlocked(domainFromURL(note.AttributedTo)) {
+		return
+	}
+
+	remoteAuthorID, err := s.getOrCreateRemoteAPUserAsInstance(note.AttributedTo)
+	if err != nil || remoteAuthorID == "" {
+		return
+	}
+
+	domain := domainFromURL(note.ID)
+	imageURLs, videoURL := matchAttachments(note.Attachment)
+	var postID string
+	err = s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, remoteAuthorID, HTMLToPlainText(note.Content), note.ID, domain, HTMLToPlainText(note.Summary), emojisJSON(emojisFromAPTags(note.Tag))).Scan(&postID)
+	if err != nil {
+		// Already ingested (e.g. a previous boost of the same post, or a
+		// relay forwarded it too) — look up its id so the repost below still
+		// attaches to it instead of dropping.
+		if s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND remote_instance = $2 AND is_remote = true`,
+			note.ID, domain).Scan(&postID) != nil {
+			return
+		}
+	} else {
+		s.storeInboundImages(postID, imageURLs)
+		s.storeInboundVideo(postID, videoURL)
+		s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
+	}
+
+	remoteReposterID, err := s.getOrCreateRemoteAPUserAsInstance(verifiedActor)
+	if err != nil || remoteReposterID == "" {
+		return
+	}
+	s.db.Exec(`
+		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance)
+		VALUES ($1, 'public', $2, true, $3, $4)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+	`, remoteReposterID, postID, activityID, domainFromURL(activityID))
 }
 
 func (s *Service) handleInboundUndoAnnounce(verifiedActor string, objectRaw json.RawMessage) {

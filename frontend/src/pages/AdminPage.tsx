@@ -2,11 +2,11 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -16,16 +16,20 @@ export default function AdminPage() {
   const [suspendForm, setSuspendForm] = useState<Record<string, {days:string, reason:string, notes:string}>>({})
   const [banForm, setBanForm] = useState<Record<string, {reason:string, notes:string}>>({})
   const [instanceBanForm, setInstanceBanForm] = useState({ instance:'', reason:'', notes:'' })
+  const [pdsBanForm, setPdsBanForm] = useState({ instance:'', reason:'', notes:'' })
+  const [didBlockForm, setDidBlockForm] = useState({ did:'', reason:'', notes:'' })
   const qc = useQueryClient()
   const ok = (m:string) => { setMsg(m); setTimeout(()=>setMsg(''), 3000) }
 
   const { data: stats }    = useQuery({ queryKey:['admin-stats'],    queryFn: ()=>adminApi.getStats().then(r=>r.data),    enabled: tab==='overview' })
-  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' })
+  const { data: settings } = useQuery({ queryKey:['admin-settings'], queryFn: ()=>adminApi.getSettings().then(r=>r.data), enabled: tab==='settings' || tab==='fediverse' || tab==='bluesky' })
   const { data: usersData }= useQuery({ queryKey:['admin-users'],    queryFn: ()=>adminApi.listUsers().then(r=>r.data),   enabled: tab==='users' })
   const { data: repsData } = useQuery({ queryKey:['admin-reports', reportStatus], queryFn: ()=>moderationApi.listReports(reportStatus).then(r=>r.data), enabled: tab==='reports' })
   const { data: modUsersData } = useQuery({ queryKey:['mod-users'], queryFn: ()=>moderationApi.listModeratedUsers().then(r=>r.data), enabled: tab==='moderation' })
-  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='moderation' })
+  const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' || tab==='bluesky' })
+  const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
+  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='relays' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
@@ -46,6 +50,9 @@ export default function AdminPage() {
   const unban        = useMutation({ mutationFn: (id:string)=>moderationApi.unbanUser(id), onSuccess:()=>{ ok('Unbanned'); qc.invalidateQueries({queryKey:['mod-users']}) } })
   const banInst      = useMutation({ mutationFn: (data:any)=>moderationApi.banInstance(data), onSuccess:()=>{ ok('Instance banned'); setInstanceBanForm({instance:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['instance-bans']}) } })
   const unbanInst    = useMutation({ mutationFn: (id:string)=>moderationApi.unbanInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['instance-bans']}) })
+  const banPds       = useMutation({ mutationFn: (data:any)=>moderationApi.banInstance(data), onSuccess:()=>{ ok('PDS domain banned'); setPdsBanForm({instance:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['instance-bans']}) } })
+  const blockDid     = useMutation({ mutationFn: (data:any)=>moderationApi.blockDID(data), onSuccess:()=>{ ok('DID blocked'); setDidBlockForm({did:'',reason:'',notes:''}); qc.invalidateQueries({queryKey:['blocked-dids']}) } })
+  const unblockDid   = useMutation({ mutationFn: (id:string)=>moderationApi.unblockDID(id), onSuccess:()=>qc.invalidateQueries({queryKey:['blocked-dids']}) })
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
@@ -67,7 +74,10 @@ export default function AdminPage() {
     { id:'waitlist',    label:'Waitlist',    icon: Clock },
     { id:'reports',     label:'Reports',     icon: Flag },
     { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
+    { id:'fediverse',   label:'Fediverse',   icon: Globe },
+    { id:'bluesky',     label:'Bluesky',     icon: Cloud },
     { id:'federation',  label:'Federation',  icon: Link2 },
+    { id:'relays',      label:'Relays',      icon: Radio },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
     { id:'pages',       label:'Pages',       icon: Star },
@@ -158,14 +168,9 @@ export default function AdminPage() {
               <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.federation_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
             </button>
           </div>
-          <div className="flex items-center justify-between py-2">
-            <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-              <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation above; users can also opt out individually in their own Settings.</p></div>
-            <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
-              className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
-              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
-            </button>
-          </div>
+          <p className="text-xs text-agora-400 -mt-2">
+            Mastodon/fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
+          </p>
           <div className="flex items-center justify-between py-2">
             <div><p className="font-medium text-sm">Allow users to invite friends</p>
               <p className="text-xs text-agora-400">Users can send email invitations to friends</p></div>
@@ -395,10 +400,30 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
 
-          {/* Instance bans */}
+      {/* Fediverse (AGORA-178): instance-wide ActivityPub toggle + the
+          instance_bans blocking tool (AGORA-177 made this the single
+          enforced way to block a fediverse instance), consolidated out of
+          the Settings and Moderation tabs where they used to be buried. */}
+      {tab==='fediverse' && (
+        <div className="space-y-6">
+          <div className="card p-4">
+            <div className="flex items-center justify-between py-2">
+              <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
+                <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
+              <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
+                className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
+                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
+              </button>
+            </div>
+            <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
+          </div>
+
           <div>
             <h3 className="font-semibold mb-3">Instance Bans</h3>
+            <p className="text-sm text-agora-500 mb-3">Block a whole fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
             <div className="card p-4 space-y-3 mb-3">
               <p className="text-sm font-medium">Ban an instance</p>
               <div className="flex gap-2 flex-wrap">
@@ -429,12 +454,108 @@ export default function AdminPage() {
         </div>
       )}
 
+      {/* Bluesky (AGORA-193): instance-wide AT Proto toggle — independent of
+          the ActivityPub toggle above, since a user/instance may want one
+          network on and the other off. Its own tab rather than folded into
+          the generic Settings tab, matching the Fediverse tab's placement. */}
+      {tab==='bluesky' && (
+        <div className="space-y-6">
+          <div className="card p-4">
+            <div className="flex items-center justify-between py-2">
+              <div><p className="font-medium text-sm">Bluesky (AT Protocol)</p>
+                <p className="text-xs text-agora-400">Let this instance act as a Bluesky PDS — federating public posts over AT Protocol and being discoverable/followable from Bluesky. Independent of the Fediverse (ActivityPub) toggle; users can also opt out individually in their own Settings.</p></div>
+              <button onClick={()=>setSettingsForm(f=>({...f,atproto_enabled:f.atproto_enabled==='true'?'false':'true'}))}
+                className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.atproto_enabled==='true'?'bg-agora-700':'bg-agora-200'}`}>
+                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.atproto_enabled==='true'?'translate-x-5':'translate-x-0'}`} />
+              </button>
+            </div>
+            <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
+          </div>
+
+          {/* AGORA-205: DID-scoped block list — AT Proto's natural blockable
+              unit, checked from every inbound path in the Bluesky epic
+              (ingested posts, replies, likes/reposts). */}
+          <div>
+            <h3 className="font-semibold mb-3">Blocked Bluesky DIDs</h3>
+            <p className="text-sm text-agora-500 mb-3">Block a specific Bluesky account by DID — enforced against inbound ingested posts, replies, likes, and reposts, and against following that account from this instance.</p>
+            <div className="card p-4 space-y-3 mb-3">
+              <p className="text-sm font-medium">Block a DID</p>
+              <div className="flex gap-2 flex-wrap">
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="DID (e.g. did:plc:abc123…)"
+                  value={didBlockForm.did} onChange={e=>setDidBlockForm(f=>({...f,did:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Reason"
+                  value={didBlockForm.reason} onChange={e=>setDidBlockForm(f=>({...f,reason:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Admin notes (private)"
+                  value={didBlockForm.notes} onChange={e=>setDidBlockForm(f=>({...f,notes:e.target.value}))} />
+                <button onClick={()=>blockDid.mutate(didBlockForm)} disabled={!didBlockForm.did||!didBlockForm.reason||blockDid.isPending}
+                  className="btn-danger text-sm">Block DID</button>
+              </div>
+            </div>
+            {(blockedDidsData?.blocks||[]).length===0 && (
+              <div className="card p-4 text-center text-agora-400 text-sm">No blocked DIDs.</div>
+            )}
+            {(blockedDidsData?.blocks||[]).map((b:any) => (
+              <div key={b.id} className="card p-3 mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium font-mono">{b.did}</p>
+                  <p className="text-xs text-agora-400">{b.reason}{b.blocked_by&&` · by @${b.blocked_by}`}</p>
+                  {b.notes && <p className="text-xs text-agora-400 italic">{b.notes}</p>}
+                </div>
+                <button onClick={()=>unblockDid.mutate(b.id)} className="btn-secondary text-xs py-1 px-2 flex-shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
+
+          {/* PDS-host block scope reuses instance_bans as-is — a domain is
+              still meaningful at the transport layer even though AT Proto
+              identity is DID-first, not domain-first the way a fediverse
+              actor's is. Same list as the Fediverse tab's Instance Bans. */}
+          <div>
+            <h3 className="font-semibold mb-3">Blocked PDS Domains</h3>
+            <p className="text-sm text-agora-500 mb-3">Block an entire self-hosted PDS host — the same block list the Fediverse tab's Instance Bans manage, since a domain block applies regardless of which protocol it's blocking.</p>
+            <div className="card p-4 space-y-3 mb-3">
+              <p className="text-sm font-medium">Ban a PDS domain</p>
+              <div className="flex gap-2 flex-wrap">
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="PDS domain (e.g. bad-pds.example.com)"
+                  value={pdsBanForm.instance} onChange={e=>setPdsBanForm(f=>({...f,instance:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Reason"
+                  value={pdsBanForm.reason} onChange={e=>setPdsBanForm(f=>({...f,reason:e.target.value}))} />
+                <input className="input text-sm flex-1 min-w-40" autoComplete="off" placeholder="Admin notes (private)"
+                  value={pdsBanForm.notes} onChange={e=>setPdsBanForm(f=>({...f,notes:e.target.value}))} />
+                <button onClick={()=>banPds.mutate(pdsBanForm)} disabled={!pdsBanForm.instance||!pdsBanForm.reason||banPds.isPending}
+                  className="btn-danger text-sm">Ban domain</button>
+              </div>
+            </div>
+            {(instBansData?.bans||[]).length===0 && (
+              <div className="card p-4 text-center text-agora-400 text-sm">No blocked domains.</div>
+            )}
+            {(instBansData?.bans||[]).map((b:any) => (
+              <div key={b.id} className="card p-3 mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">{b.instance}</p>
+                  <p className="text-xs text-agora-400">{b.reason}{b.banned_by&&` · by @${b.banned_by}`}</p>
+                  {b.notes && <p className="text-xs text-agora-400 italic">{b.notes}</p>}
+                </div>
+                <button onClick={()=>unbanInst.mutate(b.id)} className="btn-secondary text-xs py-1 px-2 flex-shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {tab==='federation' && (
         <FederationPanel
           instances={fedData?.instances||[]}
           onAdd={()=>qc.invalidateQueries({queryKey:['admin-fed']})}
           onBlock={(id)=>blockInst.mutate(id)}
           onUnblock={(id)=>unblockInst.mutate(id)}
+        />
+      )}
+
+      {tab==='relays' && (
+        <RelaysPanel
+          relays={relaysData?.relays||[]}
+          onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
         />
       )}
 
@@ -759,6 +880,8 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         <h3 className="font-semibold">Add Federated Instance</h3>
         <p className="text-sm text-agora-500">
           Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
+          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
+          instance, use the Fediverse tab's Instance Bans instead.
         </p>
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
@@ -806,6 +929,111 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
             {inst.status === 'active'
               ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Block</button>
               : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline flex-shrink-0">Unblock</button>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Relays Panel (AGORA-223) ──────────────────────────────────────────────────
+//
+// Mirrors Mastodon's own admin Relays screen: a relay is entered by its
+// inbox URL directly (not resolved/validated client-side — the backend
+// sends the actual subscribe Follow and reports back via status), shown as
+// a list with its current status and Enable/Disable/Delete actions.
+
+function RelaysPanel({ relays, onChanged }: {
+  relays: any[], onChanged: () => void
+}) {
+  const [inboxUrl, setInboxUrl] = useState('')
+  const [addMsg, setAddMsg] = useState('')
+  const [addErr, setAddErr] = useState('')
+
+  const add = useMutation({
+    mutationFn: () => adminApi.addRelay(inboxUrl.trim()),
+    onSuccess: () => {
+      setAddMsg('✓ Relay follow requested')
+      setInboxUrl('')
+      setAddErr('')
+      onChanged()
+      setTimeout(() => setAddMsg(''), 4000)
+    },
+    onError: (e: any) => setAddErr(e.response?.data?.error || 'Could not add relay'),
+  })
+  const enable  = useMutation({ mutationFn: (id: string) => adminApi.enableRelay(id),  onSuccess: onChanged })
+  const disable = useMutation({ mutationFn: (id: string) => adminApi.disableRelay(id), onSuccess: onChanged })
+  const remove  = useMutation({ mutationFn: (id: string) => adminApi.deleteRelay(id),  onSuccess: onChanged })
+
+  const statusLabel: Record<string, string> = {
+    enabled: '✓ Enabled', pending: '⏳ Pending', disabled: 'Disabled', rejected: 'Rejected',
+  }
+  const statusClass: Record<string, string> = {
+    enabled: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400',
+    pending: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400',
+    disabled: 'bg-agora-100 dark:bg-agora-700 text-agora-500',
+    rejected: 'bg-red-100 dark:bg-red-900/30 text-red-600',
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Add relay */}
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Add new relay</h3>
+        <p className="text-sm text-agora-500">
+          A federation relay is an intermediary server that exchanges large volumes of public posts between
+          servers that subscribe and publish to it. It can help small and medium servers discover content from
+          the fediverse, which would otherwise require local users manually following other people on remote
+          servers.
+        </p>
+        {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
+        {addErr && <p className="text-sm text-red-500">{addErr}</p>}
+        <div className="flex gap-2">
+          <input
+            className="input flex-1 text-sm"
+            autoComplete="off"
+            placeholder="https://relay.example.com/inbox"
+            value={inboxUrl}
+            onChange={e => { setInboxUrl(e.target.value); setAddErr('') }}
+            onKeyDown={e => e.key === 'Enter' && inboxUrl.trim() && add.mutate()}
+          />
+          <button
+            onClick={() => add.mutate()}
+            disabled={!inboxUrl.trim() || add.isPending}
+            className="btn-primary text-sm"
+          >
+            {add.isPending ? 'Requesting…' : 'Add new relay'}
+          </button>
+        </div>
+      </div>
+
+      {/* Relay list */}
+      <div className="space-y-2">
+        {relays.length === 0 && (
+          <div className="card p-8 text-center text-agora-400 space-y-1">
+            <p className="font-medium">No relays yet</p>
+            <p className="text-sm">Add a relay above to start discovering content from across the fediverse.</p>
+          </div>
+        )}
+        {relays.map((relay: any) => (
+          <div key={relay.id} className={`card p-3 flex items-center gap-3 ${relay.status !== 'enabled' ? 'opacity-70' : ''}`}>
+            <div className="flex-1 min-w-0">
+              <p className="font-mono text-sm truncate">{relay.inbox_url}</p>
+              <span className={`inline-block mt-1 px-1.5 py-0.5 rounded text-xs ${statusClass[relay.status] || ''}`}>
+                {statusLabel[relay.status] || relay.status}
+              </span>
+            </div>
+            <div className="flex gap-3 flex-shrink-0">
+              {relay.status === 'enabled'
+                ? <button onClick={() => disable.mutate(relay.id)} className="text-xs text-agora-500 hover:underline">Disable</button>
+                : <button onClick={() => enable.mutate(relay.id)} className="text-xs text-green-600 hover:underline">Enable</button>}
+              <button
+                onClick={() => { if (confirm(`Remove relay ${relay.inbox_url}?`)) remove.mutate(relay.id) }}
+                className="text-xs text-red-500 hover:underline"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         ))}
       </div>

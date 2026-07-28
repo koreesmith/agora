@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen, HelpCircle, Sparkles, Globe } from 'lucide-react'
+import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen, HelpCircle, Sparkles } from 'lucide-react'
 import WhatsNewModal from '../common/WhatsNewModal'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
@@ -48,11 +48,10 @@ export default function Layout() {
     { to: '/',                          icon: Home,           label: 'Feed' },
     { to: '/notifications',             icon: Bell,           label: 'Notifications', badge: unread },
     { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
-    { to: '/friends',                   icon: Users,          label: 'Friends' },
+    { to: '/connections',               icon: Users,          label: 'Connections' },
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
     { to: '/pages',                     icon: BookOpen,       label: 'Pages' },
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
-    { to: '/fediverse',                 icon: Globe,          label: 'Fediverse' },
     { to: '/albums',                    icon: Images,         label: 'Photo Albums' },
     { to: '/discover',                  icon: Compass,        label: 'Find Friends' },
     { to: '/search',                    icon: Search,         label: 'Search' },

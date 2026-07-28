@@ -34,6 +34,7 @@ type apUser struct {
 	DisplayName string
 	Bio         string
 	AvatarURL   string
+	CoverURL    string
 	PubKeyPEM   string
 	PrivKeyPEM  string
 }
@@ -52,12 +53,12 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 	}
 	var u apUser
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, bio, avatar_url,
+		SELECT id, username, display_name, bio, avatar_url, cover_url,
 		       federation_public_key, federation_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
 		  AND activitypub_enabled = true AND deletion_scheduled_at IS NULL
-	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.PubKeyPEM, &u.PrivKeyPEM)
+	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM)
 	if err != nil {
 		return nil, false
 	}
@@ -326,9 +327,180 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 	if u.AvatarURL != "" {
 		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
 	}
+	// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
+	// the profile header/banner, the "icon" field's counterpart — was never
+	// set at all, so a remote follower's client never had a cover photo to
+	// show for this user regardless of anything on the receiving end.
+	if u.CoverURL != "" {
+		obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
 	json.NewEncoder(w).Encode(obj)
+}
+
+// BroadcastActorUpdate delivers a signed Update(Person) activity to every
+// ActivityPub follower (AGORA-242) — the actor-level counterpart to
+// BroadcastUpdatePost. Without this, a remote server that fetched this
+// user's actor doc once (typically on first Follow) never learns of any
+// later change: unlike a Note, a Person's icon/name/summary aren't
+// resurfaced by any other activity, so an avatar or display-name edit sat
+// invisibly on this end forever from the follower's point of view. Rebuilds
+// the exact same object writeActorObject serves, since that's the
+// authoritative current shape a follower should end up caching.
+func (s *Service) BroadcastActorUpdate(userID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var username string
+	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1 AND is_remote = false`, userID).Scan(&username); err != nil {
+		return
+	}
+	u, ok := s.apEligibleUser(username)
+	if !ok {
+		return
+	}
+	pubPEM, _, _, err := s.getOrCreateUserKeyPair(u.ID, u.PubKeyPEM, u.PrivKeyPEM)
+	if err != nil {
+		return
+	}
+
+	actor := s.actorURL(u.Username)
+	person := map[string]any{
+		"id":                 actor,
+		"type":               "Person",
+		"preferredUsername":  u.Username,
+		"name":               u.DisplayName,
+		"summary":            u.Bio,
+		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
+		"outbox":             actor + "/outbox",
+		"followers":          actor + "/followers",
+		"url":                strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username,
+		"publicKey": map[string]string{
+			"id":           actor + "#main-key",
+			"owner":        actor,
+			"publicKeyPem": pubPEM,
+		},
+	}
+	if u.AvatarURL != "" {
+		person["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
+	}
+	if u.CoverURL != "" {
+		person["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+	}
+
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       fmt.Sprintf("%s/updates/%d", actor, time.Now().UnixNano()),
+		"type":     "Update",
+		"actor":    actor,
+		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
+		"object":   person,
+	}
+	s.deliverToFollowers(userID, activity)
+}
+
+// ── Instance actor (AGORA-219) ────────────────────────────────────────────────
+//
+// A relay subscription (AGORA-220) is a handshake between two *servers*, not
+// a user and a server — neither of the two actor kinds above fits. This is a
+// third and last kind of local actor: exactly one per instance, used only
+// for relay Follow/Undo/Announce traffic, never surfaced to end users the
+// way a profile or page is.
+
+func (s *Service) instanceActorURL() string {
+	return strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/instance"
+}
+
+func (s *Service) instanceActorKeyID() string {
+	return s.instanceActorURL() + "#main-key"
+}
+
+// getOrCreateInstanceKeyPair mirrors getOrCreateUserKeyPair/
+// getOrCreatePageKeyPair, but the instance actor has no owning row of its own
+// to persist keys on. Stored under instance_settings instead, under key
+// names distinct from the legacy Agora-to-Agora protocol's own instance-wide
+// key (federation_public_key/federation_private_key — Ed25519, base64,
+// federation.go's getOrCreateKeyPair) despite the similar name: this pair is
+// RSA/PEM, matching the per-user/per-page convention standard ActivityPub
+// HTTP Signatures require. Deliberately absent from admin.go's
+// adminEditableSettings allowlist, so it's never serialized to the frontend.
+func (s *Service) getOrCreateInstanceKeyPair() (string, string, *rsa.PrivateKey, error) {
+	var pubPEM, privPEM string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_actor_public_key'`).Scan(&pubPEM)
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_actor_private_key'`).Scan(&privPEM)
+
+	if pubPEM != "" && privPEM != "" {
+		if priv, err := parseRSAPrivateKeyPEM(privPEM); err == nil {
+			return pubPEM, privPEM, priv, nil
+		}
+		// Fall through and regenerate if the stored PEM is somehow unparseable.
+	}
+
+	pubPEMOut, privPEMOut, priv, err := generateRSAKeyPairPEM()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('instance_actor_public_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, pubPEMOut)
+	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('instance_actor_private_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, privPEMOut)
+
+	log.Printf("federation: generated new RSA keypair for instance actor")
+	return pubPEMOut, privPEMOut, priv, nil
+}
+
+// GetInstanceActor serves the instance-wide actor document at
+// /federation/instance — an ActivityPub "Application" actor, the same type
+// Mastodon's own instance actor uses. Unlike a Person/user actor there's no
+// profile page to link to and no preferredUsername a WebFinger lookup needs
+// to resolve — nothing outside this instance's own relay subscriptions ever
+// looks this actor up by handle, only dereferences it directly by URL (the
+// same way a relay's own actor is dereferenced back, in fetchActorProfileSignedAsInstance).
+func (s *Service) GetInstanceActor(w http.ResponseWriter, r *http.Request) {
+	if !s.activityPubEnabled() {
+		writeError(w, 404, "not found")
+		return
+	}
+	pubPEM, _, _, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		writeError(w, 500, "key error")
+		return
+	}
+	actor := s.instanceActorURL()
+	obj := map[string]any{
+		"@context": []string{
+			"https://www.w3.org/ns/activitystreams",
+			"https://w3id.org/security/v1",
+		},
+		"id":     actor,
+		"type":   "Application",
+		"name":   "Relay",
+		"inbox":  strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
+		"outbox": actor + "/outbox",
+		"publicKey": map[string]string{
+			"id":           actor + "#main-key",
+			"owner":        actor,
+			"publicKeyPem": pubPEM,
+		},
+	}
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(obj)
+}
+
+// InstanceActorOutbox serves an empty OrderedCollection — the instance actor
+// never posts anything itself, it only sends Follow/Undo(Follow) to relays,
+// but an outbox at the URL the actor document advertises is still expected
+// to resolve to *something* by AP crawlers that check.
+func (s *Service) InstanceActorOutbox(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"@context":     "https://www.w3.org/ns/activitystreams",
+		"id":           s.instanceActorURL() + "/outbox",
+		"type":         "OrderedCollection",
+		"totalItems":   0,
+		"orderedItems": []any{},
+	})
 }
 
 // ── Outbox ─────────────────────────────────────────────────────────────────────
@@ -402,12 +574,29 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		"published":    published,
 		"to":           []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"cc":           []string{actor + "/followers"},
+		// AGORA-255: FEP-044f — without an explicit interactionPolicy,
+		// Mastodon 4.4+ won't offer a quote button on this post at all
+		// (boosts are unaffected; they predate this and aren't gated by it).
+		// automaticApproval: Public mirrors how open reposting/boosting of
+		// these same posts already is — anyone who could boost it can quote
+		// it too, no separate manual-approval queue.
+		"interactionPolicy": map[string]any{
+			"canQuote": map[string]any{
+				"automaticApproval": "https://www.w3.org/ns/activitystreams#Public",
+			},
+		},
 	}
 	if inReplyTo != "" {
 		note["inReplyTo"] = inReplyTo
 	}
 	if contentWarning != "" {
+		// AGORA-224: Mastodon (and most other AP software) only treats a
+		// post as content-warned if "sensitive" is true — "summary" alone
+		// is not enough. Without this, the post shows up on the fediverse
+		// with its content fully visible and no warning at all, silently
+		// dropping the author's own trigger warning.
 		note["summary"] = contentWarning
+		note["sensitive"] = true
 	}
 	// AGORA-152: attach images so they render on Mastodon etc., not just as a
 	// caption with no photo. Queried here (rather than threaded through every
@@ -494,12 +683,18 @@ func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt t
 	objID := actor + "/posts/" + postID
 	to := note["to"]
 	cc := note["cc"]
+	updated := time.Now().UTC().Format(time.RFC3339)
+	// AGORA-229: Mastodon's receiving side (ProcessStatusUpdateService) only
+	// applies an Update to a Note if the object itself carries a present
+	// "updated" timestamp — without it the whole activity is silently
+	// no-op'd on arrival, even though delivery succeeded.
+	note["updated"] = updated
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
 		"id":        fmt.Sprintf("%s/updates/%d", objID, time.Now().UnixNano()),
 		"type":      "Update",
 		"actor":     actor,
-		"published": time.Now().UTC().Format(time.RFC3339),
+		"published": updated,
 		"to":        to,
 		"cc":        cc,
 		"object":    note,
@@ -507,7 +702,55 @@ func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt t
 }
 
 func plainTextToHTML(s string) string {
-	return strings.ReplaceAll(html.EscapeString(s), "\n", "<br>")
+	return linkifyURLs(strings.ReplaceAll(html.EscapeString(s), "\n", "<br>"))
+}
+
+// federationURLRe matches a bare URL in already-HTML-escaped text — same
+// character class renderContent (frontend) uses to linkify locally, so a
+// post looks the same whether viewed on Agora or on a remote Mastodon-style
+// client.
+var federationURLRe = regexp.MustCompile(`https?://[^\s<>"']+`)
+
+// linkifyURLs wraps a bare URL in an anchor tag (AGORA-211) — Mastodon-style
+// clients render a Note's "content" HTML close to verbatim rather than
+// auto-linking plain-text URLs themselves (the same reasoning
+// linkifyMentionTags already documents for @mentions), so without this a
+// URL in a federated post displays as inert text on every remote client
+// even though Agora's own renderContent already linkifies it locally.
+func linkifyURLs(contentHTML string) string {
+	return federationURLRe.ReplaceAllStringFunc(contentHTML, func(u string) string {
+		// Trailing punctuation likely belongs to the sentence, not the URL —
+		// same trim renderContent (frontend) already does for the same reason.
+		trimmed := strings.TrimRight(u, ".,!?)")
+		trailing := u[len(trimmed):]
+		return fmt.Sprintf(`<a href="%s" rel="nofollow noopener noreferrer" target="_blank">%s</a>%s`, trimmed, trimmed, trailing)
+	})
+}
+
+// linkifyMentionTags rewrites each resolved fediverse mention's plain-text
+// occurrence in a Note's (already HTML-escaped) content into the standard
+// Mastodon-style mention anchor (h-card/u-url microformat real fediverse
+// software emits for its own mentions). The "tag" array alone is enough to
+// make a mention trigger a remote notification, but Mastodon and friends
+// render "content" close to verbatim rather than auto-linking @handle@domain
+// text themselves — without this, a mention notifies correctly but displays
+// as inert plain text, unlike every other mention in the same thread.
+func linkifyMentionTags(contentHTML string, tags []map[string]any) string {
+	for _, t := range tags {
+		name, _ := t["name"].(string)
+		href, _ := t["href"].(string)
+		if name == "" || href == "" {
+			continue
+		}
+		handle := strings.TrimPrefix(name, "@")
+		if at := strings.Index(handle, "@"); at != -1 {
+			handle = handle[:at]
+		}
+		anchor := fmt.Sprintf(`<span class="h-card" translate="no"><a href="%s" class="u-url mention">@<span>%s</span></a></span>`,
+			html.EscapeString(href), html.EscapeString(handle))
+		contentHTML = strings.ReplaceAll(contentHTML, name, anchor)
+	}
+	return contentHTML
 }
 
 // ── Followers collection ──────────────────────────────────────────────────────
@@ -660,7 +903,7 @@ func (s *Service) PageFollowers(w http.ResponseWriter, r *http.Request) {
 // legacy custom-protocol shape. It verifies the HTTP Signature (not the old
 // embedded-JSON-field Ed25519 scheme) before doing anything else.
 func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, body []byte) {
-	verifiedActor, err := verifyInboundSignature(r, body)
+	verifiedActor, err := s.verifyInboundSignature(r, body)
 	if err != nil {
 		log.Printf("federation: ap signature verification failed: %v", err)
 		writeError(w, 401, "invalid signature")
@@ -672,9 +915,10 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	// fields are not cryptographically tied to the signature and are only
 	// used below where they don't need to be trusted on their own.
 	var a struct {
-		ID     string          `json:"id"`
-		Type   string          `json:"type"`
-		Object json.RawMessage `json:"object"`
+		ID         string          `json:"id"`
+		Type       string          `json:"type"`
+		Object     json.RawMessage `json:"object"`
+		Instrument json.RawMessage `json:"instrument"`
 	}
 	if err := json.Unmarshal(body, &a); err != nil {
 		writeError(w, 400, "invalid activity")
@@ -701,7 +945,17 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			s.handleInboundUndoBlock(verifiedActor, inner.Object)
 		}
 	case "Create":
-		s.handleInboundCreate(verifiedActor, a.Object)
+		// AGORA-222: a Create signed by a relay this instance is subscribed
+		// to is forwarded on behalf of some other, unrelated instance's
+		// author — handleInboundCreate's normal attributedTo==verifiedActor
+		// check would (correctly, for every other sender) reject that
+		// outright, so relay-sourced Creates get their own ingestion path
+		// instead of weakening that check for everyone.
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+			s.ingestRelayForwardedCreate(a.Object)
+		} else {
+			s.handleInboundCreate(verifiedActor, a.Object)
+		}
 	case "Update":
 		s.handleInboundUpdate(verifiedActor, a.Object)
 	case "Delete":
@@ -709,13 +963,24 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	case "Like":
 		s.handleInboundLike(verifiedActor, a.Object)
 	case "Announce":
-		s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+		// AGORA-222: mirrors the relay check on Create above —
+		// handleInboundAnnounce only ever resolves an Announce's object
+		// against one of Agora's *own* posts (resolveFederatableTarget),
+		// which a relay-forwarded Announce (pointing at some other
+		// instance's post entirely) can never satisfy.
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+			s.ingestRelayForwardedAnnounce(a.Object)
+		} else {
+			s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
+		}
 	case "Block":
 		s.handleInboundBlock(verifiedActor, a.Object)
 	case "Accept":
 		s.handleInboundAcceptFollow(verifiedActor, a.Object)
 	case "Reject":
 		s.handleInboundRejectFollow(verifiedActor, a.Object)
+	case "QuoteRequest":
+		s.handleInboundQuoteRequest(a.ID, verifiedActor, a.Object, a.Instrument)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -728,9 +993,7 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	}
 
 	domain := domainFromURL(followerActor)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		return
 	}
 
@@ -907,15 +1170,63 @@ func (s *Service) handleInboundUndoBlock(blockerActor string, objectRaw json.Raw
 // needed to match it to the right ap_following row: follow.Actor tells us
 // which local user's Follow this confirms, and verifiedActor (the Accept's
 // own signer) is who's confirming it, which must be followed_actor_url.
+//
+// The spec also allows "object" to be a bare IRI string referencing the
+// original Follow's id instead of an embedded object (threads.net does this
+// — AGORA-175). Our own outbound Follow ids are shaped
+// {actor}/follows/{timestamp}, so usernameFromActorURL's prefix match still
+// recovers the right local user straight from that string.
 
-func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+// usernameFromAcceptObject extracts the local username an inbound
+// Accept(Follow)'s "object" refers to, whether the remote server sent it as
+// an embedded Follow object ({"actor": "..."}) or as a bare IRI string
+// referencing the original Follow's id (threads.net does this — AGORA-175).
+func usernameFromAcceptObject(objectRaw json.RawMessage, instanceDomain string) string {
 	var follow struct {
 		Actor string `json:"actor"`
 	}
-	if err := json.Unmarshal(objectRaw, &follow); err != nil || follow.Actor == "" {
+	if err := json.Unmarshal(objectRaw, &follow); err == nil && follow.Actor != "" {
+		return usernameFromActorURL(follow.Actor, instanceDomain)
+	}
+	var objectID string
+	if err := json.Unmarshal(objectRaw, &objectID); err != nil || objectID == "" {
+		return ""
+	}
+	return usernameFromActorURL(objectID, instanceDomain)
+}
+
+// followObjectActor extracts the raw "actor" URL/IRI an inbound Accept or
+// Reject's "object" refers to, whether it's an embedded Follow object
+// ({"actor": "..."}) or a bare IRI string referencing the original Follow's
+// id (threads.net does this — AGORA-175). Groundwork shared by
+// usernameFromAcceptObject (per-user Accept, above) and the relay
+// Accept/Reject check below (AGORA-220) — kept separate from that function
+// rather than reused, since each caller compares the extracted actor
+// against a different kind of local actor URL.
+func followObjectActor(objectRaw json.RawMessage) string {
+	var follow struct {
+		Actor string `json:"actor"`
+	}
+	if err := json.Unmarshal(objectRaw, &follow); err == nil && follow.Actor != "" {
+		return follow.Actor
+	}
+	var objectID string
+	if err := json.Unmarshal(objectRaw, &objectID); err == nil {
+		return objectID
+	}
+	return ""
+}
+
+func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json.RawMessage) {
+	// AGORA-220: a relay confirming our subscription looks identical to a
+	// user's outbound-follow Accept, except the followed object is the
+	// instance actor rather than any /federation/users/{username} URL.
+	if followObjectActor(objectRaw) == s.instanceActorURL() {
+		s.handleRelayAccept(verifiedActor)
 		return
 	}
-	username := usernameFromActorURL(follow.Actor, s.cfg.InstanceDomain)
+
+	username := usernameFromAcceptObject(objectRaw, s.cfg.InstanceDomain)
 	if username == "" {
 		return
 	}
@@ -930,6 +1241,12 @@ func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json
 // handleInboundRejectFollow removes the pending ap_following row so the UI
 // reverts to "not following" and the user can retry or give up.
 func (s *Service) handleInboundRejectFollow(verifiedActor string, objectRaw json.RawMessage) {
+	// AGORA-220: mirrors the relay check in handleInboundAcceptFollow above.
+	if followObjectActor(objectRaw) == s.instanceActorURL() {
+		s.handleRelayReject(verifiedActor)
+		return
+	}
+
 	var follow struct {
 		Actor string `json:"actor"`
 	}
@@ -948,19 +1265,199 @@ func (s *Service) handleInboundRejectFollow(verifiedActor string, objectRaw json
 	s.db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, verifiedActor)
 }
 
+// apAttachment is a Note's "attachment" entry, shared by handleInboundCreate
+// and handleInboundUpdate.
+type apAttachment struct {
+	Type      string `json:"type"`
+	MediaType string `json:"mediaType"`
+	URL       string `json:"url"`
+}
+
+// apTagEntry (AGORA-213, extended AGORA-258) is a Note's or actor's "tag"
+// array element — shared shape for Mention, Hashtag, and Emoji entries.
+// Icon is only ever populated on an Emoji entry (Mention/Hashtag never set
+// it), which is exactly the field hashtagsFromAPTags ignores and
+// emojisFromAPTags reads.
+type apTagEntry struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+	Icon struct {
+		URL string `json:"url"`
+	} `json:"icon"`
+}
+
+// emojisFromAPTags extracts a shortcode->image-URL map from a Note's or
+// actor's own "tag" array (AGORA-258) — mirrors hashtagsFromAPTags' shape
+// for the Emoji-type entries that function ignores. Returns nil (not an
+// empty map) when there's nothing to store, so callers can cheaply check
+// len() without allocating on the common no-custom-emoji path.
+func emojisFromAPTags(entries []apTagEntry) map[string]string {
+	var emojis map[string]string
+	for _, t := range entries {
+		if t.Type != "Emoji" || t.Name == "" || t.Icon.URL == "" {
+			continue
+		}
+		if emojis == nil {
+			emojis = map[string]string{}
+		}
+		emojis[t.Name] = t.Icon.URL
+	}
+	return emojis
+}
+
+// emojisJSON marshals an emoji map for storage in the emojis JSONB column,
+// normalizing a nil/empty map to a literal "{}" rather than SQL NULL/JSON
+// null — the column's own DEFAULT is '{}', and consumers (frontend
+// rendering, other backend readers) only ever need to handle "is this key
+// present", not a three-way nil/null/empty distinction.
+func emojisJSON(m map[string]string) []byte {
+	if len(m) == 0 {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
+// hashtagsFromAPTags extracts distinct, lowercased tag names from a Note's
+// own "tag" array — read directly from the source data (never re-parsed
+// from rendered HTML content, which a renderer may have reformatted or
+// dropped the leading # from).
+func hashtagsFromAPTags(entries []apTagEntry) []string {
+	seen := map[string]bool{}
+	var tags []string
+	for _, t := range entries {
+		if t.Type != "Hashtag" || t.Name == "" {
+			continue
+		}
+		tag := strings.ToLower(strings.TrimPrefix(t.Name, "#"))
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+// storeHashtags mirrors feed.Service's own helper of the same name —
+// replaces postID's stored hashtag set, the same replace-not-merge
+// convention this file already uses for a Note's attachments/poll options
+// on update.
+func (s *Service) storeHashtags(postID string, tags []string) {
+	s.db.Exec(`DELETE FROM post_hashtags WHERE post_id = $1`, postID)
+	for _, tag := range tags {
+		s.db.Exec(`INSERT INTO post_hashtags (post_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, postID, tag)
+	}
+}
+
+// matchAttachments sorts a Note's attachments into image URLs and (at most
+// one) video URL, reusing Agora's existing native video-post columns
+// (video_url/video_thumb_url) — only the first video is kept, mirroring how
+// Agora's own composer only supports a single video per post. Audio-only
+// attachments have no Agora post-type equivalent yet and are intentionally
+// dropped (tracked separately, not this ticket).
+//
+// AGORA-180: threads.net attachments have no "mediaType" at all — just
+// {"type":"Video","url":"...","width":...,"height":...} — so the
+// ActivityStreams "type" is checked as a fallback alongside mediaType.
+func matchAttachments(attachments []apAttachment) (imageURLs []string, videoURL string) {
+	for _, a := range attachments {
+		switch {
+		case (strings.HasPrefix(a.MediaType, "image/") || a.Type == "Image") && a.URL != "":
+			imageURLs = append(imageURLs, a.URL)
+		case (strings.HasPrefix(a.MediaType, "video/") || a.Type == "Video") && a.URL != "" && videoURL == "":
+			videoURL = a.URL
+		}
+	}
+	return imageURLs, videoURL
+}
+
+// apPollOption is one entry of a Question's "oneOf"/"anyOf" array — a
+// single-choice poll uses oneOf, a multiple-choice poll uses anyOf, per the
+// Mastodon/ActivityStreams poll convention (both share this same shape).
+type apPollOption struct {
+	Name    string `json:"name"`
+	Replies struct {
+		TotalItems int `json:"totalItems"`
+	} `json:"replies"`
+}
+
+// apPoll is the parsed poll data from an inbound "Question" object, shared
+// by handleInboundCreate and handleInboundUpdate.
+type apPoll struct {
+	Options  []apPollOption
+	Multiple bool
+	EndTime  string
+}
+
+// parseAPPoll returns nil for anything that isn't a poll (AGORA-210) — a
+// Mastodon poll's outer object type is "Question", not "Note", but
+// handleInboundCreate/handleInboundUpdate never checked the object's "type"
+// at all before this, so a poll's oneOf/anyOf/endTime were silently
+// discarded and only its bare question text (still present in "content",
+// same field a plain Note uses) got ingested as an ordinary post.
+func parseAPPoll(objType string, oneOf, anyOf []apPollOption, endTime string) *apPoll {
+	if objType != "Question" {
+		return nil
+	}
+	options, multiple := oneOf, false
+	if len(anyOf) > 0 {
+		options, multiple = anyOf, true
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return &apPoll{Options: options, Multiple: multiple, EndTime: endTime}
+}
+
+// applyInboundPoll stores a parsed poll's options/vote-tallies/settings
+// against an already-ingested post (AGORA-210). Replaces any existing
+// poll_options wholesale rather than merging — mirrors the same
+// replace-not-append convention storeInboundImages/handleInboundUpdate's own
+// image handling already uses, since a poll's option set can change between
+// an inbound Create and a later Update (Mastodon re-sends the full object,
+// including any admin-added write-in options, not a diff).
+func (s *Service) applyInboundPoll(postID string, poll *apPoll) {
+	if poll == nil {
+		return
+	}
+	var expiresAt any
+	if poll.EndTime != "" {
+		if t, err := time.Parse(time.RFC3339, poll.EndTime); err == nil {
+			expiresAt = t
+		}
+	}
+	s.db.Exec(`UPDATE posts SET poll_multiple_choice = $1, poll_expires_at = $2 WHERE id = $3`,
+		poll.Multiple, expiresAt, postID)
+	s.db.Exec(`DELETE FROM poll_options WHERE post_id = $1`, postID)
+	for i, opt := range poll.Options {
+		name := strings.TrimSpace(opt.Name)
+		if name == "" {
+			continue
+		}
+		s.db.Exec(`INSERT INTO poll_options (post_id, text, position, remote_votes) VALUES ($1, $2, $3, $4)`,
+			postID, name, i, opt.Replies.TotalItems)
+	}
+}
+
 // ── Inbound Create (replies into threads we own, or a followed account's own
 //    top-level posts — AGORA-146) ─────────────────────────────────────────────
 func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
-		ID           string `json:"id"`
-		AttributedTo string `json:"attributedTo"`
-		Content      string `json:"content"`
-		InReplyTo    string `json:"inReplyTo"`
-		Summary      string `json:"summary"` // AGORA-154: content-warning text, if any
-		Attachment   []struct {
-			MediaType string `json:"mediaType"`
-			URL       string `json:"url"`
-		} `json:"attachment"`
+		ID           string         `json:"id"`
+		Type         string         `json:"type"` // AGORA-210: "Question" for a poll, "Note" otherwise
+		AttributedTo string         `json:"attributedTo"`
+		Content      string         `json:"content"`
+		InReplyTo    string         `json:"inReplyTo"`
+		Summary      string         `json:"summary"` // AGORA-154: content-warning text, if any
+		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213: hashtags (mixed with Mention entries)
+		OneOf        []apPollOption `json:"oneOf"`
+		AnyOf        []apPollOption `json:"anyOf"`
+		EndTime      string         `json:"endTime"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -976,34 +1473,22 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 
 	// AGORA-148: an admin-blocked instance can't Follow, but until now could
 	// still reply into threads — apply the same block-list check Follow uses.
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
 		return
 	}
 
-	// AGORA-161: video attachments reuse Agora's existing native video-post
-	// columns (video_url/video_thumb_url) — only the first one is kept,
-	// mirroring how Agora's own composer only supports a single video per
-	// post. Audio-only attachments have no Agora post-type equivalent yet
-	// and are intentionally dropped (tracked separately, not this ticket).
-	var imageURLs []string
-	var videoURL string
-	for _, a := range note.Attachment {
-		switch {
-		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
-			imageURLs = append(imageURLs, a.URL)
-		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
-			videoURL = a.URL
-		}
-	}
+	imageURLs, videoURL := matchAttachments(note.Attachment)
+	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
+	poll := parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime)
 
 	// AGORA-146: no inReplyTo means this isn't a reply into a thread we
 	// own — it's either unrelated top-level fediverse noise (dropped) or a
 	// followed account's own post (ingested), handled entirely separately
-	// from the reply-threading path below.
+	// from the reply-threading path below. A poll is always top-level in
+	// practice (no real AP client posts a poll as a reply), so poll data
+	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL)
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
 		return
 	}
 
@@ -1028,11 +1513,12 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	domain := domainFromURL(note.ID)
 	var commentID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
-		VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(note.Content), visibility, parentID, note.ID, domain, htmlToPlainText(note.Summary)).Scan(&commentID)
+	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary),
+		emojisJSON(emojisFromAPTags(note.Tag))).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1040,6 +1526,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	}
 	s.storeInboundImages(commentID, imageURLs)
 	s.storeInboundVideo(commentID, videoURL)
+	s.storeHashtags(commentID, hashtagsFromAPTags(note.Tag)) // AGORA-213
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
@@ -1057,14 +1544,16 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // reason to retroactively ingest it now.
 func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage) {
 	var note struct {
-		ID           string `json:"id"`
-		AttributedTo string `json:"attributedTo"`
-		Content      string `json:"content"`
-		Summary      string `json:"summary"`
-		Attachment   []struct {
-			MediaType string `json:"mediaType"`
-			URL       string `json:"url"`
-		} `json:"attachment"`
+		ID           string         `json:"id"`
+		Type         string         `json:"type"` // AGORA-210
+		AttributedTo string         `json:"attributedTo"`
+		Content      string         `json:"content"`
+		Summary      string         `json:"summary"`
+		Attachment   []apAttachment `json:"attachment"`
+		Tag          []apTagEntry   `json:"tag"` // AGORA-213
+		OneOf        []apPollOption `json:"oneOf"`
+		AnyOf        []apPollOption `json:"anyOf"`
+		EndTime      string         `json:"endTime"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1089,27 +1578,43 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 		return // never ingested, or actor mismatch — safe no-op
 	}
 
-	var imageURLs []string
-	var videoURL string
-	for _, a := range note.Attachment {
-		switch {
-		case strings.HasPrefix(a.MediaType, "image/") && a.URL != "":
-			imageURLs = append(imageURLs, a.URL)
-		case strings.HasPrefix(a.MediaType, "video/") && a.URL != "" && videoURL == "":
-			videoURL = a.URL
-		}
-	}
+	imageURLs, videoURL := matchAttachments(note.Attachment)
+	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
-		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW()
+		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW(), emojis = $4
 		WHERE id = $3
-	`, htmlToPlainText(note.Content), htmlToPlainText(note.Summary), postID)
+	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID, emojisJSON(emojisFromAPTags(note.Tag)))
 	// Attachments are fully replaced, not merged — clear the old multi-image
 	// rows before reapplying whatever the edit currently carries, mirroring
 	// EditPost's own replace-not-append handling of image_urls.
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+	// AGORA-210: Mastodon re-sends a poll's full object (not a diff) as vote
+	// tallies change, so this is the mechanism that keeps an already-ingested
+	// poll's counts from going stale over its lifetime.
+	s.applyInboundPoll(postID, parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime))
+	// AGORA-213: same replace-not-merge treatment as attachments/poll above.
+	s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
+}
+
+// logUnmatchedAttachments logs the raw "attachment" JSON when an inbound
+// fediverse post carries attachments but none were recognized as an image
+// or video (AGORA-180) — e.g. a threads.net post whose video never showed
+// up in the feed. Authorized-fetch instances 404 an unsigned GET on the
+// post's own canonical URL after the fact (same wall as AGORA-175), so this
+// is the only way to see the actual shape of an attachment we're failing to
+// capture, to fix the real cause instead of guessing at it.
+func logUnmatchedAttachments(actor string, objectRaw json.RawMessage, attachments []apAttachment, imageURLs []string, videoURL string) {
+	if len(attachments) == 0 || len(imageURLs) > 0 || videoURL != "" {
+		return
+	}
+	var raw struct {
+		Attachment json.RawMessage `json:"attachment"`
+	}
+	json.Unmarshal(objectRaw, &raw)
+	log.Printf("federation: AGORA-180 inbound post from %s has %d attachment(s) but none matched image/video — raw: %s", actor, len(attachments), raw.Attachment)
 }
 
 // handleInboundAPDelete is handleInboundCreate's removal-time counterpart
@@ -1158,7 +1663,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1173,11 +1678,11 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, htmlToPlainText(content), noteID, domain, htmlToPlainText(summary)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -1189,6 +1694,8 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	}
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
+	s.applyInboundPoll(postID, poll) // AGORA-210
+	s.storeHashtags(postID, tags)    // AGORA-213
 
 	// AGORA-160/164/166: notify local users who actively follow this actor,
 	// have the global fediverse-notifications toggle on, AND have
@@ -1315,10 +1822,22 @@ func localPostIDFromURL(u, instanceDomain string) string {
 // (a reply's recipient, an existing follower, etc.) — the fetch is signed as
 // them so authorized-fetch instances like Threads don't blanket-404 it.
 func (s *Service) getOrCreateRemoteAPUser(actorURL, signerUserID string) (string, error) {
-	var id string
-	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
-	if id != "" {
+	var id, inboxURL string
+	s.db.QueryRow(`SELECT id, ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id, &inboxURL)
+	// AGORA-254: a cache hit with no inbox URL is a broken/stale stub — every
+	// outbound delivery keyed off it (Like, Announce, a repost's own
+	// Create) silently no-ops forever via lookupRemoteTarget's ok=false,
+	// with nothing logged anywhere, since a plain id match short-circuited
+	// here before ever re-checking completeness. Self-heal by falling
+	// through to a fresh fetch+upsert instead of trusting the stale row
+	// indefinitely — upsertRemoteAPUser's ON CONFLICT patches the existing
+	// row's ap_inbox_url (among other fields) rather than erroring on the
+	// now-duplicate ap_actor_url.
+	if id != "" && inboxURL != "" {
 		return id, nil
+	}
+	if id != "" {
+		log.Printf("federation: cached actor %s has no inbox URL, re-fetching to repair", actorURL)
 	}
 
 	profile, err := s.fetchActorProfileSigned(signerUserID, actorURL)
@@ -1354,15 +1873,15 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	// public by definition (ingestFollowedPost only ever ingests public
 	// posts), so the stub itself has no reason to read as private.
 	err := s.db.QueryRow(`
-		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
-		                   ap_actor_url, ap_inbox_url, profile_private)
-		VALUES ($1, $1, '', $2, $3, $4, true, true, $5, $6, NOW(), $7, $8, false)
+		                   ap_actor_url, ap_inbox_url, profile_private, emojis)
+		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, bio = $4, remote_synced_at = NOW(), ap_inbox_url = $8, profile_private = false
+		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10
 		RETURNING id
-	`, syntheticUsername, displayName, profile.IconURL, profile.Summary,
-		handle, domain, actorURL, profile.Inbox,
+	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
+		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis),
 	).Scan(&id)
 	if err != nil {
 		return "", err
@@ -1370,16 +1889,39 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	return id, nil
 }
 
-// htmlToPlainText converts the (sanitized) HTML content fediverse software
+// HTMLToPlainText converts the (sanitized) HTML content fediverse software
 // sends in a Note's "content" field into plain text, consistent with how
 // Agora's own renderContent expects plain text and does its own @mention/URL
 // linkification. Good enough for the small tag set Mastodon etc. emit
 // (p, br, a, span, strong, em, ...); not a general HTML sanitizer.
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 var htmlBlockBreakRe = regexp.MustCompile(`(?i)<(br|/p|/li)\s*/?>`)
+var htmlATagRe = regexp.MustCompile(`(?is)<a\s[^>]*href=["']([^"']*)["'][^>]*>(.*?)</a>`)
 
-func htmlToPlainText(s string) string {
+func HTMLToPlainText(s string) string {
 	s = htmlBlockBreakRe.ReplaceAllString(s, "\n")
+	// Preserve <a> hrefs before the generic tag strip below discards them —
+	// Mastodon etc. wrap auto-linked URLs in nested <span>s (to CSS-truncate
+	// the visible portion), so link text is usually already the URL once its
+	// own tags are stripped; @mentions/#hashtags are likewise already
+	// meaningful as bare text. Only a manually authored link whose text
+	// differs from its href (e.g. "click here") needs the href appended so
+	// renderContent's bare-URL linkifier still picks it up.
+	s = htmlATagRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := htmlATagRe.FindStringSubmatch(m)
+		href := strings.TrimSpace(html.UnescapeString(parts[1]))
+		text := strings.TrimSpace(html.UnescapeString(htmlTagRe.ReplaceAllString(parts[2], "")))
+		switch {
+		case text == "":
+			return href
+		case strings.HasPrefix(text, "@"), strings.HasPrefix(text, "#"):
+			return text
+		case strings.Contains(strings.ToLower(href), strings.ToLower(text)), strings.HasPrefix(strings.ToLower(text), "http"):
+			return text
+		default:
+			return text + " (" + href + ")"
+		}
+	})
 	s = htmlTagRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(s))
 }
@@ -1392,9 +1934,7 @@ func htmlToPlainText(s string) string {
 // Announce, which (unlike Create) only ever target a post directly, never a
 // remote-comment reply chain, so this is simpler than resolveReplyTarget.
 func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (postID, postAuthorID string, ok bool) {
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domainFromURL(verifiedActor)).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
 		return "", "", false
 	}
 	postID = localPostIDFromURL(objectURL, s.cfg.InstanceDomain)
@@ -1456,6 +1996,115 @@ func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMess
 		}
 		s.notif.Create(postAuthorID, remoteUserID, notifType, postID, "")
 	}
+}
+
+// handleInboundQuoteRequest answers a FEP-044f QuoteRequest — sent to a
+// post's author's inbox by the quoting user's own server, before it'll let
+// that quote render anywhere. buildNoteObject already advertises
+// automaticApproval: Public for canQuote (AGORA-255), so there's no manual
+// review queue here: every structurally valid request against one of our
+// own eligible posts is granted immediately, recorded so the same request
+// (redelivered, or re-checked later by a third server) always resolves to
+// the same dereferenceable QuoteAuthorization, and answered with the
+// Accept/result the requesting server needs to actually show the quote.
+func (s *Service) handleInboundQuoteRequest(requestID, verifiedActor string, objectRaw, instrumentRaw json.RawMessage) {
+	var objectURL string
+	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
+		return
+	}
+	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
+	if !ok {
+		return
+	}
+	var instrument struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(instrumentRaw, &instrument)
+	if instrument.ID == "" {
+		return
+	}
+
+	var authID string
+	err := s.db.QueryRow(`
+		INSERT INTO quote_authorizations (post_id, quoting_actor_url, quoting_object_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (post_id, quoting_object_url) DO UPDATE SET quoting_actor_url = $2
+		RETURNING id
+	`, postID, verifiedActor, instrument.ID).Scan(&authID)
+	if err != nil || authID == "" {
+		return
+	}
+
+	var username string
+	s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, postAuthorID).Scan(&username)
+	if username == "" {
+		return
+	}
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	if err != nil || remoteUserID == "" {
+		return
+	}
+	var inboxURL string
+	s.db.QueryRow(`SELECT ap_inbox_url FROM users WHERE id = $1`, remoteUserID).Scan(&inboxURL)
+	if inboxURL == "" {
+		return
+	}
+
+	actor := s.actorURL(username)
+	quoteAuthContext := []any{
+		"https://www.w3.org/ns/activitystreams",
+		map[string]string{"QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"},
+	}
+	accept := map[string]any{
+		"@context": quoteAuthContext,
+		"id":       actor + "/posts/" + postID + "/quote-accepts/" + authID,
+		"type":     "Accept",
+		"actor":    actor,
+		"object": map[string]any{
+			"type": "QuoteRequest",
+			"id":   requestID,
+		},
+		"result": actor + "/posts/" + postID + "/quote-authorizations/" + authID,
+	}
+	s.enqueueAPDelivery(postAuthorID, inboxURL, accept)
+}
+
+// GetQuoteAuthorization serves the dereferenceable FEP-044f QuoteAuthorization
+// object a quoting server's Accept "result" points at — the stamp other
+// servers check to verify a rendered quote was actually granted by the
+// quoted post's author, not merely claimed.
+func (s *Service) GetQuoteAuthorization(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	postID := chi.URLParam(r, "postID")
+	authID := chi.URLParam(r, "authID")
+
+	var quotingObjectURL string
+	err := s.db.QueryRow(`
+		SELECT qa.quoting_object_url
+		FROM quote_authorizations qa
+		JOIN posts p ON p.id = qa.post_id
+		JOIN users u ON u.id = p.author_id
+		WHERE qa.id = $1 AND qa.post_id = $2 AND u.username = $3
+	`, authID, postID, handle).Scan(&quotingObjectURL)
+	if err != nil || quotingObjectURL == "" {
+		writeError(w, 404, "quote authorization not found")
+		return
+	}
+
+	actor := s.actorURL(handle)
+	obj := map[string]any{
+		"@context": []any{
+			"https://www.w3.org/ns/activitystreams",
+			map[string]string{"QuoteAuthorization": "https://w3id.org/fep/044f#QuoteAuthorization"},
+		},
+		"id":                actor + "/posts/" + postID + "/quote-authorizations/" + authID,
+		"type":              "QuoteAuthorization",
+		"attributedTo":      actor,
+		"interactionTarget": actor + "/posts/" + postID,
+		"interactingObject": quotingObjectURL,
+	}
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(obj)
 }
 
 func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.RawMessage) {
@@ -1563,6 +2212,93 @@ type remoteActorProfile struct {
 	Name              string
 	Summary           string
 	IconURL           string
+	ImageURL          string
+	// AGORA-253: collection URLs for a remote actor's follower/following/post
+	// counts. Standard ActivityStreams fields Mastodon/Pleroma actors already
+	// expose — never parsed before because nothing needed them until now.
+	FollowersURL string
+	FollowingURL string
+	OutboxURL    string
+	// AGORA-258: shortcode (":stl_blues:") -> image URL, parsed from the
+	// actor's own "tag" array. nil/empty for an actor with no custom emoji.
+	Emojis map[string]string
+}
+
+// fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
+// obtain its publicKeyPem, signed as a local user's own actor. Instances
+// that enforce "authorized fetch" (Threads chief among them) blanket-404
+// unsigned actor GETs — which used to break verifying the HTTP Signature on
+// every inbound activity they send us, including the Accept(Follow) that
+// confirms an outbound follow, leaving it stuck "Requested" forever
+// (AGORA-175). Prefers whichever local user has a pending follow of this
+// exact actor (the common case: verifying that follow's own Accept), falling
+// back to any local user with an existing keypair, then any local user at
+// all, so inbound activities from authorized-fetch instances still verify
+// even without a matching ap_following row.
+// signerUserIDForActorFetch picks which local user's key to sign an
+// authorized-fetch actor GET with: whichever local user has a pending (or
+// past) follow of actorURL, since we already have a legitimate reason to
+// query them; failing that, any local user with an existing keypair; failing
+// that, any local user at all (getOrCreateUserKeyPair lazily generates one).
+func (s *Service) signerUserIDForActorFetch(actorURL string) string {
+	var userID string
+	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
+	if userID == "" {
+		s.db.QueryRow(`SELECT id FROM users WHERE is_remote = false AND federation_private_key <> '' ORDER BY created_at LIMIT 1`).Scan(&userID)
+	}
+	if userID == "" {
+		s.db.QueryRow(`SELECT id FROM users WHERE is_remote = false ORDER BY created_at LIMIT 1`).Scan(&userID)
+	}
+	return userID
+}
+
+func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error) {
+	actorURL := strings.SplitN(keyID, "#", 2)[0]
+
+	userID := s.signerUserIDForActorFetch(actorURL)
+	if userID == "" {
+		return nil, fmt.Errorf("no local user available to sign actor fetch")
+	}
+
+	var username, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT username, federation_public_key, federation_private_key FROM users WHERE id = $1`, userID).
+		Scan(&username, &pubPEM, &privPEM); err != nil {
+		return nil, err
+	}
+	_, _, privKey, err := s.getOrCreateUserKeyPair(userID, pubPEM, privPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, actorURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/activity+json")
+	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+		return nil, err
+	}
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("actor fetch returned %d", resp.StatusCode)
+	}
+
+	var actor struct {
+		PublicKey struct {
+			PublicKeyPem string `json:"publicKeyPem"`
+		} `json:"publicKey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
+		return nil, err
+	}
+	if actor.PublicKey.PublicKeyPem == "" {
+		return nil, fmt.Errorf("actor has no publicKeyPem")
+	}
+	return parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
 }
 
 // fetchActorProfileSigned dereferences a remote actor URL (via the SSRF-safe
@@ -1611,6 +2347,21 @@ func (s *Service) fetchActorProfileSignedAsPage(pageID, actorURL string) (*remot
 	return signedActorProfileFetch(actorURL, s.pageActorKeyID(slug), privKey)
 }
 
+// fetchActorProfileSignedAsInstance mirrors fetchActorProfileSigned but signs
+// as the instance actor (AGORA-219/220) rather than any user or page — used
+// to resolve a relay's own actor document (to get its inbox URL) when
+// subscribing, since a relay Follow has no local user in context to sign as.
+func (s *Service) fetchActorProfileSignedAsInstance(actorURL string) (*remoteActorProfile, error) {
+	if !strings.HasPrefix(actorURL, "https://") {
+		return nil, fmt.Errorf("actor url must be https")
+	}
+	_, _, privKey, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	return signedActorProfileFetch(actorURL, s.instanceActorKeyID(), privKey)
+}
+
 // signedActorProfileFetch is the key-agnostic signing+fetch body shared by
 // fetchActorProfileSigned and fetchActorProfileSignedAsPage. An empty-body
 // GET still needs a Digest header for our own signedHeaderList to be
@@ -1645,6 +2396,22 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Icon              struct {
 			URL string `json:"url"`
 		} `json:"icon"`
+		// "image" is the ActivityStreams Actor field Mastodon/Pleroma populate
+		// with the profile header/banner — was never parsed at all, so a
+		// remote account's cover photo never made it into the cached stub
+		// regardless of what the remote server actually served.
+		Image struct {
+			URL string `json:"url"`
+		} `json:"image"`
+		// AGORA-253: followers/following/outbox are plain collection URLs on
+		// the actor object itself (not nested), per standard ActivityStreams.
+		Followers string `json:"followers"`
+		Following string `json:"following"`
+		Outbox    string `json:"outbox"`
+		// AGORA-258: custom emoji shortcodes referenced in Name/Summary (e.g.
+		// "Koree A. Smith :stl_blues:") resolve to an image only via this
+		// separate tag array — the shortcode text alone is meaningless.
+		Tag []apTagEntry `json:"tag"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
 		return nil, err
@@ -1658,7 +2425,80 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		Name:              actor.Name,
 		Summary:           actor.Summary,
 		IconURL:           actor.Icon.URL,
+		ImageURL:          actor.Image.URL,
+		FollowersURL:      actor.Followers,
+		FollowingURL:      actor.Following,
+		OutboxURL:         actor.Outbox,
+		Emojis:            emojisFromAPTags(actor.Tag),
 	}, nil
+}
+
+// fetchCollectionTotal dereferences an ActivityStreams (Ordered)Collection
+// URL — a remote actor's followers/following/outbox — and returns its
+// totalItems, signed the same way an actor-document fetch is (AGORA-253):
+// an instance that enforces "authorized fetch" for actor docs plausibly
+// does the same for these. Best-effort: any failure (network, non-200,
+// missing field, an instance that simply doesn't expose the count) just
+// reports "unknown" rather than erroring the whole stats fetch.
+func (s *Service) fetchCollectionTotal(userID, collectionURL string) (int, bool) {
+	if collectionURL == "" || !strings.HasPrefix(collectionURL, "https://") {
+		return 0, false
+	}
+	var username, pubPEM, privPEM string
+	if err := s.db.QueryRow(`SELECT username, federation_public_key, federation_private_key FROM users WHERE id = $1`, userID).
+		Scan(&username, &pubPEM, &privPEM); err != nil {
+		return 0, false
+	}
+	_, _, privKey, err := s.getOrCreateUserKeyPair(userID, pubPEM, privPEM)
+	if err != nil {
+		return 0, false
+	}
+
+	req, err := http.NewRequest(http.MethodGet, collectionURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Accept", "application/activity+json")
+	if err := signRequest(req, s.actorKeyID(username), privKey, []byte{}); err != nil {
+		return 0, false
+	}
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var col struct {
+		TotalItems *int `json:"totalItems"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&col); err != nil || col.TotalItems == nil {
+		return 0, false
+	}
+	return *col.TotalItems, true
+}
+
+// GetRemoteActorStats fetches a fediverse account's live follower/following/
+// post counts and bio (AGORA-253) — Agora only ever tracks its own follow
+// relationship with a remote account, never their full social graph, so
+// there's no local table these could come from; this is always a live
+// fetch, for GetProfile's benefit. Each collection fetch is independently
+// best-effort (an instance hiding its followers list, say, just leaves that
+// one count unknown rather than failing the whole profile view).
+func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool) {
+	signerID := s.signerUserIDForActorFetch(actorURL)
+	if signerID == "" {
+		return 0, 0, 0, "", false
+	}
+	profile, err := s.fetchActorProfileSigned(signerID, actorURL)
+	if err != nil {
+		return 0, 0, 0, "", false
+	}
+	followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL)
+	following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL)
+	posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL)
+	return followers, following, posts, HTMLToPlainText(profile.Summary), true
 }
 
 // resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger
@@ -1707,7 +2547,7 @@ func resolveActorURLViaWebFinger(handle, domain string) (string, error) {
 // internal/feed/feed.go, which only needs to know a match is fediverse-shaped
 // (to avoid also treating it as a local mention); this package does the
 // actual resolution.
-var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
 
 // maxResolvedMentionsPerPost bounds worst-case latency/abuse surface — each
 // resolution is a live WebFinger + signed actor fetch, so an unbounded count
@@ -1737,18 +2577,23 @@ func (s *Service) resolveFediverseMentions(userID, content string) (tags []map[s
 		}
 		seen[key] = true
 
-		var status string
-		s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, strings.ToLower(domain)).Scan(&status)
-		if status == "blocked" {
+		if s.isInstanceBlocked(domain) {
+			log.Printf("federation: mention %s skipped — instance blocked", key)
 			continue
 		}
 
 		actorURL, err := resolveActorURLViaWebFinger(handle, domain)
 		if err != nil {
+			log.Printf("federation: mention %s webfinger resolution failed: %v", key, err)
 			continue
 		}
 		profile, err := s.fetchActorProfileSigned(userID, actorURL)
-		if err != nil || profile.Inbox == "" {
+		if err != nil {
+			log.Printf("federation: mention %s actor fetch failed: %v", key, err)
+			continue
+		}
+		if profile.Inbox == "" {
+			log.Printf("federation: mention %s actor has no inbox", key)
 			continue
 		}
 
@@ -1796,9 +2641,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := domainFromURL(actorURL)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		writeError(w, 404, "instance is blocked")
 		return
 	}
@@ -1818,7 +2661,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 		"actor_url":          actorURL,
 		"preferred_username": profile.PreferredUsername,
 		"name":               profile.Name,
-		"summary":            profile.Summary,
+		"summary":            HTMLToPlainText(profile.Summary),
 		"icon_url":           profile.IconURL,
 		"instance":           domain,
 	})
@@ -1846,9 +2689,7 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 	}
 
 	domain := domainFromURL(req.ActorURL)
-	var status string
-	s.db.QueryRow(`SELECT status FROM federated_instances WHERE domain = $1`, domain).Scan(&status)
-	if status == "blocked" {
+	if s.isInstanceBlocked(domain) {
 		writeError(w, 403, "instance is blocked")
 		return
 	}
@@ -1957,6 +2798,33 @@ func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"notify": req.Notify})
 }
 
+// ToggleShowInFeed flips whether a specific followed fediverse account's
+// posts (already ingested into the local posts table by ingestFollowedPost)
+// surface in the caller's main feed (AGORA-182) — off by default, same
+// per-follow/opt-in shape as ToggleFollowNotify, so a user controls noise
+// account-by-account instead of an all-or-nothing global toggle.
+func (s *Service) ToggleShowInFeed(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	id := chi.URLParam(r, "id")
+	var req struct {
+		ShowInFeed bool `json:"show_in_feed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid body")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE ap_following SET show_in_feed = $1 WHERE id = $2 AND follower_user_id = $3`, req.ShowInFeed, id, userID)
+	if err != nil {
+		writeError(w, 500, "could not update")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"show_in_feed": req.ShowInFeed})
+}
+
 // ListFollowing returns the caller's fediverse follows, joined with the
 // cached remote-actor profile (populated by getOrCreateRemoteAPUser the
 // first time that actor's posts are ingested) for display and for the
@@ -1964,9 +2832,14 @@ func (s *Service) ToggleFollowNotify(w http.ResponseWriter, r *http.Request) {
 func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
-		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.created_at,
+		SELECT af.id, af.followed_actor_url, af.accepted, af.notify, af.show_in_feed, af.created_at,
 		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
-		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, '')
+		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, ''),
+		       EXISTS(
+		         SELECT 1 FROM ap_followers apf
+		         WHERE apf.followed_user_id = $1 AND apf.follower_actor_url = af.followed_actor_url
+		       ),
+		       COALESCE(u.emojis::text, '{}')
 		FROM ap_following af
 		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
 		WHERE af.follower_user_id = $1
@@ -1983,22 +2856,31 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		ActorURL    string `json:"actor_url"`
 		Accepted    bool   `json:"accepted"`
 		Notify      bool   `json:"notify"`
+		ShowInFeed  bool   `json:"show_in_feed"`
 		CreatedAt   string `json:"created_at"`
 		UserID      string `json:"user_id,omitempty"`
 		Username    string `json:"username,omitempty"`
 		DisplayName string `json:"display_name,omitempty"`
 		AvatarURL   string `json:"avatar_url,omitempty"`
 		Instance    string `json:"instance,omitempty"`
+		// AGORA-249: whether this account follows the caller back — a plain
+		// local lookup here (unlike the AT Proto side), since an inbound
+		// ActivityPub Follow is delivered straight to our own inbox and
+		// already lives in ap_followers.
+		FollowsBack bool            `json:"follows_back"`
+		Emojis      json.RawMessage `json:"emojis,omitempty"`
 	}
 	var list []followingEntry
 	for rows.Next() {
 		var f followingEntry
 		var createdAt time.Time
-		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &createdAt,
-			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance); err != nil {
+		var emojis string
+		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &f.ShowInFeed, &createdAt,
+			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack, &emojis); err != nil {
 			continue
 		}
 		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		f.Emojis = json.RawMessage(emojis)
 		list = append(list, f)
 	}
 
@@ -2016,8 +2898,10 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		list[i].UserID = uid
-		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance FROM users WHERE id = $1`, uid).
-			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance)
+		var emojis string
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance, COALESCE(emojis::text,'{}') FROM users WHERE id = $1`, uid).
+			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance, &emojis)
+		list[i].Emojis = json.RawMessage(emojis)
 	}
 
 	if list == nil {
@@ -2033,28 +2917,48 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 // a signed Create activity for each of the author's ActivityPub followers.
 func (s *Service) BroadcastPublicPost(userID, postID string) {
 	if !s.activityPubEnabled() {
+		log.Printf("federation: BroadcastPublicPost %s skipped — ActivityPub disabled instance-wide", postID)
 		return
 	}
 
 	var username, visibility, content, contentWarning string
 	var profilePrivate, apEnabled bool
 	var createdAt time.Time
+	var repostOfID *string
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
 		return
+	}
+	// AGORA-239: a quote-share's own Create(Note) only ever carried the
+	// sharer's new commentary — the quoted post itself was never
+	// referenced at all, so Mastodon (or any other receiver) had no way to
+	// know a quote even happened. True native quote-embed rendering needs
+	// FEP-044f's full consent/authorization handshake (a much bigger
+	// feature); appending a plain link here is the universally-compatible
+	// fallback that works on every receiver with no protocol support
+	// needed — plainTextToHTML/linkifyURLs (below) auto-linkifies it.
+	if repostOfID != nil {
+		if quoteURL := s.quotedPostURL(*repostOfID); quoteURL != "" {
+			content = strings.TrimRight(content, " \n") + "\n\nRE: " + quoteURL
+		}
 	}
 
 	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
 	// AGORA-163: a fediverse mention adds recipients on top of the normal
 	// Public/followers audience — it doesn't replace it.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
+	log.Printf("federation: BroadcastPublicPost %s resolved %d fediverse mention(s)", postID, len(tags))
 	if len(tags) > 0 {
 		if note, ok := activity["object"].(map[string]any); ok {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
@@ -2064,6 +2968,62 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	for _, inboxURL := range mentionedInboxURLs {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
 	}
+	// AGORA-221: a relay only forwards what instances actually publish to
+	// it — being subscribed (AGORA-220) alone doesn't make this post
+	// discoverable through it.
+	for _, inboxURL := range s.enabledRelayInboxes() {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
+}
+
+// quotedPostURL resolves the canonical AP object URI a quote-share's
+// fallback link (AGORA-239) should point at. Unlike lookupRemoteTarget
+// (which only ever resolves a remote original, for Like/Announce), a
+// quoted post can just as easily be a local Agora one — which never has a
+// remote_post_id to key off — so this covers both directions itself
+// rather than reusing that helper.
+func (s *Service) quotedPostURL(postID string) string {
+	var isRemote bool
+	var username, remoteInstance, remotePostID string
+	if err := s.db.QueryRow(`
+		SELECT u.is_remote, u.username, p.remote_instance, p.remote_post_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.deleted_at IS NULL
+	`, postID).Scan(&isRemote, &username, &remoteInstance, &remotePostID); err != nil {
+		return ""
+	}
+	if isRemote {
+		// AGORA-263: a Bluesky-origin post's remote_post_id is its at://
+		// URI (AT Protocol's own record identifier, e.g.
+		// "at://did:plc:xxx/app.bsky.feed.post/rkey") — meaningful to us,
+		// but not a URL a human (or linkifyURLs' http(s)-only regex below)
+		// can do anything with; it showed up on the receiving Mastodon
+		// client as inert, unlinked at:// text. Bluesky's own web app
+		// resolves that same shape at bsky.app/profile/{did}/post/{rkey},
+		// so convert to that instead — the DID alone resolves fine there,
+		// no handle lookup needed.
+		if remoteInstance == "bsky.app" {
+			if webURL, ok := blueskyATURIToWebURL(remotePostID); ok {
+				return webURL
+			}
+		}
+		return remotePostID
+	}
+	return s.actorURL(username) + "/posts/" + postID
+}
+
+// blueskyATURIToWebURL converts an at://did/app.bsky.feed.post/rkey AT-URI
+// into the equivalent bsky.app web URL.
+func blueskyATURIToWebURL(atURI string) (string, bool) {
+	rest := strings.TrimPrefix(atURI, "at://")
+	if rest == atURI {
+		return "", false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] != "app.bsky.feed.post" || parts[2] == "" {
+		return "", false
+	}
+	return "https://bsky.app/profile/" + parts[0] + "/post/" + parts[2], true
 }
 
 // BroadcastUpdatePost delivers a signed Update activity when a previously-
@@ -2093,6 +3053,9 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	if len(tags) > 0 {
 		if note, ok := activity["object"].(map[string]any); ok {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
@@ -2100,6 +3063,11 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 	s.deliverToFollowers(userID, activity)
 	for _, inboxURL := range mentionedInboxURLs {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
+	// AGORA-221: keep a relay's copy from going stale the same way an edit
+	// keeps followers' copies from going stale, above.
+	for _, inboxURL := range s.enabledRelayInboxes() {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
 	}
 }
@@ -2133,6 +3101,11 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 		"to": []string{"https://www.w3.org/ns/activitystreams#Public"},
 	}
 	s.deliverToFollowers(userID, activity)
+	// AGORA-221: a relay-forwarded post that gets deleted at the source
+	// should stop being forwarded/shown too.
+	for _, inboxURL := range s.enabledRelayInboxes() {
+		s.enqueueAPDelivery(userID, inboxURL, activity)
+	}
 }
 
 // DeliverReply delivers a new comment to the fediverse when it's a direct
@@ -2155,20 +3128,20 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2
 	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
+		log.Printf("federation: DeliverReply %s: author lookup failed or activitypub disabled for user (err=%v)", commentID, err)
 		return
 	}
 
-	var targetIsRemote bool
-	var targetActorURL, targetInboxURL, targetRemotePostID string
-	s.db.QueryRow(`
-		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
-		FROM posts p JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1
-	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
-	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
+	// Reuse lookupRemoteTarget (shared with DeliverLike/DeliverAnnounce) rather
+	// than re-querying inline, so a stale cached stub with no inbox URL gets
+	// the same AGORA-254 self-heal here that it already gets for a Like or
+	// Announce — this path had drifted out of sync with that fix and was
+	// silently giving up on exactly the "broken stub" case AGORA-254 targeted.
+	targetActorURL, targetInboxURL, targetRemotePostID, targetOK := s.lookupRemoteTarget(replyToID)
 
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	if !targetOK && len(mentionedActorURLs) == 0 {
+		log.Printf("federation: DeliverReply %s: parent %s is not a remote target and no fediverse mentions found, skipping", commentID, replyToID)
 		return
 	}
 
@@ -2190,6 +3163,9 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 		note["to"] = to
 		if len(tags) > 0 {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 		}
 	}
 	activity["to"] = to
@@ -2224,20 +3200,16 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2
 	`, commentID, userID).Scan(&username, &apEnabled, &content, &contentWarning, &createdAt); err != nil || !apEnabled {
+		log.Printf("federation: DeliverReplyUpdate %s: author lookup failed or activitypub disabled for user (err=%v)", commentID, err)
 		return
 	}
 
-	var targetIsRemote bool
-	var targetActorURL, targetInboxURL, targetRemotePostID string
-	s.db.QueryRow(`
-		SELECT u.is_remote, u.ap_actor_url, u.ap_inbox_url, p.remote_post_id
-		FROM posts p JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1
-	`, replyToID).Scan(&targetIsRemote, &targetActorURL, &targetInboxURL, &targetRemotePostID)
-	targetOK := targetIsRemote && targetActorURL != "" && targetInboxURL != "" && targetRemotePostID != ""
+	// See DeliverReply: reuse lookupRemoteTarget for its AGORA-254 self-heal.
+	targetActorURL, targetInboxURL, targetRemotePostID, targetOK := s.lookupRemoteTarget(replyToID)
 
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	if !targetOK && len(mentionedActorURLs) == 0 {
+		log.Printf("federation: DeliverReplyUpdate %s: parent %s is not a remote target and no fediverse mentions found, skipping", commentID, replyToID)
 		return
 	}
 
@@ -2257,6 +3229,9 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 		note["to"] = to
 		if len(tags) > 0 {
 			note["tag"] = tags
+			if content, ok := note["content"].(string); ok {
+				note["content"] = linkifyMentionTags(content, tags)
+			}
 		}
 	}
 	activity["to"] = to
@@ -2286,8 +3261,27 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1
 	`, postID).Scan(&isRemote, &actorURL, &inboxURL, &remotePostID)
-	if err != nil || !isRemote || actorURL == "" || inboxURL == "" || remotePostID == "" {
+	if err != nil || !isRemote || actorURL == "" || remotePostID == "" {
+		log.Printf("federation: lookupRemoteTarget %s: not a remote target (err=%v isRemote=%v actorURL=%q remotePostID=%q)", postID, err, isRemote, actorURL, remotePostID)
 		return "", "", "", false
+	}
+	if inboxURL == "" {
+		// AGORA-254: a stale/broken cached stub with no inbox would silently
+		// block every outbound delivery (Like, Announce, a repost's own
+		// Create) to this author forever — nothing else on this path ever
+		// re-fetches it, and getOrCreateRemoteAPUser*'s own self-heal only
+		// fires on that actor's *next* inbound activity, which might never
+		// come. Repair right here instead, so a repost/like against an
+		// already-broken stub can succeed on its very next attempt rather
+		// than waiting on the remote actor to post again.
+		if _, err := s.getOrCreateRemoteAPUserAsInstance(actorURL); err != nil {
+			log.Printf("federation: lookupRemoteTarget %s: self-heal fetch of actor %s failed: %v", postID, actorURL, err)
+			return "", "", "", false
+		}
+		if err := s.db.QueryRow(`SELECT ap_inbox_url FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&inboxURL); err != nil || inboxURL == "" {
+			log.Printf("federation: lookupRemoteTarget %s: actor %s still has no inbox URL after self-heal (err=%v)", postID, actorURL, err)
+			return "", "", "", false
+		}
 	}
 	return actorURL, inboxURL, remotePostID, true
 }
@@ -2298,6 +3292,7 @@ func (s *Service) DeliverLike(userID, postID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
+		log.Printf("federation: DeliverLike %s: not a remote target, skipping", postID)
 		return
 	}
 
@@ -2305,6 +3300,7 @@ func (s *Service) DeliverLike(userID, postID string) {
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverLike %s: liker %s lookup failed or activitypub disabled (err=%v)", postID, userID, err)
 		return
 	}
 
@@ -2330,11 +3326,13 @@ func (s *Service) DeliverUnlike(userID, postID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
+		log.Printf("federation: DeliverUnlike %s: not a remote target, skipping", postID)
 		return
 	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		log.Printf("federation: DeliverUnlike %s: unliker %s lookup failed (err=%v)", postID, userID, err)
 		return
 	}
 
@@ -2364,6 +3362,7 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
 	if !ok {
+		log.Printf("federation: DeliverAnnounce %s: original post %s is not a remote target, skipping direct delivery", repostID, originalPostID)
 		return
 	}
 
@@ -2371,6 +3370,7 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverAnnounce %s: reposter %s lookup failed or activitypub disabled (err=%v)", repostID, userID, err)
 		return
 	}
 
@@ -2400,11 +3400,13 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
 	if !ok {
+		log.Printf("federation: DeliverUnannounce %s: original post %s is not a remote target, skipping", repostID, originalPostID)
 		return
 	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
+		log.Printf("federation: DeliverUnannounce %s: unreposter %s lookup failed (err=%v)", repostID, userID, err)
 		return
 	}
 
@@ -2726,6 +3728,94 @@ func (s *Service) deliverAPActivity(userID, inboxURL string, activity []byte) er
 	req.Header.Set("Accept", "application/activity+json")
 
 	if err := signRequest(req, s.actorKeyID(username), privKey, activity); err != nil {
+		return err
+	}
+
+	resp, err := fedHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("remote inbox returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ── Instance actor delivery queue (AGORA-220) ─────────────────────────────────
+//
+// Mirrors enqueuePageAPDelivery/drainPageAPQueue/deliverPageAPActivity —
+// this codebase's established answer to "a second kind of actor needs its
+// own delivery pipeline" is to duplicate the queue, not parameterize the
+// existing one (see deliverAPActivity/deliverPageAPActivity above).
+
+func (s *Service) enqueueInstanceAPDelivery(inboxURL string, activity any) {
+	payload, err := json.Marshal(activity)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`
+		INSERT INTO instance_ap_delivery_queue (inbox_url, activity, next_attempt)
+		VALUES ($1, $2, NOW())
+	`, inboxURL, string(payload))
+}
+
+func (s *Service) drainInstanceAPQueue() {
+	rows, err := s.db.Query(`
+		SELECT id, inbox_url, activity
+		FROM instance_ap_delivery_queue
+		WHERE attempts < 10 AND next_attempt <= NOW()
+		ORDER BY next_attempt ASC
+		LIMIT 20
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type instanceJob struct {
+		id, inboxURL string
+		activity     []byte
+	}
+	var jobs []instanceJob
+	for rows.Next() {
+		var j instanceJob
+		if rows.Scan(&j.id, &j.inboxURL, &j.activity) == nil {
+			jobs = append(jobs, j)
+		}
+	}
+	rows.Close()
+
+	for _, j := range jobs {
+		sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
+		if sendErr == nil {
+			s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
+		} else {
+			s.db.Exec(`
+				UPDATE instance_ap_delivery_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
+				WHERE id = $2
+			`, sendErr.Error(), j.id)
+		}
+	}
+}
+
+func (s *Service) deliverInstanceAPActivity(inboxURL string, activity []byte) error {
+	_, _, privKey, err := s.getOrCreateInstanceKeyPair()
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, inboxURL, bytes.NewReader(activity))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/activity+json")
+	req.Header.Set("Accept", "application/activity+json")
+
+	if err := signRequest(req, s.instanceActorKeyID(), privKey, activity); err != nil {
 		return err
 	}
 

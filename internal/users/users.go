@@ -16,18 +16,42 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/store"
 )
 
 type fedSender interface {
 	BroadcastToFriendInstances(userID string, activity any)
+	BroadcastActorUpdate(userID string)
+	// GetRemoteActorStats fetches a fediverse account's live follower/
+	// following/post counts and bio (AGORA-253) — Agora never tracks a
+	// remote account's own social graph locally, only its follow
+	// relationship with them, so GetProfile needs a live fetch to show this.
+	GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool)
+}
+
+// atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
+// keeping a user's app.bsky.actor.profile record in sync with their Agora
+// profile is a repo write, not something implicit in a GET the way an AP
+// actor document already is, so it needs its own explicit trigger on edit.
+type atprotoSyncer interface {
+	SyncProfile(userID string)
+	// FollowsMe reports whether a Bluesky account follows viewerUserID back
+	// (AGORA-249) — GetProfile's counterpart to the fediverse side's plain
+	// ap_followers lookup, except AT Proto has no local inbound-follow table
+	// to query, so this always costs a live AppView call.
+	FollowsMe(viewerUserID, theirDID string) bool
+	// GetRemoteActorStats mirrors fedSender's method of the same name, for a
+	// Bluesky account (AGORA-253).
+	GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool)
 }
 
 type Service struct {
-	db    *store.DB
-	media *media.Service
-	fed   fedSender
+	db      *store.DB
+	media   *media.Service
+	fed     fedSender
+	atproto atprotoSyncer
 }
 
 func NewService(db *store.DB, media *media.Service) *Service {
@@ -35,6 +59,7 @@ func NewService(db *store.DB, media *media.Service) *Service {
 }
 
 func (s *Service) SetFed(f fedSender) { s.fed = f }
+func (s *Service) SetAtproto(a atprotoSyncer) { s.atproto = a }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Patch("/users/me",                s.UpdateProfile)
@@ -78,6 +103,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		IsRemote       bool    `json:"is_remote"`
 		RemoteInstance string  `json:"remote_instance,omitempty"`
 		APActorURL     string  `json:"ap_actor_url,omitempty"`
+		AtprotoRemoteDID string `json:"-"`
 		CreatedAt      string  `json:"created_at"`
 		FriendStatus   string  `json:"friend_status"`
 		FriendCount    int     `json:"friend_count"`
@@ -90,21 +116,72 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		FollowID     string `json:"follow_id,omitempty"`
 		Following    bool   `json:"following"`
 		FollowNotify bool   `json:"follow_notify"`
+		// AGORA-249: whether this profile follows the viewer back, fediverse
+		// or Bluesky — surfaced regardless of whether the viewer follows them
+		// (unlike FollowID/FollowNotify, which only make sense once you do).
+		FollowsBack bool `json:"follows_back"`
+		// AGORA-253: a remote profile's live follower/following/post counts —
+		// Agora only ever tracks its own follow relationship with a remote
+		// account, never their full social graph, so unlike FriendCount these
+		// can't come from a local column; nil (omitted) rather than 0 when
+		// the live fetch fails, so the frontend can tell "zero" from
+		// "unknown" instead of showing a wrong-looking "0".
+		RemoteFollowerCount  *int `json:"remote_follower_count,omitempty"`
+		RemoteFollowingCount *int `json:"remote_following_count,omitempty"`
+		RemotePostCount      *int `json:"remote_post_count,omitempty"`
+		// AGORA-258: custom emoji (shortcode -> image URL) referenced in
+		// DisplayName/Bio, sourced from the actor's own "tag" array at
+		// ingestion time.
+		Emojis json.RawMessage `json:"emojis,omitempty"`
 	}
+	var emojisRaw string
 
 	err := s.db.QueryRow(`
 		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
 		       location, website, profile_private, hide_timeline, is_remote, remote_instance, ap_actor_url,
-		       created_at
+		       atproto_remote_did, created_at, COALESCE(emojis::text,'{}')
 		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
-		&u.CreatedAt,
+		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw,
 	)
 	if err != nil {
 		writeError(w, 404, "user not found")
 		return
+	}
+	u.Emojis = json.RawMessage(emojisRaw)
+
+	// Defensive re-clean, not just belt-and-suspenders: a remote actor's bio
+	// is only reprocessed through federation.HTMLToPlainText when its cache
+	// row is created or refreshed, so any bio cached before that stripping
+	// existed (or improved to preserve <a> links, AGORA-177) would otherwise
+	// keep showing raw markup forever without a re-fetch. Idempotent on
+	// already-clean text, so this is safe to run on every read.
+	if u.IsRemote {
+		u.Bio = federation.HTMLToPlainText(u.Bio)
+	}
+
+	// AGORA-253: live follower/following/post counts, fediverse or Bluesky —
+	// same "Agora doesn't track a remote account's full social graph, so this
+	// has to be a live fetch" reasoning as FollowsBack above, but unconditional
+	// on viewer (unlike friend-relationship fields) since it's just profile
+	// info, the same as bio. Prefers the freshly-fetched bio over the cached
+	// column when available, since this call already returns it for free.
+	if u.APActorURL != "" && s.fed != nil {
+		if followers, following, posts, bio, ok := s.fed.GetRemoteActorStats(u.APActorURL); ok {
+			u.RemoteFollowerCount, u.RemoteFollowingCount, u.RemotePostCount = &followers, &following, &posts
+			if bio != "" {
+				u.Bio = bio
+			}
+		}
+	} else if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" && s.atproto != nil {
+		if followers, following, posts, bio, ok := s.atproto.GetRemoteActorStats(u.AtprotoRemoteDID); ok {
+			u.RemoteFollowerCount, u.RemoteFollowingCount, u.RemotePostCount = &followers, &following, &posts
+			if bio != "" {
+				u.Bio = bio
+			}
+		}
 	}
 
 	// Block check — make it appear as if the user doesn't exist
@@ -169,6 +246,31 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 				u.FollowNotify = notify
 			}
 		}
+
+		// AGORA-234: native Bluesky follow/notify state, same shape as the
+		// fediverse block above — a native Bluesky remote never has
+		// ap_actor_url set, so this is keyed off at_following's remote_did
+		// instead.
+		if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" {
+			var followID string
+			var notify bool
+			if err := s.db.QueryRow(`SELECT id, notify FROM at_following WHERE local_user_id = $1 AND remote_did = $2`,
+				viewerID, u.AtprotoRemoteDID).Scan(&followID, &notify); err == nil {
+				u.FollowID = followID
+				u.Following = true
+				u.FollowNotify = notify
+			}
+		}
+
+		// AGORA-249: does this remote profile follow the viewer back?
+		// Deliberately outside the Following blocks above — this is
+		// meaningful (and shown) whether or not the viewer follows them.
+		if u.APActorURL != "" {
+			s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2)`,
+				viewerID, u.APActorURL).Scan(&u.FollowsBack)
+		} else if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" && s.atproto != nil {
+			u.FollowsBack = s.atproto.FollowsMe(viewerID, u.AtprotoRemoteDID)
+		}
 	}
 
 	// Enforce privacy
@@ -180,6 +282,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 			"avatar_url":   u.AvatarURL,
 			"profile_private": true,
 			"friend_status": u.FriendStatus,
+			"emojis":       u.Emojis,
 		})
 		return
 	}
@@ -203,6 +306,8 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		ExpoPushToken        *string `json:"expo_push_token"`
 		ActivityPubEnabled   *bool   `json:"activitypub_enabled"`
 		FediverseNotificationsEnabled *bool `json:"fediverse_notifications_enabled"`
+		AtprotoEnabled       *bool   `json:"atproto_enabled"`
+		AtprotoNotificationsEnabled *bool `json:"atproto_notifications_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -252,6 +357,12 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.FediverseNotificationsEnabled != nil {
 		sets = append(sets, fmt.Sprintf("fediverse_notifications_enabled = $%d", i)); args = append(args, *req.FediverseNotificationsEnabled); i++
 	}
+	if req.AtprotoEnabled != nil {
+		sets = append(sets, fmt.Sprintf("atproto_enabled = $%d", i)); args = append(args, *req.AtprotoEnabled); i++
+	}
+	if req.AtprotoNotificationsEnabled != nil {
+		sets = append(sets, fmt.Sprintf("atproto_notifications_enabled = $%d", i)); args = append(args, *req.AtprotoNotificationsEnabled); i++
+	}
 
 	args = append(args, userID)
 	_, err := s.db.Exec(
@@ -278,6 +389,19 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 				"bio":          bio,
 			},
 		})
+		// AGORA-242: BroadcastToFriendInstances above only reaches other
+		// Agora instances — its payload is Agora's own internal shape, not a
+		// real ActivityPub activity. Standard fediverse followers (Mastodon
+		// etc.) need an actual signed Update(Person) or a display-name/bio
+		// edit never reaches them at all.
+		go s.fed.BroadcastActorUpdate(userID)
+	}
+
+	// Keep the AT Proto profile record in sync too (AGORA-189) — a repo
+	// write, unlike the AP actor document above which just reflects live DB
+	// state on every fetch with no explicit sync step of its own.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "profile updated"})
@@ -300,6 +424,15 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 			"actor": username,
 			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
 		})
+		// AGORA-242: same reasoning as UpdateProfile above — a real Update
+		// activity is the only thing standard fediverse followers act on.
+		go s.fed.BroadcastActorUpdate(userID)
+	}
+	// AGORA-233: a photo-only change never touches display_name/bio, so
+	// without this the AT Proto profile record would silently keep
+	// pointing at a stale (or no) avatar until the next text-field edit.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
 	}
 	writeJSON(w, 200, map[string]string{"avatar_url": url})
 }
@@ -312,6 +445,20 @@ func (s *Service) UploadCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.Exec(`UPDATE users SET cover_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
+	// The AP actor document now has an "image" field for the cover photo
+	// (previously it didn't exist at all, which is why this wasn't wired up
+	// alongside UploadAvatar's identical broadcast back at AGORA-242) — a
+	// cover-only change still never touches display_name/bio, so without an
+	// explicit Update here a follower's cached copy of this actor would never
+	// pick up a cover change on its own.
+	if s.fed != nil {
+		go s.fed.BroadcastActorUpdate(userID)
+	}
+	// AGORA-233: same reasoning as UploadAvatar above — a cover-only change
+	// otherwise never reaches the AT Proto profile record either.
+	if s.atproto != nil {
+		go s.atproto.SyncProfile(userID)
+	}
 	writeJSON(w, 200, map[string]string{"cover_url": url})
 }
 
@@ -644,11 +791,14 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimPrefix(r.URL.Query().Get("q"), "@")
 
 	type UserHit struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
-		IsFriend    bool   `json:"is_friend"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		IsFriend       bool            `json:"is_friend"`
+		IsRemote       bool            `json:"is_remote,omitempty"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 	type GroupHit struct {
 		Slug      string `json:"slug"`
@@ -695,6 +845,38 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 		for uRows.Next() {
 			var u UserHit
 			uRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.IsFriend)
+			users = append(users, u)
+		}
+	}
+	// ── Fediverse follows (AGORA-163) ───────────────────────────────────────
+	// A mention only works if the poster can find the account to mention —
+	// surface accounts the caller already follows on the fediverse alongside
+	// local friends/matches, ordered by most recently followed. username is
+	// already the synthetic "handle@instance" form (upsertRemoteAPUser), so
+	// an ILIKE prefix match against it also matches as more of the domain is
+	// typed, and inserting "@" + username (MentionDropdown's onSelect) yields
+	// the exact @handle@instance.tld shape resolveFediverseMentions expects.
+	var qPattern string
+	if q != "" {
+		qPattern = q + "%"
+	}
+	rRows, rerr := s.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.remote_instance, COALESCE(u.emojis::text,'{}')
+		FROM ap_following af
+		JOIN users u ON u.ap_actor_url = af.followed_actor_url
+		WHERE af.follower_user_id = $1
+		  AND ($2 = '' OR u.username ILIKE $2 OR u.display_name ILIKE $2)
+		ORDER BY af.created_at DESC
+		LIMIT 5
+	`, userID, qPattern)
+	if rerr == nil {
+		defer rRows.Close()
+		for rRows.Next() {
+			var u UserHit
+			var emojis string
+			u.IsRemote = true
+			rRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.RemoteInstance, &emojis)
+			u.Emojis = json.RawMessage(emojis)
 			users = append(users, u)
 		}
 	}

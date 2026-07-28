@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationApi } from '../api'
+import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationApi, atprotoApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
+import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
@@ -101,6 +102,24 @@ export default function ProfilePage() {
     onSuccess: inv,
   })
 
+  // AGORA-234: native Bluesky accounts have no friending concept either —
+  // follow/notify (at_following) is the equivalent, same as the fediverse
+  // block above but against the AT Proto endpoints. profile.username is the
+  // account's Bluesky handle for these rows (getOrCreateRemoteATUser stores
+  // the handle as the username), so it doubles as the "actor" to follow.
+  const followBsky = useMutation({
+    mutationFn: () => atprotoApi.followBlueskyAccount(profile.username),
+    onSuccess: inv,
+  })
+  const unfollowBsky = useMutation({
+    mutationFn: () => atprotoApi.unfollowBlueskyAccount(profile.follow_id),
+    onSuccess: inv,
+  })
+  const toggleBskyNotify = useMutation({
+    mutationFn: () => atprotoApi.toggleFollowNotify(profile.follow_id, !profile.follow_notify),
+    onSuccess: inv,
+  })
+
   const wallApprove = useMutation({
     mutationFn: (id: string) => feedApi.wallApprove(id),
     onSuccess: () => { refetchWall(); refetchQueue() },
@@ -143,6 +162,7 @@ export default function ProfilePage() {
 
   const status = profile.friend_status
   const isFediverse = !!profile.ap_actor_url
+  const isBluesky = profile.remote_instance === 'bsky.app'
   const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
 
   const albums: any[] = albumsData?.albums ?? []
@@ -213,7 +233,37 @@ export default function ProfilePage() {
                   </button>
                 </div>
               )}
-              {me && !isSelf && !isFediverse && !status && (
+              {me && !isSelf && isBluesky && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { if (profile.following) { if (confirm(`Unfollow ${profile.display_name}?`)) unfollowBsky.mutate() } else followBsky.mutate() }}
+                    disabled={followBsky.isPending || unfollowBsky.isPending}
+                    className={profile.following ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
+                  >
+                    {profile.following ? <><UserCheck size={16}/> Following</> : <><UserPlus size={16}/> Follow</>}
+                  </button>
+                  {profile.following && (
+                    <button
+                      onClick={() => toggleBskyNotify.mutate()}
+                      disabled={toggleBskyNotify.isPending}
+                      title={profile.follow_notify ? 'Turn off notifications for this account' : 'Notify me when they post'}
+                      className={`btn-secondary text-sm flex items-center gap-1 ${profile.follow_notify ? 'text-agora-700 dark:text-agora-200 border-agora-400' : 'text-agora-400'}`}
+                    >
+                      {profile.follow_notify ? <><BellOff size={15}/> Notifying</> : <><Bell size={15}/> Notify me</>}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { if (confirm(profile.is_blocked ? `Unblock ${profile.display_name}?` : `Block ${profile.display_name}? They won't be able to see your profile or contact you.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-agora-400"
+                    title={profile.is_blocked ? 'Unblock' : 'Block'}
+                  >
+                    {profile.is_blocked ? <ShieldOff size={15}/> : <Shield size={15}/>}
+                    {profile.is_blocked ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
+              )}
+              {me && !isSelf && !isFediverse && !isBluesky && !status && (
                 <div className="flex gap-2">
                   <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                     <UserPlus size={16}/> Add friend
@@ -284,15 +334,36 @@ export default function ProfilePage() {
             </div>
           </div>
           <h1 className="text-xl font-bold">
-            {profile.display_name}
+            {renderName(profile.display_name, profile.emojis)}
             {profile.pronouns && (
               <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
             )}
           </h1>
-          <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
-          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300">{profile.bio}</p>}
+          <div className="flex items-center gap-2">
+            <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+            {/* AGORA-249: fediverse/Bluesky mutual-follow indicator — meaningful
+                regardless of whether the viewer follows them back. */}
+            {(isFediverse || isBluesky) && profile.follows_back && (
+              <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5">
+                <UserCheck size={11} /> Follows you
+              </span>
+            )}
+          </div>
+          {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio, undefined, profile.emojis)}</p>}
           <div className="flex items-center gap-4 mt-3 text-sm text-agora-500">
-            <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+            {/* AGORA-253: a remote account's own post/follower/following
+                counts, same layout Bluesky itself shows on a profile — in
+                place of "friends", which Agora has no concept of for an
+                account it doesn't actually track the social graph of. */}
+            {(isFediverse || isBluesky) && profile.remote_follower_count != null ? (
+              <>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_post_count ?? 0}</strong> posts</span>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_follower_count ?? 0}</strong> followers</span>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_following_count ?? 0}</strong> following</span>
+              </>
+            ) : (
+              <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+            )}
             {profile.location && <span>{profile.location}</span>}
             {profile.website && <a href={profile.website} className="text-agora-600 hover:underline" target="_blank" rel="noreferrer">{profile.website}</a>}
           </div>
@@ -380,11 +451,11 @@ export default function ProfilePage() {
                         : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{p.author_display_name?.[0]}</span>}
                     </div>
                     <div>
-                      <span className="text-sm font-medium">{p.author_display_name || p.author_username}</span>
+                      <span className="text-sm font-medium">{p.author_display_name ? renderName(p.author_display_name, p.author_emojis) : p.author_username}</span>
                       <span className="text-xs text-agora-400 ml-1">@{p.author_username}</span>
                     </div>
                   </div>
-                  <p className="text-sm text-agora-700 dark:text-agora-300 whitespace-pre-wrap">{p.content}</p>
+                  <p className="text-sm text-agora-700 dark:text-agora-300 whitespace-pre-wrap">{renderContent(p.content, undefined, p.content_emojis)}</p>
                   <div className="flex gap-2">
                     <button onClick={() => wallApprove.mutate(p.id)} className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
                       <CheckCircle size={13} /> Approve

@@ -29,7 +29,42 @@ var groupTagRe  = regexp.MustCompile(`\+([a-zA-Z0-9_-]+)`) // AGORA-89
 // work — this package only needs to know a match is fediverse-shaped so
 // notifyMentions doesn't also treat it as a (near-certainly wrong) local
 // mention. Keep both copies in sync if this pattern ever changes.
-var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+// Local part allows dots/hyphens — a Bridgy Fed bridged Bluesky actor's
+// "handle" is itself a dotted AT Proto handle, e.g. @jane.bsky.social@bsky.brid.gy.
+var fediverseMentionRe = regexp.MustCompile(`@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)`)
+
+// hashtagRe (AGORA-213) matches a #tag token in local post/comment content.
+var hashtagRe = regexp.MustCompile(`#([a-zA-Z0-9_]+)`)
+
+// extractHashtags parses distinct, lowercased #tag tokens out of local post
+// content — the plain-text-parsing counterpart to how a remote Note's own
+// "tag" array (federation package) or an AT Proto record's own "facets"
+// array (atproto package) are read directly instead, since neither of those
+// has plain #hashtag text to parse the same way a local post does.
+func extractHashtags(content string) []string {
+	matches := hashtagRe.FindAllStringSubmatch(content, -1)
+	seen := map[string]bool{}
+	var tags []string
+	for _, m := range matches {
+		tag := strings.ToLower(m[1])
+		if seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+// storeHashtags replaces postID's stored hashtag set — same replace-not-
+// merge convention EditPost's image handling already uses, since a post's
+// tag set can shrink or grow between edits.
+func (s *Service) storeHashtags(postID string, tags []string) {
+	s.db.Exec(`DELETE FROM post_hashtags WHERE post_id = $1`, postID)
+	for _, tag := range tags {
+		s.db.Exec(`INSERT INTO post_hashtags (post_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, postID, tag)
+	}
+}
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
@@ -65,12 +100,39 @@ type fedSender interface {
 	DeliverUnannounce(userID, repostID, originalPostID string)
 }
 
+// atprotoSender is the AT Proto counterpart to fedSender (AGORA-190) — a
+// separate interface/field rather than folded into fedSender, since the two
+// protocols are independent opt-ins with no shared lifecycle.
+type atprotoSender interface {
+	BroadcastPost(userID, postID string)
+	// BroadcastPostUpdate/BroadcastPostDelete (AGORA-202/203) mirror
+	// fedSender's BroadcastUpdatePost/BroadcastDeletePost, but no-op
+	// internally (rather than needing a call-site check here) if the post
+	// was never federated as an AT Proto record in the first place.
+	BroadcastPostUpdate(userID, postID string)
+	BroadcastPostDelete(userID, postID string)
+	// DeliverReply/DeliverReplyUpdate (AGORA-199) mirror fedSender's own
+	// pair, but resolve a reply/root strong-ref pair instead of a single
+	// inReplyTo URL — no-op internally if there's no Bluesky-visible target.
+	DeliverReply(userID, commentID, replyToID string)
+	DeliverReplyUpdate(userID, commentID, replyToID string)
+	// DeliverLike/DeliverUnlike/DeliverAnnounce/DeliverUnannounce (AGORA-201)
+	// mirror fedSender's own four, but write into the liker/reposter's own
+	// repo rather than deliver to an inbox — no-op internally if the target
+	// has no Bluesky presence.
+	DeliverLike(userID, postID string)
+	DeliverUnlike(userID, postID string)
+	DeliverAnnounce(userID, repostID, originalPostID string)
+	DeliverUnannounce(userID, repostID, originalPostID string)
+}
+
 type Service struct {
-	db     *store.DB
-	notif  *notifications.Service
-	media  *media.Service
-	albums *albums.Service
-	fed    fedSender
+	db      *store.DB
+	notif   *notifications.Service
+	media   *media.Service
+	albums  *albums.Service
+	fed     fedSender
+	atproto atprotoSender
 }
 
 func NewService(db *store.DB, notif *notifications.Service, media *media.Service) *Service {
@@ -79,6 +141,7 @@ func NewService(db *store.DB, notif *notifications.Service, media *media.Service
 
 func (s *Service) SetAlbums(a *albums.Service) { s.albums = a }
 func (s *Service) SetFed(f fedSender)          { s.fed = f }
+func (s *Service) SetAtproto(a atprotoSender)  { s.atproto = a }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/preview",                             s.GetLinkPreview)
@@ -146,9 +209,11 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
+			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-			       p.video_url, p.video_thumb_url
+			p.video_url, p.video_thumb_url,
+			COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -194,9 +259,11 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 			       rp.content, rp.image_url, rp.created_at,
+			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-			       p.video_url, p.video_thumb_url
+			p.video_url, p.video_thumb_url,
+			COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 			FROM posts p
 			JOIN users u ON u.id = p.author_id
 			LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -229,6 +296,31 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			      -- AGORA-109: include posts from pages the user subscribes to
 			      p.page_id IS NOT NULL
 			      AND EXISTS(SELECT 1 FROM page_subscribers ps WHERE ps.page_id = p.page_id AND ps.user_id = $1)
+			    )
+			    OR (
+			      -- AGORA-182: a followed fediverse account's ingested posts join
+			      -- the main feed only if the caller opted this specific follow
+			      -- into it (show_in_feed) — off by default, since otherwise every
+			      -- fediverse follow would dump straight into the main feed with
+			      -- no per-account noise control.
+			      EXISTS(
+			        SELECT 1 FROM ap_following af
+			        JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
+			        WHERE af.follower_user_id = $1 AND af.accepted = true AND af.show_in_feed = true
+			          AND ru.id = p.author_id
+			      )
+			    )
+			    OR (
+			      -- AGORA-236: same per-follow main-feed opt-in as AGORA-182 above,
+			      -- for native Bluesky follows — no accepted flag to check here
+			      -- (an AT Proto follow is a repo write with no accept/reject
+			      -- handshake, so the row existing already means followed).
+			      EXISTS(
+			        SELECT 1 FROM at_following af
+			        JOIN users ru ON ru.atproto_remote_did = af.remote_did
+			        WHERE af.local_user_id = $1 AND af.show_in_feed = true
+			          AND ru.id = p.author_id
+			      )
 			    )
 			  )
 			  AND (
@@ -293,8 +385,9 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	defer filterRows.Close()
 
 	var friendGroupIDs, communityGroupIDs, excludeFriendIDs, excludeGroupIDs, postTypes []string
-	var includePageIDs, excludePageIDs, fediverseAccountIDs []string
-	var fediverseAll bool
+	var includePageIDs, excludePageIDs, fediverseAccountIDs, atprotoAccountIDs []string
+	var excludeFediverseAccountIDs, excludeAtprotoAccountIDs []string
+	var fediverseAll, atprotoAll bool
 	for filterRows.Next() {
 		var ft, val string
 		filterRows.Scan(&ft, &val)
@@ -317,6 +410,14 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 			fediverseAccountIDs = append(fediverseAccountIDs, val)
 		case "fediverse_all":
 			fediverseAll = true
+		case "atproto_account":
+			atprotoAccountIDs = append(atprotoAccountIDs, val)
+		case "atproto_all":
+			atprotoAll = true
+		case "exclude_fediverse_account":
+			excludeFediverseAccountIDs = append(excludeFediverseAccountIDs, val)
+		case "exclude_atproto_account":
+			excludeAtprotoAccountIDs = append(excludeAtprotoAccountIDs, val)
 		}
 	}
 	filterRows.Close()
@@ -335,7 +436,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	// Inclusion: posts must come from at least one included source (OR across groups/communities/pages)
 	if len(friendGroupIDs) > 0 || len(communityGroupIDs) > 0 || len(includePageIDs) > 0 ||
-		len(fediverseAccountIDs) > 0 || fediverseAll {
+		len(fediverseAccountIDs) > 0 || fediverseAll || len(atprotoAccountIDs) > 0 || atprotoAll {
 		var inclParts []string
 		if len(friendGroupIDs) > 0 {
 			phs := make([]string, len(friendGroupIDs))
@@ -389,6 +490,30 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 				  WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
 				))`)
 		}
+		// AGORA-197: a specific followed Bluesky account — mirrors
+		// fediverse_account's shape, joining at_following/atproto_remote_did
+		// instead of ap_following/ap_actor_url. The EXISTS re-verifies the
+		// viewer actually follows that DID, same reasoning fediverse_account
+		// uses.
+		if len(atprotoAccountIDs) > 0 {
+			phs := make([]string, len(atprotoAccountIDs))
+			for i, id := range atprotoAccountIDs {
+				phs[i] = nextP(id)
+			}
+			inclParts = append(inclParts, fmt.Sprintf(
+				`(p.author_id IN (%s) AND EXISTS(
+				  SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+				  WHERE af.local_user_id = $1 AND ru.id = p.author_id
+				))`, strings.Join(phs, ",")))
+		}
+		// AGORA-197: every Bluesky account the viewer follows.
+		if atprotoAll {
+			inclParts = append(inclParts,
+				`(p.is_remote = true AND EXISTS(
+				  SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+				  WHERE af.local_user_id = $1 AND ru.id = p.author_id
+				))`)
+		}
 		extraClauses = append(extraClauses, "("+strings.Join(inclParts, " OR ")+")")
 	}
 
@@ -396,6 +521,30 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	if len(excludeFriendIDs) > 0 {
 		phs := make([]string, len(excludeFriendIDs))
 		for i, id := range excludeFriendIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`p.author_id NOT IN (%s)`, strings.Join(phs, ",")))
+	}
+	// Exclude a specific followed fediverse/Bluesky account — same shape as
+	// exclude_friend, just keyed off the remote account's own cached
+	// users.id stub rather than a local friend's. No re-verification of
+	// follow status the way fediverse_account/atproto_account's inclusion
+	// filters do: excluding an id that isn't actually followed is harmless
+	// (it just never matched anything to begin with), unlike an inclusion
+	// filter where skipping that check would let a stale/stale-looking value
+	// surface an account the viewer no longer follows.
+	if len(excludeFediverseAccountIDs) > 0 {
+		phs := make([]string, len(excludeFediverseAccountIDs))
+		for i, id := range excludeFediverseAccountIDs {
+			phs[i] = nextP(id)
+		}
+		extraClauses = append(extraClauses, fmt.Sprintf(
+			`p.author_id NOT IN (%s)`, strings.Join(phs, ",")))
+	}
+	if len(excludeAtprotoAccountIDs) > 0 {
+		phs := make([]string, len(excludeAtprotoAccountIDs))
+		for i, id := range excludeAtprotoAccountIDs {
 			phs[i] = nextP(id)
 		}
 		extraClauses = append(extraClauses, fmt.Sprintf(
@@ -457,9 +606,11 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -495,6 +646,12 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		    OR EXISTS(
 		      SELECT 1 FROM ap_following af JOIN users ru ON ru.ap_actor_url = af.followed_actor_url
 		      WHERE af.follower_user_id = $1 AND af.accepted = true AND ru.id = p.author_id
+		    )
+		    -- AGORA-197: same reasoning as the ap_following branch above, for
+		    -- a followed Bluesky account.
+		    OR EXISTS(
+		      SELECT 1 FROM at_following af JOIN users ru ON ru.atproto_remote_did = af.remote_did
+		      WHERE af.local_user_id = $1 AND ru.id = p.author_id
 		    )
 		  )
 		  AND (
@@ -576,9 +733,11 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
@@ -780,12 +939,17 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
+		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
+		LEFT JOIN posts  rp   ON rp.id = p.repost_of_id
+		LEFT JOIN users  rp_u ON rp_u.id = rp.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
@@ -953,6 +1117,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
+
 	go s.notifyMentions(req.Content, userID, id)
 	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
@@ -991,6 +1157,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		})
 		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
 		go s.fed.BroadcastPublicPost(userID, id)
+	}
+
+	// AGORA-190: federate as an app.bsky.feed.post record, independent of
+	// the AP broadcast above — a separate protocol with its own opt-in.
+	if req.Visibility == "public" && s.atproto != nil {
+		go s.atproto.BroadcastPost(userID, id)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -1110,9 +1282,11 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
 		       rp.content, rp.image_url, rp.created_at,
+		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), COALESCE(rp_u.emojis::text,'{}'), COALESCE(rp.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN posts rp   ON rp.id = p.repost_of_id
@@ -1159,6 +1333,11 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+	if pageID != nil {
+		// Mirrors CreatePost's post_count increment — without this, a page's
+		// displayed post count only ever grows, never reflecting deletions.
+		s.db.Exec(`UPDATE pages SET post_count = post_count - 1 WHERE id = $1`, *pageID)
+	}
 
 	// Broadcast deletion to federated instances
 	if s.fed != nil {
@@ -1183,6 +1362,18 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 			// not the deleter (userID may be an admin/moderator), since the Delete
 			// must come from the same actor that federated the original post.
 			go s.fed.BroadcastDeletePost(authorID, id)
+		}
+	}
+
+	// AGORA-203/201: mirrors the AP branching above — a repost's only
+	// outbound record was an app.bsky.feed.repost (AGORA-201), never an
+	// app.bsky.feed.post BroadcastPost never federates, so its delete must
+	// go through DeliverUnannounce instead of BroadcastPostDelete.
+	if s.atproto != nil {
+		if repostOfID != nil {
+			go s.atproto.DeliverUnannounce(authorID, id, *repostOfID)
+		} else {
+			go s.atproto.BroadcastPostDelete(authorID, id)
 		}
 	}
 
@@ -1211,6 +1402,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil {
 		go s.fed.DeliverLike(userID, postID)
 	}
+	// AGORA-201: same reasoning as the fediverse call above, for a Bluesky target.
+	if s.atproto != nil {
+		go s.atproto.DeliverLike(userID, postID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "liked"})
 }
 
@@ -1220,6 +1415,9 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
 	if s.fed != nil {
 		go s.fed.DeliverUnlike(userID, postID)
+	}
+	if s.atproto != nil {
+		go s.atproto.DeliverUnlike(userID, postID)
 	}
 	writeJSON(w, 200, map[string]string{"message": "unliked"})
 }
@@ -1281,6 +1479,11 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil && req.Type == "like" {
 		go s.fed.DeliverLike(userID, postID)
 	}
+	// AGORA-201: app.bsky.feed.like is likewise a plain like with no emoji
+	// concept, same restriction as the fediverse call above.
+	if s.atproto != nil && req.Type == "like" {
+		go s.atproto.DeliverLike(userID, postID)
+	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
 }
@@ -1294,6 +1497,10 @@ func (s *Service) UnreactPost(w http.ResponseWriter, r *http.Request) {
 	// federated like to undo (e.g. the reaction was "love", not "like").
 	if s.fed != nil {
 		go s.fed.DeliverUnlike(userID, postID)
+	}
+	// AGORA-201: same reasoning, for a Bluesky-federated like.
+	if s.atproto != nil {
+		go s.atproto.DeliverUnlike(userID, postID)
 	}
 	writeJSON(w, 200, map[string]string{"message": "unreacted"})
 }
@@ -1423,7 +1630,7 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT po.id, po.text,
-		       u.id, u.username, u.display_name, u.avatar_url
+		       u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.emojis::text,'{}')
 		FROM poll_options po
 		JOIN poll_votes pv ON pv.option_id = po.id
 		JOIN users u ON u.id = pv.user_id
@@ -1436,10 +1643,11 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Voter struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
+		ID          string          `json:"id"`
+		Username    string          `json:"username"`
+		DisplayName string          `json:"display_name"`
+		AvatarURL   string          `json:"avatar_url"`
+		Emojis      json.RawMessage `json:"emojis,omitempty"`
 	}
 	type OptionVoters struct {
 		OptionID   string  `json:"option_id"`
@@ -1451,9 +1659,10 @@ func (s *Service) PollVoters(w http.ResponseWriter, r *http.Request) {
 	order := []string{}
 
 	for rows.Next() {
-		var optID, optText string
+		var optID, optText, emojis string
 		var v Voter
-		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL)
+		rows.Scan(&optID, &optText, &v.ID, &v.Username, &v.DisplayName, &v.AvatarURL, &emojis)
+		v.Emojis = json.RawMessage(nonEmptyEmojisJSON(emojis))
 		if _, ok := byOption[optID]; !ok {
 			byOption[optID] = &OptionVoters{OptionID: optID, OptionText: optText, Voters: []Voter{}}
 			order = append(order, optID)
@@ -1499,9 +1708,11 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), NULL::text, NULL::text
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
@@ -1541,9 +1752,11 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
-		       p.video_url, p.video_thumb_url
+		p.video_url, p.video_thumb_url,
+		COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'), NULL::text, NULL::text
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN community_groups cg ON cg.id = p.community_group_id
@@ -1648,7 +1861,11 @@ func (s *Service) enrichPolls(posts []Post, userID string) {
 	rows, err := s.db.Query(
 		fmt.Sprintf(`
 			SELECT po.id, po.post_id, po.text, po.position,
-			       (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) AS votes
+			       -- AGORA-210: remote_votes carries an inbound AP poll's own
+			       -- vote tally (nobody local necessarily voted, so there's
+			       -- nothing for COUNT(poll_votes) to find); always 0 for a
+			       -- locally-created poll.
+			       (SELECT COUNT(*) FROM poll_votes pv WHERE pv.option_id = po.id) + po.remote_votes AS votes
 			FROM poll_options po
 			WHERE po.post_id IN (%s)
 			ORDER BY po.post_id, po.position
@@ -1752,18 +1969,19 @@ func (s *Service) enrichPhotos(posts []Post) {
 }
 
 type ReactionUser struct {
-	UserID      string `json:"user_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	AvatarURL   string `json:"avatar_url"`
-	Type        string `json:"type"`
+	UserID      string          `json:"user_id"`
+	Username    string          `json:"username"`
+	DisplayName string          `json:"display_name"`
+	AvatarURL   string          `json:"avatar_url"`
+	Type        string          `json:"type"`
+	Emojis      json.RawMessage `json:"emojis,omitempty"`
 }
 
 func (s *Service) GetReactions(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 
 	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, COALESCE(u.avatar_url,''), r.reaction_type
+		SELECT u.id, u.username, u.display_name, COALESCE(u.avatar_url,''), r.reaction_type, COALESCE(u.emojis::text,'{}')
 		FROM reactions r
 		JOIN users u ON u.id = r.user_id
 		WHERE r.post_id = $1 AND u.deletion_scheduled_at IS NULL
@@ -1779,7 +1997,9 @@ func (s *Service) GetReactions(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var ru ReactionUser
-		rows.Scan(&ru.UserID, &ru.Username, &ru.DisplayName, &ru.AvatarURL, &ru.Type)
+		var emojis string
+		rows.Scan(&ru.UserID, &ru.Username, &ru.DisplayName, &ru.AvatarURL, &ru.Type, &emojis)
+		ru.Emojis = json.RawMessage(nonEmptyEmojisJSON(emojis))
 		reactions = append(reactions, ru)
 		counts[ru.Type]++
 	}
@@ -1800,8 +2020,10 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 	repostOfID := chi.URLParam(r, "id")
 
 	var req struct {
-		Content    string `json:"content"`
-		Visibility string `json:"visibility"`
+		Content        string `json:"content"`
+		Visibility     string `json:"visibility"`
+		GroupID        string `json:"group_id"`
+		ContentWarning string `json:"content_warning"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Visibility == "" {
@@ -1829,11 +2051,19 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "group posts cannot be shared outside the group"); return
 	}
 
+	// AGORA-226: a share's own audience is independent of the original
+	// post's — the sharer picks who sees *their* commentary, mirroring
+	// CreatePost's own visibility/group_id handling.
+	var friendGroupID *string
+	if req.GroupID != "" && req.Visibility == "group" {
+		friendGroupID = &req.GroupID
+	}
+
 	var id string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, repost_of_id)
-		VALUES ($1, $2, $3, $4) RETURNING id
-	`, userID, req.Content, req.Visibility, repostOfID).Scan(&id)
+		INSERT INTO posts (author_id, content, visibility, group_id, content_warning, repost_of_id)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+	`, userID, req.Content, req.Visibility, friendGroupID, req.ContentWarning, repostOfID).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not share post")
 		return
@@ -1846,6 +2076,21 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 	// AGORA-159: federate as an Announce if the original post is remote.
 	if s.fed != nil {
 		go s.fed.DeliverAnnounce(userID, id, repostOfID)
+	}
+	// AGORA-201: same reasoning, for a Bluesky-federated original post.
+	if s.atproto != nil {
+		go s.atproto.DeliverAnnounce(userID, id, repostOfID)
+	}
+	// AGORA-228: a bare reshare (no commentary) is correctly represented by
+	// the Announce above alone — standard AP boost semantics, and nothing
+	// else to say. But a *quoted* share carries the sharer's own new
+	// content, which an Announce never includes (it only ever references
+	// the original post's own URI) — that content needs its own Create
+	// broadcast, exactly like any other public post (CreatePost's own
+	// BroadcastPublicPost call), or it silently never reaches the fediverse
+	// at all despite the repost succeeding locally.
+	if req.Content != "" && s.fed != nil {
+		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -1878,6 +2123,10 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		MyReaction     string         `json:"my_reaction"`
 		ReactionCounts map[string]int `json:"reaction_counts"`
 		Replies        []Comment      `json:"replies"`
+		// AGORA-258: custom emoji for the commenter's display name and this
+		// comment's own content, mirroring Post.AuthorEmojis/ContentEmojis.
+		AuthorEmojis  json.RawMessage `json:"author_emojis,omitempty"`
+		ContentEmojis json.RawMessage `json:"content_emojis,omitempty"`
 	}
 
 	scanComment := func(rows interface {
@@ -1885,14 +2134,18 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	}) Comment {
 		var c Comment
 		var myReaction *string
+		var authorEmojis, contentEmojis string
 		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.Pronouns, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction)
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction,
+			&authorEmojis, &contentEmojis)
 		if myReaction != nil {
 			c.MyReaction = *myReaction
 		}
 		c.ReactionCount = 0 // bulk enrichment below sets this; zero here to avoid double-count
 		c.ReactionCounts = map[string]int{}
 		c.Replies = []Comment{}
+		c.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		c.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
 		return c
 	}
 
@@ -1900,7 +2153,8 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.created_at, p.edited_at,
 		       (SELECT COUNT(*) FROM reactions WHERE post_id = p.id) AS reaction_count,
-		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction
+		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction,
+		       COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		WHERE p.parent_id = $2 AND p.deleted_at IS NULL AND u.deletion_scheduled_at IS NULL
@@ -2071,6 +2325,8 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
+
 	// Notify post author (if not self)
 	if postAuthorID != userID {
 		go s.notif.Create(postAuthorID, userID, "post_comment", postID, "")
@@ -2089,6 +2345,11 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// this doesn't need to special-case which kind of parent it is.
 	if s.fed != nil {
 		go s.fed.DeliverReply(userID, id, parentID)
+	}
+	// AGORA-199: same reasoning as the fediverse call above, for a Bluesky
+	// reply target.
+	if s.atproto != nil {
+		go s.atproto.DeliverReply(userID, id, parentID)
 	}
 
 	writeJSON(w, 201, map[string]string{"id": id})
@@ -2126,6 +2387,15 @@ func (s *Service) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	// AGORA-151: notify fediverse participants a federated reply was removed
 	if s.fed != nil {
 		go s.fed.BroadcastDeletePost(commentAuthor, commentID)
+	}
+
+	// AGORA-203: no-ops today (comment/reply federation to AT Proto is
+	// AGORA-199, not yet built), but landing this call now — rather than as
+	// a follow-up once AGORA-199 ships — is the whole point of filing this
+	// ticket as a Bug up front, so comment-delete doesn't get missed the way
+	// AGORA-151 initially missed it on the AP side.
+	if s.atproto != nil {
+		go s.atproto.BroadcastPostDelete(commentAuthor, commentID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
@@ -2229,6 +2499,12 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// AGORA-213: only re-extract when content actually changed — a visibility-
+	// or content-warning-only edit shouldn't touch the stored tag set.
+	if req.Content != nil {
+		s.storeHashtags(id, extractHashtags(*req.Content))
+	}
+
 	// AGORA-150: notify fediverse followers a federated post was edited
 	if s.fed != nil {
 		if pageID != nil {
@@ -2237,6 +2513,13 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		} else {
 			go s.fed.BroadcastUpdatePost(userID, id)
 		}
+	}
+
+	// AGORA-202: independent of the AP branching above — BroadcastPostUpdate
+	// no-ops on its own if this post was never an AT Proto record (page
+	// posts never are), so no special-casing needed here.
+	if s.atproto != nil {
+		go s.atproto.BroadcastPostUpdate(userID, id)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "updated"})
@@ -2270,11 +2553,16 @@ func (s *Service) EditComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET content = $1, edited_at = NOW() WHERE id = $2`, req.Content, commentID)
+	s.storeHashtags(commentID, extractHashtags(req.Content)) // AGORA-213
 
 	// AGORA-162: mirror EditPost's federation hook — a previously-federated
 	// reply must send an Update, not go stale on the remote side forever.
 	if s.fed != nil {
 		go s.fed.DeliverReplyUpdate(userID, commentID, parentID)
+	}
+	// AGORA-199: same reasoning as the fediverse call above.
+	if s.atproto != nil {
+		go s.atproto.DeliverReplyUpdate(userID, commentID, parentID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "updated"})
@@ -2349,6 +2637,37 @@ type Post struct {
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
 	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
+	// AGORA-252: the quoted post's own link preview — distinct from the
+	// quoting post's own link_url/etc (already scanned separately below),
+	// needed so a quote of a link-only post (no image, e.g. a Bluesky quote
+	// of a news article) doesn't render as an empty card.
+	RepostLinkURL         *string `json:"repost_link_url,omitempty"`
+	RepostLinkTitle       *string `json:"repost_link_title,omitempty"`
+	RepostLinkDescription *string `json:"repost_link_description,omitempty"`
+	RepostLinkImage       *string `json:"repost_link_image,omitempty"`
+	RepostLinkDomain      *string `json:"repost_link_domain,omitempty"`
+	// AGORA-258: custom emoji (shortcode -> image URL) for this post's author
+	// name, this post's own content, and (if this is a repost/quote-share) the
+	// reposted post's author name/content — each independently sourced from
+	// that specific AP object's own "tag" array, never derived from one
+	// another.
+	AuthorEmojis        json.RawMessage `json:"author_emojis,omitempty"`
+	ContentEmojis       json.RawMessage `json:"content_emojis,omitempty"`
+	RepostAuthorEmojis  json.RawMessage `json:"repost_author_emojis,omitempty"`
+	RepostContentEmojis json.RawMessage `json:"repost_content_emojis,omitempty"`
+}
+
+// nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
+// to a literal "{}" when empty (AGORA-258) — the column's own DEFAULT is
+// '{}' so this is mostly defensive, but a raw empty string isn't valid JSON
+// and would break json.RawMessage's contract that its bytes are always
+// well-formed JSON when the struct itself gets re-marshaled for the API
+// response.
+func nonEmptyEmojisJSON(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
 }
 
 func scanPosts(rows interface {
@@ -2358,6 +2677,7 @@ func scanPosts(rows interface {
 	var posts []Post
 	for rows.Next() {
 		var p Post
+		var authorEmojis, contentEmojis, repostAuthorEmojis, repostContentEmojis string
 		rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
@@ -2368,11 +2688,17 @@ func scanPosts(rows interface {
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
 			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
+			&p.RepostLinkURL, &p.RepostLinkTitle, &p.RepostLinkDescription, &p.RepostLinkImage, &p.RepostLinkDomain,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,
+			&authorEmojis, &contentEmojis, &repostAuthorEmojis, &repostContentEmojis,
 		)
 		p.ReactionCounts = map[string]int{}
+		p.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		p.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
+		p.RepostAuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(repostAuthorEmojis))
+		p.RepostContentEmojis = json.RawMessage(nonEmptyEmojisJSON(repostContentEmojis))
 		posts = append(posts, p)
 	}
 	if posts == nil { return []Post{} }

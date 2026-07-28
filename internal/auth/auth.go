@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/ctxkeys"
@@ -106,16 +108,39 @@ func (s *Service) RequireModerator(next http.Handler) http.Handler {
 func UserIDFromCtx(ctx context.Context) string { return ctxkeys.GetUserID(ctx) }
 func RoleFromCtx(ctx context.Context) string     { return ctxkeys.GetUserRole(ctx) }
 
+// isValidEmail replaces the old strings.Contains(email, "@") check (AGORA-142)
+// — that let through addresses containing raw CR/LF, which notifications.go's
+// SendHTML later spliced directly into SMTP headers ("To: "+to), letting a
+// crafted address inject extra headers (Bcc, additional recipients, ...).
+// mail.ParseAddress both rejects control characters and requires a
+// syntactically real address.
+func isValidEmail(email string) bool {
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+// AGORA-141: per-IP throttles on the unauthenticated auth endpoints an
+// attacker can hammer for credential stuffing (login), reset-token guessing
+// (reset-password), or email bombing (forgot-password, each hit sends an
+// outbound email regardless of whether the address exists). Login gets a
+// looser budget than the two email-sending routes since it's the one
+// legitimate users retry most under normal typos/shared-IP/NAT traffic.
+var (
+	loginRateLimit          = httprate.LimitByIP(10, time.Minute)
+	forgotPasswordRateLimit = httprate.LimitByIP(5, 15*time.Minute)
+	resetPasswordRateLimit  = httprate.LimitByIP(10, time.Minute)
+)
 
 func RegisterPublicRoutes(r chi.Router, s *Service) {
 	r.Get("/setup",                  s.SetupStatus)
 	r.Post("/setup",                 s.RunSetup)
 	r.Post("/auth/register",         s.Register)
-	r.Post("/auth/login",            s.Login)
+	r.With(loginRateLimit).Post("/auth/login", s.Login)
 	r.Get("/auth/verify-email",      s.VerifyEmail)
-	r.Post("/auth/forgot-password",  s.ForgotPassword)
-	r.Post("/auth/reset-password",   s.ResetPassword)
+	r.With(forgotPasswordRateLimit).Post("/auth/forgot-password", s.ForgotPassword)
+	r.With(resetPasswordRateLimit).Post("/auth/reset-password", s.ResetPassword)
 	r.Get("/auth/me",                s.Me)
 	r.Get("/auth/waitlist/accept",   s.WaitlistAccept)
 }
@@ -155,7 +180,7 @@ func (s *Service) RunSetup(w http.ResponseWriter, r *http.Request) {
 	if len(req.Password) < 8 {
 		writeError(w, 400, "password must be at least 8 characters"); return
 	}
-	if req.Email == "" || !strings.Contains(req.Email, "@") {
+	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -218,10 +243,19 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if !isValidUsername(req.Username) {
 		writeError(w, 400, "username may only contain letters, numbers, underscores, and hyphens"); return
 	}
+	// A username and a page slug share the same acct:name@instance namespace
+	// in ActivityPub/WebFinger — reject here too, symmetric with CreatePage's
+	// own check, so whichever is created second doesn't silently claim a name
+	// that's unreachable over AP because the other already has it.
+	var slugTaken bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pages WHERE LOWER(slug) = LOWER($1))`, req.Username).Scan(&slugTaken)
+	if slugTaken {
+		writeError(w, 409, "username already taken"); return
+	}
 	if len(req.Password) < 8 {
 		writeError(w, 400, "password must be at least 8 characters"); return
 	}
-	if req.Email == "" || !strings.Contains(req.Email, "@") {
+	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -413,15 +447,17 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		WallApprovalRequired bool
 		ActivityPubEnabled   bool
 		FediverseNotificationsEnabled bool
+		AtprotoEnabled       bool
+		AtprotoNotificationsEnabled bool
 	}
 	err = s.db.QueryRow(`
 		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
 		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required,
-		       activitypub_enabled, fediverse_notifications_enabled
+		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
 		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
-		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled)
+		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -436,6 +472,8 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"wall_approval_required": u.WallApprovalRequired,
 		"activitypub_enabled":    u.ActivityPubEnabled,
 		"fediverse_notifications_enabled": u.FediverseNotificationsEnabled,
+		"atproto_enabled": u.AtprotoEnabled,
+		"atproto_notifications_enabled": u.AtprotoNotificationsEnabled,
 	})
 }
 
@@ -469,7 +507,7 @@ func (s *Service) SendUserInvite(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, 400, "email required"); return
 	}
-	if !strings.Contains(req.Email, "@") {
+	if !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
 	}
 
@@ -580,7 +618,7 @@ func (s *Service) RequestEmailChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid json"); return
 	}
 	req.NewEmail = strings.ToLower(strings.TrimSpace(req.NewEmail))
-	if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
+	if req.NewEmail == "" || !isValidEmail(req.NewEmail) {
 		writeError(w, 400, "valid email required"); return
 	}
 

@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import CommentsSection, { renderContent } from './CommentsSection'
+import CommentsSection, { renderContent, renderName } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
 import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
@@ -42,6 +42,11 @@ interface Post {
   repost_author_pronouns?: string
   repost_content?: string
   repost_image_url?: string
+  repost_link_url?: string
+  repost_link_title?: string
+  repost_link_description?: string
+  repost_link_image?: string
+  repost_link_domain?: string
   like_count: number
   comment_count: number
   repost_count: number
@@ -76,6 +81,11 @@ interface Post {
   page_avatar_url?: string
   created_at: string
   edited_at?: string
+  // Custom emoji (AGORA-258)
+  author_emojis?: Record<string, string>
+  content_emojis?: Record<string, string>
+  repost_author_emojis?: Record<string, string>
+  repost_content_emojis?: Record<string, string>
 }
 
 const visIcons: Record<string, React.ReactNode> = {
@@ -202,7 +212,7 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
-                      {r.display_name || r.username}
+                      {r.display_name ? renderName(r.display_name, r.emojis) : r.username}
                     </p>
                     <p className="text-xs text-agora-400">@{r.username}</p>
                   </div>
@@ -239,20 +249,29 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
   const myVotes = new Set([post.my_poll_vote, ...(post.my_poll_votes || [])].filter(Boolean))
   const hasVoted = myVotes.size > 0
   const isExpired = !!post.poll_expired
-  const canVote = !isExpired
+  // AGORA-210: an inbound fediverse poll has no way to deliver a vote back
+  // to the origin server, so voting locally would either do nothing real or
+  // misrepresent the poll's actual tally — read-only here, same as an
+  // expired poll, but with its own honest label rather than claiming it
+  // "ended" when it may still be open on the source instance.
+  const isRemote = !!post.is_remote
+  const canVote = !isExpired && !isRemote
 
   return (
     <div className="mt-3 space-y-2">
       {isExpired && (
         <p className="text-xs font-medium text-agora-400 dark:text-agora-500">🔒 This poll has ended</p>
       )}
-      {!isExpired && post.poll_expires_at && (
+      {!isExpired && isRemote && (
+        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">📡 Results from the fediverse — voting happens on the original post</p>
+      )}
+      {!isExpired && !isRemote && post.poll_expires_at && (
         <p className="text-xs text-agora-400 dark:text-agora-500">⏱ Closes {new Date(post.poll_expires_at).toLocaleString()}</p>
       )}
       {opts.map(opt => {
         const isMyVote = myVotes.has(opt.id)
         const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0
-        const showResults = hasVoted || isExpired
+        const showResults = hasVoted || isExpired || isRemote
         return showResults ? (
           <button key={opt.id}
             onClick={() => canVote && onVote(isMyVote ? null : opt.id)}
@@ -335,7 +354,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
                           : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(v.display_name||v.username)[0].toUpperCase()}</span>}
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{v.display_name || v.username}</p>
+                        <p className="text-sm font-medium truncate">{v.display_name ? renderName(v.display_name, v.emojis) : v.username}</p>
                         <p className="text-xs text-agora-400">@{v.username}</p>
                       </div>
                     </Link>
@@ -364,6 +383,10 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const [showReport, setShowReport] = useState(false)
   const [showShare, setShowShare] = useState(false)
   const [shareContent, setShareContent] = useState('')
+  const [shareVisibility, setShareVisibility] = useState('friends')
+  const [shareGroupId, setShareGroupId] = useState('')
+  const [shareTwEnabled, setShareTwEnabled] = useState(false)
+  const [shareTwLabel, setShareTwLabel] = useState('')
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showReactionsModal, setShowReactionsModal] = useState(false)
   const [highlightedReaction, setHighlightedReaction] = useState<string | null>(null)
@@ -383,7 +406,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   const { data: groupsData } = useQuery({
     queryKey: ['friend-lists'],
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
-    enabled: editing && !post.group_id,
+    enabled: (editing && !post.group_id) || showShare,
   })
   const friendLists: any[] = groupsData?.groups || []
 
@@ -477,15 +500,29 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
   })
 
   const repost = useMutation({
-    mutationFn: () => feedApi.repost(post.id, { content: shareContent, visibility: 'friends' }),
+    mutationFn: () => feedApi.repost(post.id, {
+      content: shareContent,
+      visibility: shareVisibility,
+      group_id: shareVisibility === 'group' ? shareGroupId : undefined,
+      content_warning: shareTwEnabled && shareTwLabel.trim() ? shareTwLabel.trim() : '',
+    }),
     onSuccess: () => {
-      setShowShare(false); setShareContent(''); invalidate()
+      setShowShare(false); setShareContent('')
+      setShareVisibility('friends'); setShareGroupId('')
+      setShareTwEnabled(false); setShareTwLabel('')
+      invalidate()
       // AGORA-71: brief confirmation flash
       setSharedConfirm(true)
       setTimeout(() => setSharedConfirm(false), 2500)
     },
     onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
   })
+
+  const closeShareModal = () => {
+    setShowShare(false); setShareContent('')
+    setShareVisibility('friends'); setShareGroupId('')
+    setShareTwEnabled(false); setShareTwLabel('')
+  }
 
   const pollVote = useMutation({
     mutationFn: (optionId: string | null) =>
@@ -526,7 +563,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
         <div className="flex items-center gap-1.5 text-xs text-agora-500 dark:text-agora-400 mb-3">
           <ArrowRight size={13} />
           <Link to={`/profile/${post.author_username}`} className="font-medium hover:underline">
-            {post.author_display_name || post.author_username}
+            {post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}
           </Link>
           <span>→</span>
           <Link to={`/profile/${post.wall_username}`} className="font-medium hover:underline">
@@ -566,7 +603,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               ) : (
                 <Link to={`/profile/${post.author_username}`}
                   className="font-semibold text-agora-900 dark:text-agora-100 hover:underline text-sm">
-                  {post.author_display_name}
+                  {renderName(post.author_display_name, post.author_emojis)}
                 </Link>
               )}
               {!post.page_id && post.author_pronouns && (
@@ -720,7 +757,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                           ))}
                         </select>
                       : <p className="text-xs text-agora-400">
-                          No friend lists yet — <Link to="/friends" className="underline">create one</Link>
+                          No friend lists yet — <Link to="/connections?tab=lists" className="underline">create one</Link>
                         </p>
                   )}
                 </div>
@@ -744,7 +781,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               {/* Content — the author's own words (their commentary, when this is a repost) */}
               {post.content && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-                  {renderContent(post.content)}
+                  {renderContent(post.content, undefined, post.content_emojis)}
                 </p>
               )}
 
@@ -765,7 +802,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                     </div>
                     <Link to={`/profile/${post.repost_author_username}`}
                       className="font-semibold text-agora-800 dark:text-agora-200 hover:underline text-sm">
-                      {post.repost_author_display_name || post.repost_author_username}
+                      {post.repost_author_display_name ? renderName(post.repost_author_display_name, post.repost_author_emojis) : post.repost_author_username}
                     </Link>
                     {post.repost_author_pronouns && (
                       <span className="text-agora-400 dark:text-agora-500 text-xs">({post.repost_author_pronouns})</span>
@@ -774,11 +811,43 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                   </div>
                   {post.repost_content && (
                     <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">
-                      {renderContent(post.repost_content)}
+                      {renderContent(post.repost_content, undefined, post.repost_content_emojis)}
                     </p>
                   )}
                   {post.repost_image_url && (
                     <img src={post.repost_image_url} alt="" className="mt-2 rounded-lg max-h-64 object-cover w-full" />
+                  )}
+                  {/* AGORA-252: the quoted post's own link preview — e.g. a
+                      Bluesky quote of a link-only news article has no
+                      repost_image_url, only this. onClick's closest('a')
+                      check above lets this open externally instead of
+                      navigating to the quoted post. */}
+                  {post.repost_link_url && (
+                    <a
+                      href={post.repost_link_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 flex gap-3 border border-agora-200 dark:border-agora-600 rounded-xl overflow-hidden hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                    >
+                      {post.repost_link_image && (
+                        <img
+                          src={post.repost_link_image}
+                          alt=""
+                          className="w-16 h-16 object-cover flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                          onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        />
+                      )}
+                      <div className="flex-1 min-w-0 p-2 space-y-0.5">
+                        <p className="text-xs text-agora-400 flex items-center gap-1">
+                          <ExternalLink size={10} /> {post.repost_link_domain}
+                        </p>
+                        {post.repost_link_title && (
+                          <p className="text-sm font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">
+                            {post.repost_link_title}
+                          </p>
+                        )}
+                      </div>
+                    </a>
                   )}
                 </div>
               )}
@@ -1050,11 +1119,11 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
 
       {/* Share modal */}
       {showShare && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowShare(false)}>
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeShareModal}>
           <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between p-4 border-b border-agora-100 dark:border-agora-700">
               <h2 className="font-bold text-lg">Share post</h2>
-              <button onClick={() => setShowShare(false)} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
+              <button onClick={closeShareModal} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
             </div>
             <div className="p-4 space-y-3">
               {/* Author's comment */}
@@ -1066,6 +1135,23 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 onChange={e => setShareContent(e.target.value)}
                 autoFocus
               />
+
+              {/* AGORA-225: trigger warning for the sharer's own commentary */}
+              {shareTwEnabled && (
+                <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
+                  <AlertTriangle size={14} className="text-amber-500 flex-shrink-0" />
+                  <input
+                    className="flex-1 bg-transparent text-sm text-amber-800 dark:text-amber-200 placeholder-amber-400 focus:outline-none"
+                    placeholder="Describe the trigger (e.g. violence, spiders, grief)…"
+                    autoComplete="off"
+                    value={shareTwLabel}
+                    onChange={e => setShareTwLabel(e.target.value)}
+                    autoFocus
+                    maxLength={120}
+                  />
+                </div>
+              )}
+
               {/* Preview of the post being shared */}
               <div className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 bg-agora-50 dark:bg-agora-900 space-y-1.5">
                 <div className="flex items-center gap-2">
@@ -1074,21 +1160,48 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                       ? <img src={post.author_avatar_url} alt="" className="w-full h-full object-cover" />
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-500">{(post.author_display_name || post.author_username || '?')[0].toUpperCase()}</span>}
                   </div>
-                  <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name || post.author_username}</span>
+                  <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}</span>
                   <span className="text-xs text-agora-400">@{post.author_username}</span>
                 </div>
-                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{post.content}</p>}
+                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis)}</p>}
                 {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
               </div>
-              <p className="text-xs text-agora-400 dark:text-agora-500">
-                This will be shared with your friends.
-              </p>
+
+              {/* AGORA-226: audience selector for the sharer's own commentary,
+                  independent of the original post's own visibility. */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => setShareTwEnabled(v => { if (v) setShareTwLabel(''); return !v })}
+                  className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg border transition-colors ${
+                    shareTwEnabled
+                      ? 'bg-amber-100 dark:bg-amber-900/30 border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
+                      : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400 hover:text-agora-600'
+                  }`}
+                >
+                  <AlertTriangle size={13} /> TW
+                </button>
+                <select value={shareVisibility} onChange={e => setShareVisibility(e.target.value)}
+                  className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
+                  <option value="public">Public</option>
+                  <option value="friends">Friends</option>
+                  <option value="group">Friend List</option>
+                </select>
+                {shareVisibility === 'group' && (
+                  friendLists.length > 0
+                    ? <select value={shareGroupId} onChange={e => setShareGroupId(e.target.value)}
+                        className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
+                        <option value="">Select list…</option>
+                        {friendLists.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                      </select>
+                    : <span className="text-xs text-agora-400">No lists yet</span>
+                )}
+              </div>
             </div>
             <div className="flex justify-end gap-2 px-4 pb-4">
-              <button onClick={() => setShowShare(false)} className="btn-secondary">Cancel</button>
+              <button onClick={closeShareModal} className="btn-secondary">Cancel</button>
               <button
                 onClick={() => repost.mutate()}
-                disabled={repost.isPending}
+                disabled={repost.isPending || (shareVisibility === 'group' && !shareGroupId) || (shareTwEnabled && !shareTwLabel.trim())}
                 className="btn-primary flex items-center gap-1.5"
               >
                 <Repeat2 size={14} />

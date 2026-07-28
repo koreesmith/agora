@@ -12,9 +12,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 
 	"github.com/agora-social/agora/internal/admin"
 	"github.com/agora-social/agora/internal/albums"
+	"github.com/agora-social/agora/internal/atproto"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/blocks"
 	"github.com/agora-social/agora/internal/config"
@@ -64,17 +66,20 @@ func main() {
 	modSvc    := moderation.NewService(db, notifSvc)
 	adminSvc  := admin.NewService(db, cfg, notifSvc, mediaSvc)
 	fedSvc    := federation.NewService(db, cfg, notifSvc)
-	dmSvc          := dm.New(db)
+	dmSvc          := dm.New(db, cfg.AllowedOrigins)
 	blocksSvc      := blocks.New(db)
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
+	atprotoSvc      := atproto.NewService(db, cfg, notifSvc)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
 	pagesSvc.SetFed(fedSvc)
+	userSvc.SetAtproto(atprotoSvc)
+	feedSvc.SetAtproto(atprotoSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -144,7 +149,17 @@ func main() {
 			r.Use(authSvc.Middleware)
 			r.Post("/auth/change-password",       authSvc.ChangePassword)
 			r.Post("/auth/request-email-change",  authSvc.RequestEmailChange)
-			r.Post("/invites/send",               authSvc.SendUserInvite)
+			// AGORA-141: each invite sends an outbound email — throttle both by
+			// IP and by the inviting account (userID is already in context by
+			// here, set by authSvc.Middleware above) so one compromised/abusive
+			// account can't email-bomb via a botnet of IPs, nor a single IP churn
+			// through many accounts.
+			r.With(
+				httprate.LimitByIP(20, time.Hour),
+				httprate.Limit(5, time.Hour, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					return auth.UserIDFromCtx(r.Context()), nil
+				})),
+			).Post("/invites/send", authSvc.SendUserInvite)
 			users.RegisterRoutes(r, userSvc)
 			friends.RegisterRoutes(r, friendSvc)
 			feed.RegisterRoutes(r, feedSvc)
@@ -164,6 +179,7 @@ func main() {
 			// call, not at the bare /federation/... path used by remote
 			// fediverse servers dereferencing our public actor/WebFinger URLs.
 			federation.RegisterAuthedRoutes(r, fedSvc)
+			atproto.RegisterAuthedRoutes(r, atprotoSvc)
 		})
 
 		// Moderator or admin — content moderation actions
@@ -179,6 +195,9 @@ func main() {
 			r.Use(authSvc.RequireAdmin)
 			admin.RegisterRoutes(r, adminSvc)
 			pages.RegisterAdminRoutes(r, pagesSvc)
+			// AGORA-220: relay management needs the instance actor's signing
+			// key (AGORA-219), which only exists in the federation package.
+			federation.RegisterAdminRoutes(r, fedSvc)
 		})
 	})
 
@@ -186,6 +205,11 @@ func main() {
 	// docs/inbox are dereferenced directly by remote fediverse servers at
 	// well-known paths, not through /api.
 	federation.RegisterRoutes(r, fedSvc)
+
+	// AT Proto identity endpoints (AGORA-187) — same public, unprefixed
+	// shape as federation's well-known paths, dereferenced directly by AT
+	// Proto clients/relays rather than through /api.
+	atproto.RegisterRoutes(r, atprotoSvc)
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +221,8 @@ func main() {
 	go fedSvc.StartBackgroundSync(context.Background())
 	go userSvc.StartDeletionCleanup(context.Background())
 	go interactionsSvc.StartPruner(context.Background())
+	go atprotoSvc.StartRelayCrawl(context.Background())
+	go atprotoSvc.StartBlueskyIngestion(context.Background())
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{

@@ -210,6 +210,10 @@ export const moderationApi = {
   listInstanceBans:   ()                          => api.get('/moderation/instance-bans'),
   banInstance:        (data: any)                 => api.post('/moderation/instance-bans', data),
   unbanInstance:      (id: string)                => api.delete(`/moderation/instance-bans/${id}`),
+  // AGORA-205: DID-scoped block list, the AT Proto counterpart to instance-bans.
+  listBlockedDIDs:    ()                          => api.get('/moderation/blocked-dids'),
+  blockDID:           (data: any)                 => api.post('/moderation/blocked-dids', data),
+  unblockDID:         (id: string)                => api.delete(`/moderation/blocked-dids/${id}`),
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
@@ -248,6 +252,12 @@ export const adminApi = {
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
+  // Fediverse relays (AGORA-223)
+  listRelays:   ()               => api.get('/admin/relays'),
+  addRelay:     (inboxUrl: string) => api.post('/admin/relays', { inbox_url: inboxUrl }),
+  enableRelay:  (id: string)     => api.post(`/admin/relays/${id}/enable`),
+  disableRelay: (id: string)     => api.post(`/admin/relays/${id}/disable`),
+  deleteRelay:  (id: string)     => api.delete(`/admin/relays/${id}`),
 }
 
 
@@ -266,6 +276,29 @@ export const federationApi = {
   unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
   listFollowing:            ()                 => api.get('/federation/following'),
   toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
+  toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
+}
+
+// ── AT Proto / Bluesky ───────────────────────────────────────────────────────
+export const atprotoApi = {
+  // AGORA-195: resolve a Bluesky handle/DID to a live preview (search),
+  // follow/unfollow a native Bluesky account, and list current follows —
+  // the AT Proto counterpart to federationApi's fediverse equivalents.
+  resolveBlueskyHandle:   (handle: string) => api.get('/atproto/lookup', { params: { handle } }),
+  followBlueskyAccount:   (actor: string)  => api.post('/atproto/follow', { actor }),
+  unfollowBlueskyAccount: (id: string)     => api.delete(`/atproto/follow/${id}`),
+  listBlueskyFollowing:   ()               => api.get('/atproto/following'),
+  // AGORA-198: per-follow notification opt-in, mirroring toggleFollowNotify.
+  toggleFollowNotify:     (id: string, notify: boolean) => api.put(`/atproto/follow/${id}/notify`, { notify }),
+  // AGORA-236: per-follow main-feed opt-in, mirroring federationApi's own toggleShowInFeed.
+  toggleShowInFeed:       (id: string, showInFeed: boolean) => api.put(`/atproto/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
+  // AGORA-196: reconcile a Bridgy-Fed-bridged Bluesky follow (an ap_following
+  // row) into a native one.
+  migrateBridgedFollow:   (apFollowingId: string) => api.post(`/atproto/bridged-follows/${apFollowingId}/migrate`),
+  // AGORA-215/216: fuzzy, network-wide search — distinct from lookup's exact
+  // handle/DID resolve, and from searchApi's own Agora+cached-remote search.
+  searchBlueskyActors: (q: string) => api.get('/atproto/search/actors', { params: { q } }),
+  searchBlueskyPosts:  (q: string) => api.get('/atproto/search/posts', { params: { q } }),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

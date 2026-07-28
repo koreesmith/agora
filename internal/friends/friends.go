@@ -53,7 +53,7 @@ func (s *Service) ListFriends(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, err := s.db.Query(`
 		SELECT u.id, u.username, u.display_name, u.avatar_url,
-		       u.bio, u.is_remote, u.remote_instance, f.created_at
+		       u.bio, u.is_remote, u.remote_instance, f.created_at, COALESCE(u.emojis::text,'{}')
 		FROM friendships f
 		JOIN users u ON (
 			CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
@@ -69,21 +69,24 @@ func (s *Service) ListFriends(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Friend struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name"`
-		AvatarURL      string `json:"avatar_url"`
-		Bio            string `json:"bio"`
-		IsRemote       bool   `json:"is_remote"`
-		RemoteInstance string `json:"remote_instance,omitempty"`
-		FriendsSince   string `json:"friends_since"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		Bio            string          `json:"bio"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance,omitempty"`
+		FriendsSince   string          `json:"friends_since"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 
 	var friends []Friend
 	for rows.Next() {
 		var f Friend
+		var emojis string
 		rows.Scan(&f.ID, &f.Username, &f.DisplayName, &f.AvatarURL,
-			&f.Bio, &f.IsRemote, &f.RemoteInstance, &f.FriendsSince)
+			&f.Bio, &f.IsRemote, &f.RemoteInstance, &f.FriendsSince, &emojis)
+		f.Emojis = json.RawMessage(emojis)
 		friends = append(friends, f)
 	}
 	if friends == nil { friends = []Friend{} }
@@ -361,7 +364,7 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, _ := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_remote, u.remote_instance, COALESCE(u.emojis::text,'{}')
 		FROM friend_group_members m
 		JOIN users u ON u.id = m.friend_id
 		WHERE m.group_id = $1
@@ -370,15 +373,20 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Member struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
+		ID             string          `json:"id"`
+		Username       string          `json:"username"`
+		DisplayName    string          `json:"display_name"`
+		AvatarURL      string          `json:"avatar_url"`
+		IsRemote       bool            `json:"is_remote"`
+		RemoteInstance string          `json:"remote_instance"`
+		Emojis         json.RawMessage `json:"emojis,omitempty"`
 	}
 	var members []Member
 	for rows.Next() {
 		var m Member
-		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL)
+		var emojis string
+		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance, &emojis)
+		m.Emojis = json.RawMessage(emojis)
 		members = append(members, m)
 	}
 	if members == nil { members = []Member{} }
@@ -398,15 +406,34 @@ func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify actually friends
-	var status string
+	// AGORA-182/AGORA-257: list membership isn't friendship-only — a
+	// followed fediverse or Bluesky account can join a list too, read-side
+	// only. There's no mutual "accept" for a one-way follow, so the bar is
+	// just "the caller follows them" — for fediverse that's an accepted
+	// ap_following row (matching ListFollowing's own join against
+	// ap_following.followed_actor_url = users.ap_actor_url); for Bluesky
+	// there's no accept concept at all (AT Proto follows are unilateral),
+	// mirroring the at_following/atproto_remote_did join feed.go's Custom
+	// Feeds "atproto_account" filter already uses for the same eligibility
+	// question.
+	var ok bool
 	s.db.QueryRow(`
-		SELECT status FROM friendships
-		WHERE (requester_id = $1 AND addressee_id = $2)
-		   OR (requester_id = $2 AND addressee_id = $1)
-	`, userID, friendID).Scan(&status)
-	if status != "accepted" {
-		writeError(w, 400, "can only add friends to groups")
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE status = 'accepted'
+			  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+		) OR EXISTS(
+			SELECT 1 FROM ap_following af
+			JOIN users u ON u.ap_actor_url = af.followed_actor_url
+			WHERE af.follower_user_id = $1 AND af.accepted = true AND u.id = $2
+		) OR EXISTS(
+			SELECT 1 FROM at_following af
+			JOIN users u ON u.atproto_remote_did = af.remote_did
+			WHERE af.local_user_id = $1 AND u.id = $2
+		)
+	`, userID, friendID).Scan(&ok)
+	if !ok {
+		writeError(w, 400, "can only add friends or followed fediverse/bluesky accounts to lists")
 		return
 	}
 

@@ -29,6 +29,15 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 	SMTPEnabled  bool
+
+	// ATProtoBotHandle/ATProtoBotAppPassword (AGORA-216): a dedicated Bluesky
+	// account the instance authenticates as solely to call
+	// app.bsky.feed.searchPosts, which 403s for anonymous callers unlike
+	// every other AT Proto read this codebase makes. Left blank, network-
+	// wide post search is simply unavailable (SearchBlueskyPosts errors),
+	// same as any other misconfigured optional integration.
+	ATProtoBotHandle      string
+	ATProtoBotAppPassword string
 }
 
 func Load() *Config {
@@ -72,6 +81,9 @@ func Load() *Config {
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@localhost"),
 		SMTPEnabled:  getEnv("SMTP_ENABLED", "false") == "true",
+
+		ATProtoBotHandle:      getEnv("ATPROTO_BOT_HANDLE", ""),
+		ATProtoBotAppPassword: getEnv("ATPROTO_BOT_APP_PASSWORD", ""),
 	}
 
 	cfg.validate()
@@ -84,7 +96,7 @@ func Load() *Config {
 // warn so local setup stays frictionless.
 func (c *Config) validate() {
 	weakSecrets := map[string]bool{
-		"": true,
+		"":               true,
 		defaultJWTSecret: true,
 		// .env.example placeholder
 		"changeme-use-a-very-long-random-string-in-production": true,

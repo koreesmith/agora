@@ -219,7 +219,8 @@ var schema = []string{
 		('smtp_password',        ''),
 		('smtp_from',            'noreply@localhost'),
 		('smtp_enabled',         'false'),
-		('logo_url',             '')
+		('logo_url',             ''),
+		('atproto_enabled',      'false')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────
@@ -744,13 +745,21 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ap_following_actor ON ap_following(followed_actor_url)`,
 
-	// AGORA-146: two new custom-feed filter types surface followed fediverse
-	// accounts through the existing custom-feeds engine rather than a new
-	// timeline UI — same drop-and-readd pattern AGORA-111 used to add
-	// include_page/exclude_page.
+	// AGORA-146/195: custom-feed filter types surface followed fediverse and
+	// (later) Bluesky accounts through the existing custom-feeds engine
+	// rather than a new timeline UI — same drop-and-readd pattern AGORA-111
+	// used to add include_page/exclude_page. This must stay the *only*
+	// DROP+ADD pair for this constraint in the whole migration list: since
+	// every statement here replays on every boot (no per-migration tracking
+	// table), a second drop-and-narrower-readd pair added later for a new
+	// filter type would transiently drop back to this older, narrower CHECK
+	// and fail on any row already using the newer type — a bug Agora's own
+	// AGORA-195 introduced by adding a second pair instead of widening this
+	// one, fixed here.
+	// Extend the list in place here going forward.
 	`ALTER TABLE custom_feed_filters DROP CONSTRAINT IF EXISTS custom_feed_filters_filter_type_check`,
 	`ALTER TABLE custom_feed_filters ADD CONSTRAINT custom_feed_filters_filter_type_check
-		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all'))`,
+		CHECK (filter_type IN ('friend_group','community_group','exclude_friend','exclude_group','post_type','include_page','exclude_page','fediverse_account','fediverse_all','atproto_account','atproto_all','exclude_fediverse_account','exclude_atproto_account'))`,
 
 	// AGORA-164: remote-actor stubs (created by upsertRemoteAPUser) never
 	// explicitly set profile_private, which defaults to TRUE — every
@@ -791,4 +800,252 @@ var schema = []string{
 		UNIQUE (local_user_id, blocker_actor_url)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ap_blocked_by_inbox ON ap_blocked_by(local_user_id, blocker_inbox_url)`,
+
+	// ── AT Protocol / Bluesky identity (AGORA-187) ────────────────────────────
+	// Separate columns from federation_public_key/federation_private_key —
+	// AT Proto signs with secp256k1, not RSA, and the key material has no PEM
+	// convention of its own (stored as hex-encoded raw bytes instead).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_did TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_private_key TEXT NOT NULL DEFAULT ''`,
+
+	// ── AT Protocol repo storage (AGORA-189) ──────────────────────────────────
+	// atproto_repo_head is the current signed commit CID (as text) — the
+	// entry point for reopening a user's repo/MST across requests, mirroring
+	// how a git ref points at a commit rather than the tree contents
+	// themselves. atproto_blocks is the content-addressed block store the MST
+	// and every record/commit object actually live in; scoped by user_id
+	// (rather than a single global cid-keyed table) so an account deletion
+	// can drop a user's entire repo with one DELETE, without having to walk
+	// the MST to figure out which blocks are reachable from their root.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_repo_head TEXT NOT NULL DEFAULT ''`,
+	`CREATE TABLE IF NOT EXISTS atproto_blocks (
+		user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		cid      TEXT NOT NULL,
+		data     BYTEA NOT NULL,
+		PRIMARY KEY (user_id, cid)
+	)`,
+
+	// ── AT Protocol post records (AGORA-190) ──────────────────────────────────
+	// Maps an Agora post to the repo record that federates it — the rkey
+	// (TID) CreateRecord mints is only ever produced at creation time, so it
+	// has to be persisted then or it's unrecoverable later. record_cid is
+	// stored alongside for AGORA-199/201's reply/like strong-refs, which
+	// need to point at a specific record version, not just "whatever's at
+	// this rkey right now."
+	`CREATE TABLE IF NOT EXISTS atproto_posts (
+		post_id     UUID PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+		user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		rkey        TEXT NOT NULL,
+		record_cid  TEXT NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// ── AT Proto firehose (AGORA-191) ─────────────────────────────────────────
+	// atproto_repo_rev tracks each repo's last-emitted rev string (distinct
+	// from atproto_repo_head, the commit *CID* used to reopen the MST) —
+	// firehose commit events carry a "since" field naming the *previous* rev,
+	// which nothing else persists. atproto_firehose_events is the durable,
+	// replayable event log a subscribeRepos client's cursor reconnects
+	// against — stored in Postgres rather than indigo's own disk/Pebble
+	// persister options, consistent with the rest of Agora's storage.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_repo_rev TEXT NOT NULL DEFAULT ''`,
+	`CREATE SEQUENCE IF NOT EXISTS atproto_firehose_seq`,
+	`CREATE TABLE IF NOT EXISTS atproto_firehose_events (
+		seq        BIGINT PRIMARY KEY,
+		data       BYTEA NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// ── Unified connections (AGORA-182) ───────────────────────────────────────
+	// show_in_feed opts a specific fediverse follow into the main feed —
+	// default off, since a followed account's posts otherwise only surface in
+	// a friend list or custom feed the user deliberately built. Mirrors
+	// notify's per-follow, off-by-default shape rather than a global switch,
+	// so a few noisy accounts don't force an all-or-nothing choice.
+	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AT Proto opt-out toggle (AGORA-193) ───────────────────────────────────
+	// Independent pair of flags from activitypub_enabled — a user/instance may
+	// want ActivityPub on and AT Proto off or vice versa, different networks
+	// with different tradeoffs. Per-account defaults true (opt-out), matching
+	// activitypub_enabled's own default; the instance-wide flag defaults off
+	// (checked in atprotoEnabled() below, absent-key-means-off) since — unlike
+	// AGORA-156's AP toggle, which defaulted on to avoid yanking discoverability
+	// out from under instances that already had federation configured — no
+	// instance has AT Proto configured yet, so there's nothing to preserve by
+	// defaulting it on.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_enabled BOOLEAN NOT NULL DEFAULT true`,
+
+	// ── Native Bluesky following (AGORA-195) ──────────────────────────────────
+	// Deliberately not reusing ap_following: an AT Proto follow is an
+	// app.bsky.graph.follow record written into the local user's own repo (an
+	// outbound repo write), not an inbox-delivered activity requiring an
+	// Accept/Reject handshake — no "accepted" boolean, since AT Proto follows
+	// are asymmetric and unilateral. rkey/record_cid mirror atproto_posts'
+	// shape, needed to delete the right repo record on unfollow. display_name/
+	// avatar_url are cached from the resolve-time profile lookup for display —
+	// there's no per-DID "cached remote user" row the way fediverse follows
+	// get one, since that's populated by inbound Note ingestion, which has no
+	// AT Proto equivalent until AGORA-197.
+	`CREATE TABLE IF NOT EXISTS at_following (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		remote_did    TEXT        NOT NULL,
+		remote_handle TEXT        NOT NULL DEFAULT '',
+		display_name  TEXT        NOT NULL DEFAULT '',
+		avatar_url    TEXT        NOT NULL DEFAULT '',
+		rkey          TEXT        NOT NULL DEFAULT '',
+		record_cid    TEXT        NOT NULL DEFAULT '',
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, remote_did)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_at_following_user ON at_following(local_user_id)`,
+
+	// atproto_account/atproto_all custom-feed filter types (analogous to
+	// fediverse_account/fediverse_all, AGORA-146) were added to the single
+	// authoritative filter_type CHECK constraint above (search
+	// custom_feed_filters_filter_type_check) rather than a new drop-and-readd
+	// pair here — see that statement's own comment for why a second pair
+	// would be a latent bug, not just redundant.
+
+	// ── Bluesky post ingestion (AGORA-197) ────────────────────────────────────
+	// Cached local stub for a followed Bluesky account, mirroring
+	// ap_actor_url's shape/index — keyed by DID (stable) rather than handle
+	// (which can change), same reasoning ap_actor_url uses actor URL over a
+	// display name.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_remote_did TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_atproto_remote_did ON users(atproto_remote_did) WHERE atproto_remote_did != ''`,
+
+	// AGORA-198: notify on a followed Bluesky account's new posts, mirroring
+	// fediverse_notifications_enabled (global kill switch) and
+	// ap_following.notify (AGORA-166's per-follow opt-in, default false since
+	// following alone shouldn't start notifying you).
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_notifications_enabled BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS notify BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-199: a Bluesky reply strong-ref needs both a URI and a CID —
+	// remote_post_id already carries the URI (shared with fediverse's own
+	// remote_post_id convention), but AP has no CID equivalent, so this
+	// column is AT-Proto-specific rather than folded into the existing one.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS remote_post_cid TEXT NOT NULL DEFAULT ''`,
+
+	// AGORA-201: tracks outbound app.bsky.feed.like/repost records this
+	// instance wrote into a local user's own repo, keyed by the target post
+	// (not a separate row id) since a user can only like/repost a given post
+	// once — needed to find the record's rkey again on unlike/unrepost,
+	// mirroring atproto_posts' role for app.bsky.feed.post records.
+	`CREATE TABLE IF NOT EXISTS atproto_reactions (
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		kind       VARCHAR(10) NOT NULL CHECK (kind IN ('like','repost')),
+		rkey       TEXT        NOT NULL,
+		record_cid TEXT        NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (post_id, user_id, kind)
+	)`,
+
+	// AGORA-205: DID-scoped block list — AT Proto identity is DID-first (a
+	// specific account), distinct from instance_bans' domain scope, which
+	// this epic reuses as-is for the PDS-host scope (a domain is still
+	// meaningful at the transport layer even though AT Proto identity isn't
+	// domain-first the way a fediverse actor's is).
+	`CREATE TABLE IF NOT EXISTS blocked_dids (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		did        TEXT        NOT NULL UNIQUE,
+		reason     TEXT        NOT NULL DEFAULT '',
+		notes      TEXT        NOT NULL DEFAULT '',
+		blocked_by UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-210: an inbound Mastodon/AP poll (a "Question" object) reports
+	// its own vote tallies per option (oneOf/anyOf[].replies.totalItems) —
+	// nobody local necessarily voted, so there's no poll_votes row to COUNT
+	// the way a local poll's vote count is computed. remote_votes caches
+	// that source-of-truth count directly; always 0 for a locally-created
+	// poll, added to the local COUNT(poll_votes) when rendering (a remote
+	// poll is read-only from Agora today, so that sum is just remote_votes
+	// in practice, but the addition keeps the query correct either way).
+	`ALTER TABLE poll_options ADD COLUMN IF NOT EXISTS remote_votes INT NOT NULL DEFAULT 0`,
+
+	// AGORA-220: a relay is a third-party server the instance actor (AGORA-219)
+	// Follows to receive its firehose — the same Follow/Accept/Reject/Undo
+	// handshake shape as ap_following, but scoped to the whole instance rather
+	// than any one user, so there's no follower_user_id-equivalent column.
+	// actor_url is resolved (and cached) lazily on first successful profile
+	// fetch — only inbox_url is known/needed to send the initial Follow.
+	`CREATE TABLE IF NOT EXISTS relays (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		inbox_url  TEXT        NOT NULL UNIQUE,
+		actor_url  TEXT        NOT NULL DEFAULT '',
+		status     VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','enabled','rejected','disabled')),
+		added_by   UUID        REFERENCES users(id) ON DELETE SET NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// The instance actor's own outbound delivery queue, mirroring
+	// ap_delivery_queue/page_ap_delivery_queue's shape — no actor_user_id/
+	// actor_page_id-equivalent column since there's only ever one instance
+	// actor to sign as.
+	`CREATE TABLE IF NOT EXISTS instance_ap_delivery_queue (
+		id           UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		inbox_url    TEXT        NOT NULL,
+		activity     JSONB       NOT NULL,
+		attempts     INT         NOT NULL DEFAULT 0,
+		last_error   TEXT        NOT NULL DEFAULT '',
+		next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_instance_ap_delivery_next ON instance_ap_delivery_queue(next_attempt ASC) WHERE attempts < 10`,
+
+	// AGORA-213: a hashtag is a first-class queryable concept, not a content
+	// substring — one row per (post, tag), tag always lowercased so lookup
+	// is a plain equality match rather than a case-insensitive scan.
+	// Extracted at creation/edit time for local posts, or from the source
+	// Note "tag" array / AT Proto "facets" data directly at ingestion time
+	// for remote posts — never re-derived from rendered HTML, which would
+	// lose or corrupt tags a renderer reformatted.
+	`CREATE TABLE IF NOT EXISTS post_hashtags (
+		post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		tag     TEXT NOT NULL,
+		PRIMARY KEY (post_id, tag)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(tag)`,
+
+	// AGORA-236: show_in_feed for a native Bluesky follow, mirroring
+	// ap_following.show_in_feed (AGORA-182) exactly — off by default, same
+	// per-follow noise-control shape as the fediverse side.
+	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-255: FEP-044f quote-post approval. A Mastodon (or other
+	// FEP-044f-aware) server sends a QuoteRequest to a post's author's inbox
+	// before it'll let its own user's quote of that post render anywhere;
+	// the author's server has to answer with an Accept whose "result" is a
+	// dereferenceable QuoteAuthorization URL. This table is that
+	// dereferenceable record — one row per (post, quoting post), so a
+	// redelivered QuoteRequest just re-resolves the same authorization
+	// (unique constraint) instead of minting a new URL every retry, and
+	// other servers re-fetching the URL later to re-verify the stamp always
+	// see the same content.
+	`CREATE TABLE IF NOT EXISTS quote_authorizations (
+		id                 UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		post_id            UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		quoting_actor_url  TEXT        NOT NULL,
+		quoting_object_url TEXT        NOT NULL,
+		created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (post_id, quoting_object_url)
+	)`,
+
+	// AGORA-258: Mastodon custom emoji — a remote actor's display_name/bio (or
+	// a post/comment's content) can reference a shortcode like ":stl_blues:"
+	// that only resolves to an image via a separate "tag" array on the same
+	// AP object (entries with type "Emoji", carrying the shortcode and an
+	// icon URL). The shortcode text itself is already stored as-is in
+	// display_name/bio/content; this column is just the resolved
+	// shortcode->image-URL map alongside it, so a renderer can substitute
+	// inline images without needing a second network fetch. Bluesky has no
+	// equivalent protocol concept, so this is fediverse-only in practice —
+	// always '{}' for a native Bluesky stub/post.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
 }

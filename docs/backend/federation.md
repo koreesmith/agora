@@ -1,12 +1,13 @@
 # Federation Service
 
 **Package:** `internal/federation`
-**Files:** `internal/federation/federation.go`, `internal/federation/activitypub.go`
+**Files:** `internal/federation/federation.go`, `internal/federation/activitypub.go`, `internal/federation/relay.go`
 
-Agora federates two ways, side by side:
+Agora federates three ways, side by side:
 
 1. **Standard ActivityPub** — talks to the real fediverse (Mastodon, Pleroma, Akkoma, etc.). This is the primary, actively-developed protocol and the subject of most of this document.
-2. **A legacy custom Agora-to-Agora protocol** — Ed25519-signed, pre-dates ActivityPub support, and only ever talks to other Agora instances. Still live (see [Legacy protocol](#legacy-agora-to-agora-protocol) below) but not being extended further.
+2. **Native AT Protocol** — Agora acts as its own PDS and talks directly to Bluesky/the AT Proto network, no bridge involved. Separate service, separate document: see [AT Protocol Service](atproto.md).
+3. **A legacy custom Agora-to-Agora protocol** — Ed25519-signed, pre-dates ActivityPub support, and only ever talks to other Agora instances. Still live (see [Legacy protocol](#legacy-agora-to-agora-protocol) below) but not being extended further.
 
 ## Constructor
 
@@ -38,6 +39,8 @@ There's also a **per-account** opt-out: `users.activitypub_enabled` (default `tr
 | `GET /.well-known/nodeinfo` → `GET /nodeinfo/2.0` | NodeInfo (AGORA-171) — software name/version, protocols, user count. Used by instance directories and Mastodon's own "About this server" panel, not by anything Agora itself calls. |
 | `GET /federation/users/{handle}` | Content-negotiated: `Accept: application/activity+json` (or `application/ld+json`) returns the actor document (`writeActorObject`); anything else returns the legacy flat-JSON profile (`GetUser`). |
 | `GET /federation/pages/{slug}` | Actor document for a page — always ActivityPub JSON, no legacy fallback (pages never had one). |
+| `GET /federation/instance` | The **instance actor** (AGORA-219) — a single actor document representing the instance itself, not any one user. Used for instance-level operations that shouldn't be attributed to a specific admin: relay subscriptions (below) and delivery to instances that require every requester to be a signable actor. |
+| `GET /federation/instance/outbox` | Always an empty `OrderedCollection` — the instance actor never authors content, only relay Follow/Undo handshakes. |
 
 The actor document includes `publicKey` (RSA, PEM-encoded — see below), `inbox`, `outbox`, `followers`, and an `icon` if the account has an avatar.
 
@@ -68,7 +71,7 @@ Every outbound POST (activity delivery) and every outbound GET that needs to sur
 | `Undo(Announce)` | `handleInboundUndoAnnounce` | Removes it. |
 | `Accept`/`Reject` (of a `Follow`) | `handleInboundAcceptFollow`/`handleInboundRejectFollow` | Confirms or clears a pending outbound follow in `ap_following`. |
 
-An admin-blocked instance (`federated_instances.status = 'blocked'`) is checked before `Follow` and `Create` are processed — a blocked instance can't gain a new follower or inject content, on top of whatever per-actor block exists.
+**Instance blocking (unified in AGORA-177).** Two independent tables both express an instance-level block: `federated_instances.status = 'blocked'` (managed from Admin → Federation) and `instance_bans` (managed from Admin → Fediverse → Instance Bans). Before AGORA-177 these were checked inconsistently — `instance_bans` in particular was **never actually enforced anywhere**. `isInstanceBlocked(domain)` (`federation.go`) now checks both tables with one call, and is consulted at every relevant point: inbound `Follow`, inbound replies, inbound `Like`/`Announce` target resolution, mention resolution, actor lookup, outbound follow, and the legacy protocol's own inbox + signature verification. Neither table needs a row in the other to take effect. `BanInstance` normalizes its input (strips scheme/trailing slash, lowercases) so a pasted URL and a bare domain hit the same row. The AT Proto side reuses `instance_bans` as its own PDS-host block scope — see [AT Protocol Service → Blocking](atproto.md#blocking).
 
 ## Outbound activities
 
@@ -96,6 +99,27 @@ Every one of these re-derives current visibility/opt-out state at send time rath
 `ap_delivery_queue` (users) / `page_ap_delivery_queue` (pages) hold pending deliveries; `drainAPQueue`/`drainPageAPQueue` process them with exponential backoff, abandoning after enough failed attempts. HTTP Signatures are computed at *send* time (a fresh `Date` header each attempt), not once at enqueue time.
 
 `enqueueAPDelivery` — the single function every outbound path above funnels through — checks `ap_blocked_by` before queuing anything: if the destination inbox belongs to an actor who has blocked this local user, the send is silently skipped. This is the one central guard rather than a check duplicated at each call site.
+
+## Quote posts (FEP-044f)
+
+AGORA-255 adds outbound support for [FEP-044f](https://w3id.org/fep/044f) quote posts, the informal ActivityPub convention Mastodon 4.4+ uses. Every outbound `Note` (`buildNoteObject` — posts, comments, page posts, Outbox history) now carries an `interactionPolicy.canQuote` allowing anyone to quote it, matching the openness Agora already gives boosts. Inbound `QuoteRequest` activities are accepted and recorded, and `GET /federation/users/{handle}/posts/{postID}/quote-authorizations/{authID}` (`GetQuoteAuthorization`) serves a dereferenceable `QuoteAuthorization` object other servers verify against before rendering the quote. This is what lets a Mastodon user quote an Agora post instead of only being able to boost it.
+
+For servers that don't implement FEP-044f at all, a quote-share still degrades gracefully: `quotedPostURL()` appends a `"RE: <url>"` fallback line to the outbound Note's content. When the quoted post originated on Bluesky, `remote_post_id` holds a raw AT-URI (`at://did:plc:.../app.bsky.feed.post/rkey`) — meaningless to a human and unlinkable by the plain-URL linkifier — so `blueskyATURIToWebURL()` (AGORA-262) converts it to `https://bsky.app/profile/{did}/post/{rkey}` before appending; a DID alone resolves fine on bsky.app without a separate handle lookup.
+
+## Remote profile stats
+
+Agora never tracks a remote account's actual social graph, so a fediverse profile's follower/following/post counts shown on its profile page are a **live fetch**, not cached columns: `GetRemoteActorStats(actorURL)` dereferences the actor's `followers`/`following`/`outbox` collection URLs and reads each one's `totalItems`, independently and best-effort per collection (AGORA-253). The AT Proto equivalent, `atproto.Service.GetRemoteActorStats(did)`, does the same job with a single `app.bsky.actor.getProfile` call.
+
+## Fediverse relays
+
+AGORA-219–223 add relay support, modeled on Mastodon's own admin Relays feature: an admin enters a relay's **inbox URL** directly (relay implementations vary too much for actor-URL resolution to be reliable), and Agora subscribes via the same "object: Public collection" convention most relay software (Mastodon's bundled relay, `activityrelay`, `aoderrelay`, ...) expects.
+
+- **Instance actor** (AGORA-219, `GetInstanceActor`/`InstanceActorOutbox` above) — relay subscription is an instance-level concern, signed as the instance actor rather than any one admin's own account.
+- **Subscription handshake** (AGORA-220): `relays` table tracks `inbox_url`, resolved `actor_url` (cached lazily on first successful profile fetch), and `status` (`pending → enabled`, or `rejected`/`disabled`). `AddRelay` sends a `Follow` from the instance actor; some relays never reply at all and just start forwarding, so `pending` is not treated as an error state. `DisableRelay`/`DeleteRelay` send `Undo(Follow)`.
+- **Outbound** (AGORA-221): `enabledRelayInboxes()` adds every enabled relay's inbox as an extra recipient of a local public post's normal delivery (`BroadcastPublicPost`/`Update`/`Delete`), delivered signed as the post's own author — not the instance actor — since at least one popular relay implementation verifies a delivered activity's `attributedTo`/`actor` against the HTTP signature's own `keyId` the same strict way Agora's own inbound handling does.
+- **Inbound** (AGORA-222): `Create`/`Announce` activities arriving from a subscribed relay are ingested the same way a directly-followed account's posts are.
+- **Delivery queue**: the instance actor gets its own `instance_ap_delivery_queue`, mirroring `ap_delivery_queue`'s shape but with no per-user/per-page owner column — there's only ever one instance actor to sign as.
+- **Admin routes**: `RegisterAdminRoutes` (`relay.go`) — see [Admin API → Relays](../api/admin.md#relays).
 
 ## Custom feeds integration
 

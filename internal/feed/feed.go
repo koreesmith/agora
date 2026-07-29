@@ -2043,13 +2043,27 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
-	// Check the original post exists and that the sharer can see it
+	// Check the original post exists and that the sharer can see it.
+	//
+	// Reposting a repost collapses to reposting the underlying original
+	// post instead of being rejected — the same behavior Bluesky/Mastodon/
+	// Twitter themselves have, since none of them can represent "a repost
+	// of a repost" as a distinct thing either; boosting a boost just boosts
+	// the original. Without this, sharing what's displayed as "person A
+	// reposted person B" (an ingested Bluesky/Fediverse repost, itself
+	// stored as a repost row per AGORA-265/266) always 404'd, since that
+	// row's own repost_of_id is never NULL. The LEFT JOIN resolves at most
+	// one level — ingestion never creates a repost row whose repost_of_id
+	// points at another repost row, so a deeper chain can't occur.
 	var origAuthorID, origVisibility string
 	var origGroupID *string
 	err := s.db.QueryRow(`
-		SELECT author_id, visibility, community_group_id
-		FROM posts WHERE id = $1 AND deleted_at IS NULL AND repost_of_id IS NULL
-	`, repostOfID).Scan(&origAuthorID, &origVisibility, &origGroupID)
+		SELECT COALESCE(rp.author_id, p.author_id), COALESCE(rp.visibility, p.visibility),
+		       COALESCE(rp.community_group_id, p.community_group_id), COALESCE(rp.id, p.id)
+		FROM posts p
+		LEFT JOIN posts rp ON rp.id = p.repost_of_id AND rp.deleted_at IS NULL
+		WHERE p.id = $1 AND p.deleted_at IS NULL AND (p.repost_of_id IS NULL OR rp.id IS NOT NULL)
+	`, repostOfID).Scan(&origAuthorID, &origVisibility, &origGroupID, &repostOfID)
 	if err != nil {
 		writeError(w, 404, "post not found or cannot be shared"); return
 	}

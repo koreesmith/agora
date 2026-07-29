@@ -38,6 +38,9 @@ func RegisterAdminRoutes(r chi.Router, s *Service) {
 	r.Post("/admin/relays/{id}/enable", s.EnableRelay)
 	r.Post("/admin/relays/{id}/disable", s.DisableRelay)
 	r.Delete("/admin/relays/{id}", s.DeleteRelay)
+	// AGORA-270 follow-up: one-time re-fetch of the real origin timestamp
+	// for already-ingested posts (backfill.go).
+	r.Post("/admin/federation/backfill-published-at", s.BackfillPublishedAt)
 }
 
 // enabledRelayInboxes returns every currently-enabled relay's inbox URL —

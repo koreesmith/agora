@@ -206,6 +206,9 @@ func main() {
 			// AGORA-220: relay management needs the instance actor's signing
 			// key (AGORA-219), which only exists in the federation package.
 			federation.RegisterAdminRoutes(r, fedSvc)
+			// AGORA-270 follow-up: published_at backfill needs the AppView
+			// client, which only exists in the atproto package.
+			atproto.RegisterAdminRoutes(r, atprotoSvc)
 		})
 	})
 

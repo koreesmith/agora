@@ -206,14 +206,14 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+			       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-			       rp.content, rp.image_url, rp.created_at,
+			       rp.content, rp.image_url, rp.created_at, rp.published_at,
 			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -247,7 +247,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
 			    )
 			  )
-			ORDER BY p.created_at DESC
+			ORDER BY p.published_at DESC
 			LIMIT $2 OFFSET $3
 		`, userID, limit, offset, listID)
 	} else {
@@ -256,14 +256,14 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 			       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-			       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+			       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 			       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 			       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 			       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 			       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 			       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 			       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-			       rp.content, rp.image_url, rp.created_at,
+			       rp.content, rp.image_url, rp.created_at, rp.published_at,
 			       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 			       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 			       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -351,7 +351,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			      WHERE cgm.group_id = p.community_group_id AND cgm.user_id = $1
 			    )
 			  )
-			ORDER BY p.created_at DESC
+			ORDER BY p.published_at DESC
 			LIMIT $2 OFFSET $3
 		`, userID, limit, offset)
 	}
@@ -603,14 +603,14 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at,
+		       rp.content, rp.image_url, rp.created_at, rp.published_at,
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -681,7 +681,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		    )
 		  )
 		  %s
-		ORDER BY p.created_at DESC
+		ORDER BY p.published_at DESC
 		LIMIT $2 OFFSET $3
 	`, extra)
 
@@ -730,14 +730,14 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes   WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts   WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts   WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at,
+		       rp.content, rp.image_url, rp.created_at, rp.published_at,
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -759,7 +759,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		  AND p.community_group_id IS NULL
 		  AND p.page_id IS NULL
 		  %s
-		ORDER BY p.created_at DESC
+		ORDER BY p.published_at DESC
 		LIMIT $2 OFFSET $3
 	`, blockClause), viewerParam, limit, offset)
 	if err != nil {
@@ -938,14 +938,14 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at,
+		       rp.content, rp.image_url, rp.created_at, rp.published_at,
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       NULL::uuid, NULL::text, NULL::text, 'approved'::text,
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -960,7 +960,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
-		ORDER BY p.created_at DESC LIMIT $3 OFFSET $4
+		ORDER BY p.published_at DESC LIMIT $3 OFFSET $4
 	`, viewerParam, authorID, limit, offset)
 	if err != nil {
 		writeError(w, 500, "db error")
@@ -1279,14 +1279,14 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			   cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning, p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes    WHERE post_id = p.id AND user_id = $2) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $2) AS reposted,
 		       rp_u.username, rp_u.display_name, rp_u.pronouns, rp_u.avatar_url,
-		       rp.content, rp.image_url, rp.created_at,
+		       rp.content, rp.image_url, rp.created_at, rp.published_at,
 		       rp.link_url, rp.link_title, rp.link_description, rp.link_image, rp.link_domain,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -1713,14 +1713,14 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -1734,7 +1734,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 		WHERE p.wall_user_id = $2
 		  AND p.deleted_at IS NULL
 		  AND `+statusFilter+`
-		ORDER BY p.created_at DESC
+		ORDER BY p.published_at DESC
 		LIMIT 50
 	`, viewerID, wallOwnerID)
 	if err != nil {
@@ -1757,14 +1757,14 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 		       cg.name, cg.slug,
 		       p.repost_of_id, p.is_remote, p.remote_instance, p.remote_post_id,
-		       p.created_at, p.updated_at, p.edited_at, p.content_warning,
+		       p.created_at, p.published_at, p.updated_at, p.edited_at, p.content_warning,
 		       p.link_url, p.link_title, p.link_description, p.link_image, p.link_domain,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts WHERE parent_id = p.id AND deleted_at IS NULL) AS comment_count,
 		       (SELECT COUNT(*) FROM posts WHERE repost_of_id = p.id) AS repost_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
 		       EXISTS(SELECT 1 FROM posts rp WHERE rp.repost_of_id = p.id AND rp.author_id = $1) AS reposted,
-		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz,
+		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz,
 		       NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
 		       p.wall_user_id, wu.username, wu.display_name, COALESCE(p.wall_status,'approved'),
 		       p.page_id, pg.slug, pg.display_name, pg.avatar_url,
@@ -1776,7 +1776,7 @@ func (s *Service) GetWallQueue(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users wu ON wu.id = p.wall_user_id
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.wall_user_id = $1 AND p.wall_status = 'pending' AND p.deleted_at IS NULL
-		ORDER BY p.created_at ASC
+		ORDER BY p.published_at ASC
 	`, userID)
 	if err != nil {
 		writeError(w, 500, "db error"); return
@@ -2131,6 +2131,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		Content        string         `json:"content"`
 		ImageURL       string         `json:"image_url"`
 		CreatedAt      string         `json:"created_at"`
+		PublishedAt    string         `json:"published_at"`
 		EditedAt       *string        `json:"edited_at,omitempty"`
 		ReactionCount  int            `json:"reaction_count"`
 		MyReaction     string         `json:"my_reaction"`
@@ -2149,7 +2150,7 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		var myReaction *string
 		var authorEmojis, contentEmojis string
 		rows.Scan(&c.ID, &c.AuthorID, &c.Username, &c.DisplayName, &c.Pronouns, &c.AvatarURL,
-			&c.Content, &c.ImageURL, &c.CreatedAt, &c.EditedAt, &c.ReactionCount, &myReaction,
+			&c.Content, &c.ImageURL, &c.CreatedAt, &c.PublishedAt, &c.EditedAt, &c.ReactionCount, &myReaction,
 			&authorEmojis, &contentEmojis)
 		if myReaction != nil {
 			c.MyReaction = *myReaction
@@ -2164,14 +2165,14 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 
 	commentSQL := `
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
-		       p.content, p.image_url, p.created_at, p.edited_at,
+		       p.content, p.image_url, p.created_at, p.published_at, p.edited_at,
 		       (SELECT COUNT(*) FROM reactions WHERE post_id = p.id) AS reaction_count,
 		       (SELECT reaction_type FROM reactions WHERE post_id = p.id AND user_id = $1 LIMIT 1) AS my_reaction,
 		       COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		WHERE p.parent_id = $2 AND p.deleted_at IS NULL AND u.deletion_scheduled_at IS NULL
-		ORDER BY p.created_at ASC
+		ORDER BY p.published_at ASC
 	`
 
 	// Top-level comments
@@ -2602,6 +2603,7 @@ type Post struct {
 	RemoteInstance string  `json:"remote_instance,omitempty"`
 	RemotePostID   string  `json:"remote_url,omitempty"`
 	CreatedAt      string  `json:"created_at"`
+	PublishedAt    string  `json:"published_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	EditedAt       *string `json:"edited_at,omitempty"`
 	ContentWarning string  `json:"content_warning"`
@@ -2650,6 +2652,10 @@ type Post struct {
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
 	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
+	// AGORA-270: the quoted/reposted post's real origin publish time —
+	// distinct from RepostCreatedAt (when Agora ingested it), mirroring the
+	// same CreatedAt/PublishedAt split on the top-level post.
+	RepostPublishedAt    *string `json:"repost_published_at,omitempty"`
 	// AGORA-252: the quoted post's own link preview — distinct from the
 	// quoting post's own link_url/etc (already scanned separately below),
 	// needed so a quote of a link-only post (no image, e.g. a Bluesky quote
@@ -2695,12 +2701,12 @@ func scanPosts(rows interface {
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
-			&p.CreatedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
+			&p.CreatedAt, &p.PublishedAt, &p.UpdatedAt, &p.EditedAt, &p.ContentWarning,
 			&p.LinkURL, &p.LinkTitle, &p.LinkDescription, &p.LinkImage, &p.LinkDomain,
 			&p.LikeCount, &p.CommentCount, &p.RepostCount,
 			&p.Liked, &p.Reposted,
 			&p.RepostAuthorUsername, &p.RepostAuthorName, &p.RepostAuthorPronouns, &p.RepostAuthorAvatar,
-			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt,
+			&p.RepostContent, &p.RepostImageURL, &p.RepostCreatedAt, &p.RepostPublishedAt,
 			&p.RepostLinkURL, &p.RepostLinkTitle, &p.RepostLinkDescription, &p.RepostLinkImage, &p.RepostLinkDomain,
 			&p.WallUserID, &p.WallUsername, &p.WallDisplayName, &p.WallStatus,
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,

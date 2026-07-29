@@ -353,7 +353,7 @@ function PostResult({ post: p, query }: { post: any, query: string }) {
         <span className="text-xs text-agora-400">@{p.username}</span>
         <span className="text-xs text-agora-400 ml-auto flex items-center gap-1">
           <Clock size={11} />
-          {formatDistanceToNow(new Date(p.created_at), { addSuffix: true })}
+          {formatDistanceToNow(new Date(p.published_at || p.created_at), { addSuffix: true })}
         </span>
       </div>
       <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-3">

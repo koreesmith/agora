@@ -31,6 +31,18 @@ func displayNameOr(displayName, fallback string) string {
 	return fallback
 }
 
+// parseBlueskyTime parses a record's client-declared createdAt (RFC3339,
+// per the app.bsky.feed.post lexicon) into the real origin publish time
+// (AGORA-270). Falls back to now for an empty or malformed value — a
+// missing/bad timestamp shouldn't block ingestion, and "just ingested" is
+// the same fallback creating a local post already uses.
+func parseBlueskyTime(createdAt string) time.Time {
+	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
 // getOrCreateRemoteATUser mirrors federation's getOrCreateRemoteAPUser/
 // upsertRemoteAPUser (internal/federation/activitypub.go) — a cached local
 // stub `users` row for a remote account. Keyed by DID (atproto_remote_did)
@@ -172,11 +184,11 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
 		RETURNING id
-	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels)).Scan(&postID)
+	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt)).Scan(&postID)
 	if err != nil || postID == "" {
 		return ""
 	}
@@ -328,11 +340,11 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels)).Scan(&postID)
+		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
@@ -411,11 +423,11 @@ func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *
 
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
 		RETURNING id
-	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels)).Scan(&postID)
+	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
 	if err != nil || postID == "" {
 		return
 	}
@@ -450,11 +462,11 @@ func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *
 
 	var repostID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance)
-		VALUES ($1, 'public', $2, true, $3, 'bsky.app')
+		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance, published_at)
+		VALUES ($1, 'public', $2, true, $3, 'bsky.app', $4)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, reposterID, postID, repostURI).Scan(&repostID)
+	`, reposterID, postID, repostURI, parseBlueskyTime(reason.IndexedAt)).Scan(&repostID)
 	if err != nil {
 		return // ErrNoRows on redelivery — expected, not an error
 	}

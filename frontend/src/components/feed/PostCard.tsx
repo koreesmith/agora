@@ -80,6 +80,7 @@ interface Post {
   page_name?: string
   page_avatar_url?: string
   created_at: string
+  published_at?: string // AGORA-270: real origin publish time for a remote post, distinct from when Agora ingested it
   edited_at?: string
   // Custom emoji (AGORA-258)
   author_emojis?: Record<string, string>
@@ -617,7 +618,7 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               <Link to={`/post/${post.id}`}
                 className="text-agora-400 text-xs hover:underline">
-                {formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}
+                {formatDistanceToNow(new Date(post.published_at || post.created_at), { addSuffix: true })}
               </Link>
               <span className="text-agora-300 dark:text-agora-600 flex items-center gap-0.5 text-xs">
                 {visIcons[post.visibility]}

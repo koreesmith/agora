@@ -557,7 +557,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
         {/* Action row */}
         <div className="flex items-center gap-3 mt-1 px-1">
           <span className="text-xs text-agora-400">
-            {formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}
+            {formatDistanceToNow(new Date(c.published_at || c.created_at), { addSuffix: true })}
           </span>
           {c.edited_at && <span className="text-xs text-agora-400 italic">edited</span>}
 

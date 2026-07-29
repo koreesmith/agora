@@ -1342,6 +1342,18 @@ func hashtagsFromAPTags(entries []apTagEntry) []string {
 	return tags
 }
 
+// parseAPTime parses an ActivityStreams object's "published" field (ISO
+// 8601/RFC3339, per the Note/Create vocabulary) into the real origin
+// publish time (AGORA-270). Falls back to now for an empty or malformed
+// value — a missing/bad timestamp shouldn't block ingestion, and "just
+// ingested" is the same fallback creating a local post already uses.
+func parseAPTime(published string) time.Time {
+	if t, err := time.Parse(time.RFC3339, published); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
 // storeHashtags mirrors feed.Service's own helper of the same name —
 // replaces postID's stored hashtag set, the same replace-not-merge
 // convention this file already uses for a Note's attachments/poll options
@@ -1459,6 +1471,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		AnyOf        []apPollOption `json:"anyOf"`
 		EndTime      string         `json:"endTime"`
 		Name         string         `json:"name"` // AGORA-268: set only on a poll-vote Note, never a normal reply
+		Published    string         `json:"published"` // AGORA-270: origin publish time
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1497,7 +1510,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// practice (no real AP client posts a poll as a reply), so poll data
 	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 		return
 	}
 
@@ -1522,12 +1535,12 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	domain := domainFromURL(note.ID)
 	var commentID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
 	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary),
-		emojisJSON(emojisFromAPTags(note.Tag))).Scan(&commentID)
+		emojisJSON(emojisFromAPTags(note.Tag)), parseAPTime(note.Published)).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1672,7 +1685,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1687,11 +1700,11 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis), publishedAt).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -2210,11 +2223,11 @@ func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, o
 	imageURLs, videoURL := matchAttachments(note.Attachment)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteAuthorID, HTMLToPlainText(note.Content), note.ID, domain, HTMLToPlainText(note.Summary), emojisJSON(emojisFromAPTags(note.Tag))).Scan(&postID)
+	`, remoteAuthorID, HTMLToPlainText(note.Content), note.ID, domain, HTMLToPlainText(note.Summary), emojisJSON(emojisFromAPTags(note.Tag)), parseAPTime(note.Published)).Scan(&postID)
 	if err != nil {
 		// Already ingested (e.g. a previous boost of the same post, or a
 		// relay forwarded it too) — look up its id so the repost below still

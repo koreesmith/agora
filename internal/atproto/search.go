@@ -1,6 +1,7 @@
 package atproto
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -92,6 +93,53 @@ func (s *Service) SearchBlueskyActors(w http.ResponseWriter, r *http.Request) {
 		results = append(results, res)
 	}
 	writeJSON(w, 200, map[string]any{"actors": results})
+}
+
+// SearchActorsForMention is SearchBlueskyActors' logic reused for the
+// @-mention autocomplete dropdown (AGORA-274) instead of the dedicated
+// Bluesky search screen — same live, network-wide app.bsky.actor.searchActors
+// call, same enable/block-list gating, just returning plain slices instead
+// of writing an HTTP response, so internal/users can call it directly
+// through the atprotoSyncer interface without this package needing to know
+// about that package's types. disabled distinguishes "Bluesky unavailable
+// to this viewer" from "no matches" the same way the HTTP handler's
+// {"disabled": true} does.
+func (s *Service) SearchActorsForMention(ctx context.Context, viewerID, q string, limit int) (handles, displayNames, avatarURLs []string, disabled bool) {
+	if !s.atprotoEnabled() {
+		return nil, nil, nil, true
+	}
+	var viewerAtprotoEnabled bool
+	s.db.QueryRow(`SELECT atproto_enabled FROM users WHERE id = $1`, viewerID).Scan(&viewerAtprotoEnabled)
+	if !viewerAtprotoEnabled {
+		return nil, nil, nil, true
+	}
+	if len(q) < 2 {
+		return nil, nil, nil, false
+	}
+	if limit <= 0 || limit > 100 {
+		limit = defaultActorSearchLimit
+	}
+
+	out, err := bsky.ActorSearchActors(ctx, s.appviewClient(), "", int64(limit), q, "")
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	for _, a := range out.Actors {
+		if a == nil || s.isBlueskyActorBlocked(a.Did, a.Handle) {
+			continue
+		}
+		var displayName, avatarURL string
+		if a.DisplayName != nil {
+			displayName = *a.DisplayName
+		}
+		if a.Avatar != nil {
+			avatarURL = *a.Avatar
+		}
+		handles = append(handles, a.Handle)
+		displayNames = append(displayNames, displayName)
+		avatarURLs = append(avatarURLs, avatarURL)
+	}
+	return handles, displayNames, avatarURLs, false
 }
 
 const defaultPostSearchLimit = 25

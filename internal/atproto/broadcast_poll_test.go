@@ -81,3 +81,45 @@ func TestBroadcastPostFlattensPollForBluesky(t *testing.T) {
 		t.Fatalf("flattened poll text mismatch:\n got:  %q\n want: %q", got, want)
 	}
 }
+
+// AGORA-277: a URL appended to a Bluesky post's plain "text" (the poll's
+// "Vote:" link, or the length-limit fallback link) rendered as inert text —
+// Bluesky clients only make a substring clickable if a byte-range facet
+// says so, unlike Mastodon which auto-linkifies plain-text URLs in a Note's
+// HTML content. Verifies the facet's byte offsets land exactly on the URL,
+// including when multibyte characters (the poll's "☐") precede it — a rune
+// offset would land short since "☐" is 3 bytes but 1 rune.
+func TestLinkFacetsForURLs(t *testing.T) {
+	permalink := "https://agora.example/post/abc123"
+	text := flattenPollForBluesky("cats or dogs?", []string{"Cats", "Dogs"}, permalink)
+
+	facets := linkFacetsForURLs(text)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got %d: %+v", len(facets), facets)
+	}
+	f := facets[0]
+	got := text[f.Index.ByteStart:f.Index.ByteEnd]
+	if got != permalink {
+		t.Fatalf("facet byte range covers %q, want %q", got, permalink)
+	}
+	link := f.Features[0].RichtextFacet_Link
+	if link == nil || link.Uri != permalink {
+		t.Fatalf("expected link feature with uri %q, got %+v", permalink, link)
+	}
+}
+
+// Trailing sentence punctuation right after a URL shouldn't be swept into
+// the facet's link — mirrors linkifyURLs' equivalent trim on the
+// ActivityPub/HTML side.
+func TestLinkFacetsForURLsTrimsTrailingPunctuation(t *testing.T) {
+	text := "check this out: https://agora.example/post/abc123."
+	facets := linkFacetsForURLs(text)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got %d", len(facets))
+	}
+	want := "https://agora.example/post/abc123"
+	got := text[facets[0].Index.ByteStart:facets[0].Index.ByteEnd]
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

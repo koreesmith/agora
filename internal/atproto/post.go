@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +40,43 @@ func truncateForBluesky(content, permalinkURL string) string {
 		budget = 0
 	}
 	return strings.TrimRight(string(runes[:budget]), " \n\t") + suffix
+}
+
+// blueskyURLRe matches a bare URL in a record's plain "text" — used to build
+// link facets (AGORA-277). Unlike ActivityPub's Note.content (HTML, where a
+// plain-text URL still renders as visible text but isn't a clickable link
+// either), Bluesky clients render "text" completely literally with no
+// auto-linking of their own: a URL is only clickable if a byte-range facet
+// says so explicitly. Same character class federation.linkifyURLs already
+// uses for the equivalent HTML-side gap.
+var blueskyURLRe = regexp.MustCompile(`https?://[^\s]+`)
+
+// linkFacetsForURLs finds every bare URL in text and returns the
+// app.bsky.richtext.facet#link facets needed to make each one clickable —
+// without these, a URL we append ourselves (the Bluesky-length-limit
+// fallback link, or a flattened poll's "Vote:" link) renders as inert text
+// on Bluesky, unlike Mastodon which auto-linkifies plain-text URLs in an
+// ActivityPub Note's HTML content. Byte offsets, not rune offsets, per the
+// app.bsky.richtext.facet lexicon (UTF-8 byte indexing).
+func linkFacetsForURLs(text string) []*bsky.RichtextFacet {
+	var facets []*bsky.RichtextFacet
+	for _, loc := range blueskyURLRe.FindAllStringIndex(text, -1) {
+		start, end := loc[0], loc[1]
+		// Trailing punctuation likely belongs to the sentence, not the URL —
+		// same trim federation.linkifyURLs already does for the same reason.
+		trimmed := strings.TrimRight(text[start:end], ".,!?)")
+		end = start + len(trimmed)
+		facets = append(facets, &bsky.RichtextFacet{
+			Index: &bsky.RichtextFacet_ByteSlice{ByteStart: int64(start), ByteEnd: int64(end)},
+			Features: []*bsky.RichtextFacet_Features_Elem{{
+				RichtextFacet_Link: &bsky.RichtextFacet_Link{
+					LexiconTypeID: "app.bsky.richtext.facet#link",
+					Uri:           trimmed,
+				},
+			}},
+		})
+	}
+	return facets
 }
 
 // flattenPollForBluesky renders a poll as plain text (AGORA-277) — AT
@@ -131,12 +169,14 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		text = flattenPollForBluesky(content, pollOptions, permalink)
 	}
 
+	finalText := truncateForBluesky(text, permalink)
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(text, permalink),
+		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
+		Facets:        linkFacetsForURLs(finalText),
 	}
 	recordCid, rkey, err := repo.CreateRecord(ctx, "app.bsky.feed.post", rec)
 	if err != nil {
@@ -215,12 +255,14 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		text = flattenPollForBluesky(content, pollOptions, permalink)
 	}
 
+	finalText := truncateForBluesky(text, permalink)
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(text, permalink),
+		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
+		Facets:        linkFacetsForURLs(finalText),
 	}
 	path := "app.bsky.feed.post/" + rkey
 	recordCid, err := repo.UpdateRecord(ctx, path, rec)

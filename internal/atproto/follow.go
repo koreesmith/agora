@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -105,7 +106,7 @@ func (s *Service) GetRemoteActorStats(did string) (followers, following, posts i
 // — the AT Proto counterpart to federation's APLookup, resolving a handle or
 // DID to a live preview before the caller decides to follow.
 func (s *Service) ResolveBlueskyHandle(w http.ResponseWriter, r *http.Request) {
-	actor := r.URL.Query().Get("handle")
+	actor := strings.TrimPrefix(r.URL.Query().Get("handle"), "@")
 	if actor == "" {
 		writeError(w, 400, "handle required")
 		return

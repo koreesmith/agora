@@ -661,17 +661,68 @@ func guessImageMediaType(url string) string {
 // DeliverReply (comment replies).
 func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
 	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	return s.wrapCreateActivity(actor, postID, note)
+}
+
+// outboundPoll holds the data needed to render a local poll as an
+// ActivityPub Question object (AGORA-277) — the outbound mirror of
+// parseAPPoll/applyInboundPoll (AGORA-210), which already parse this same
+// shape coming from a remote Mastodon poll.
+type outboundPoll struct {
+	Options   []string
+	Multiple  bool
+	ExpiresAt *time.Time
+}
+
+// buildQuestionObject builds the ActivityPub Question object for a poll
+// post: oneOf for single-choice, anyOf for multiple-choice, per the
+// Mastodon/ActivityStreams poll convention parseAPPoll already expects on
+// the inbound side.
+func (s *Service) buildQuestionObject(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildNoteObject(actor, postID, content, createdAt, "", contentWarning)
+	note["type"] = "Question"
+	options := make([]map[string]any, len(poll.Options))
+	for i, opt := range poll.Options {
+		options[i] = map[string]any{
+			"type": "Note",
+			"name": opt,
+			"replies": map[string]any{
+				"type":       "Collection",
+				"totalItems": 0,
+			},
+		}
+	}
+	if poll.Multiple {
+		note["anyOf"] = options
+	} else {
+		note["oneOf"] = options
+	}
+	if poll.ExpiresAt != nil {
+		note["endTime"] = poll.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	note["votersCount"] = 0
+	return note
+}
+
+// buildCreateActivityForPoll is BroadcastPublicPost's poll-aware counterpart
+// to buildCreateActivity (AGORA-277) — same Create wrapper, but around a
+// Question object instead of a Note so the poll federates as an actual,
+// votable poll rather than silently degrading to plain text.
+func (s *Service) buildCreateActivityForPoll(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildQuestionObject(actor, postID, content, createdAt, contentWarning, poll)
+	return s.wrapCreateActivity(actor, postID, note)
+}
+
+func (s *Service) wrapCreateActivity(actor, postID string, note map[string]any) map[string]any {
 	objID := actor + "/posts/" + postID
-	to := note["to"]
-	cc := note["cc"]
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
 		"id":        objID + "/activity",
 		"type":      "Create",
 		"actor":     actor,
 		"published": note["published"],
-		"to":        to,
-		"cc":        cc,
+		"to":        note["to"],
+		"cc":        note["cc"],
 		"object":    note,
 	}
 }
@@ -680,6 +731,21 @@ func (s *Service) buildCreateActivity(actor, postID, content string, createdAt t
 // when a previously-federated post is edited (AGORA-150).
 func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
 	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	return s.wrapUpdateActivity(actor, postID, note)
+}
+
+// buildUpdateActivityForPoll is BroadcastUpdatePost's poll-aware counterpart
+// to buildUpdateActivity (AGORA-277): an edited poll post must keep being
+// sent as a Question, not degrade back to a Note, since Mastodon already
+// knows this object's id as a Question from the original Create — an Update
+// changing its type would likely be rejected or ignored on arrival rather
+// than actually clearing the poll.
+func (s *Service) buildUpdateActivityForPoll(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildQuestionObject(actor, postID, content, createdAt, contentWarning, poll)
+	return s.wrapUpdateActivity(actor, postID, note)
+}
+
+func (s *Service) wrapUpdateActivity(actor, postID string, note map[string]any) map[string]any {
 	objID := actor + "/posts/" + postID
 	to := note["to"]
 	cc := note["cc"]
@@ -3016,17 +3082,36 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, pollMultiple bool
 	var createdAt time.Time
 	var repostOfID *string
+	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
 		return
+	}
+
+	// AGORA-277: a poll's options were previously never queried at all here,
+	// so BroadcastPublicPost always emitted a plain Note — the poll
+	// federated as inert commentary text with no way to vote on it.
+	var poll *outboundPoll
+	if rows, err := s.db.Query(`SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID); err == nil {
+		var options []string
+		for rows.Next() {
+			var text string
+			if rows.Scan(&text) == nil {
+				options = append(options, text)
+			}
+		}
+		rows.Close()
+		if len(options) > 0 {
+			poll = &outboundPoll{Options: options, Multiple: pollMultiple, ExpiresAt: pollExpiresAt}
+		}
 	}
 	// AGORA-239: a quote-share's own Create(Note) only ever carried the
 	// sharer's new commentary — the quoted post itself was never
@@ -3055,7 +3140,12 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 		quotedActorURL, quotedInboxURL, _, quotedOK = s.lookupRemoteTarget(*repostOfID)
 	}
 
-	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	var activity map[string]any
+	if poll != nil {
+		activity = s.buildCreateActivityForPoll(s.actorURL(username), postID, content, createdAt, contentWarning, poll)
+	} else {
+		activity = s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	}
 	// AGORA-163: a fediverse mention adds recipients on top of the normal
 	// Public/followers audience — it doesn't replace it.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
@@ -3154,18 +3244,39 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, pollMultiple bool
 	var createdAt time.Time
+	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		return
 	}
 
-	activity := s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	var poll *outboundPoll
+	if rows, err := s.db.Query(`SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID); err == nil {
+		var options []string
+		for rows.Next() {
+			var text string
+			if rows.Scan(&text) == nil {
+				options = append(options, text)
+			}
+		}
+		rows.Close()
+		if len(options) > 0 {
+			poll = &outboundPoll{Options: options, Multiple: pollMultiple, ExpiresAt: pollExpiresAt}
+		}
+	}
+
+	var activity map[string]any
+	if poll != nil {
+		activity = s.buildUpdateActivityForPoll(s.actorURL(username), postID, content, createdAt, contentWarning, poll)
+	} else {
+		activity = s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	}
 	// AGORA-163: re-resolve current mentions on every edit too, same as a
 	// fresh Create — not attempting to diff against what was previously sent.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)

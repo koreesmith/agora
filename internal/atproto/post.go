@@ -41,6 +41,46 @@ func truncateForBluesky(content, permalinkURL string) string {
 	return strings.TrimRight(string(runes[:budget]), " \n\t") + suffix
 }
 
+// flattenPollForBluesky renders a poll as plain text (AGORA-277) — AT
+// Proto's app.bsky.feed.post lexicon has no poll/question record type at
+// all, so unlike ActivityPub's Question object there's no way to make this
+// natively votable on Bluesky. This is the same "structured content as
+// plain text + link back to Agora" fallback already used for quote-shares
+// (see federation.BroadcastPublicPost's AGORA-239 comment): list the
+// options and link to the real, votable poll on Agora, rather than
+// silently dropping them the way the plain FeedPost.Text build below used to.
+func flattenPollForBluesky(content string, options []string, permalinkURL string) string {
+	var b strings.Builder
+	b.WriteString(content)
+	for _, opt := range options {
+		b.WriteString("\n☐ ")
+		b.WriteString(opt)
+	}
+	b.WriteString("\n\nVote: ")
+	b.WriteString(permalinkURL)
+	return b.String()
+}
+
+// pollOptions returns a post's poll option text in display order, or nil if
+// the post isn't a poll — shared by BroadcastPost and BroadcastPostUpdate
+// (AGORA-277).
+func (s *Service) pollOptions(ctx context.Context, postID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var options []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return nil, err
+		}
+		options = append(options, text)
+	}
+	return options, rows.Err()
+}
+
 // BroadcastPost federates a new public post as an app.bsky.feed.post record
 // (AGORA-190) — the AT Proto counterpart to federation.BroadcastPublicPost.
 // Re-derives eligibility itself (defense in depth, same as BroadcastPublicPost
@@ -83,9 +123,17 @@ func (s *Service) BroadcastPost(userID, postID string) {
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
+
+	// AGORA-277: poll options were never queried here, so a poll federated
+	// to Bluesky as bare commentary text with no indication a poll existed.
+	text := content
+	if pollOptions, err := s.pollOptions(ctx, postID); err == nil && len(pollOptions) > 0 {
+		text = flattenPollForBluesky(content, pollOptions, permalink)
+	}
+
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(content, permalink),
+		Text:          truncateForBluesky(text, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
@@ -159,9 +207,17 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
+
+	// AGORA-277: same poll fallback as BroadcastPost, so an edited poll
+	// post's re-written Bluesky record still lists its options.
+	text := content
+	if pollOptions, err := s.pollOptions(ctx, postID); err == nil && len(pollOptions) > 0 {
+		text = flattenPollForBluesky(content, pollOptions, permalink)
+	}
+
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(content, permalink),
+		Text:          truncateForBluesky(text, permalink),
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),

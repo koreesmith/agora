@@ -38,6 +38,9 @@ func RegisterAdminRoutes(r chi.Router, s *Service) {
 	r.Post("/admin/relays/{id}/enable", s.EnableRelay)
 	r.Post("/admin/relays/{id}/disable", s.DisableRelay)
 	r.Delete("/admin/relays/{id}", s.DeleteRelay)
+	// AGORA-270 follow-up: one-time re-fetch of the real origin timestamp
+	// for already-ingested posts (backfill.go).
+	r.Post("/admin/federation/backfill-published-at", s.BackfillPublishedAt)
 }
 
 // enabledRelayInboxes returns every currently-enabled relay's inbox URL —
@@ -305,6 +308,7 @@ type apRemoteNote struct {
 	InReplyTo    string
 	Attachment   []apAttachment
 	Tag          []apTagEntry // AGORA-213
+	Published    string       // AGORA-270: origin publish time
 }
 
 // ingestRelayForwardedCreate handles a relay forwarding a full Create
@@ -318,7 +322,8 @@ func (s *Service) ingestRelayForwardedCreate(objectRaw json.RawMessage) {
 		Summary      string         `json:"summary"`
 		InReplyTo    string         `json:"inReplyTo"`
 		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"` // AGORA-213
+		Tag          []apTagEntry   `json:"tag"`       // AGORA-213
+		Published    string         `json:"published"` // AGORA-270
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -326,7 +331,7 @@ func (s *Service) ingestRelayForwardedCreate(objectRaw json.RawMessage) {
 	s.ingestRelaySourcedNote(&apRemoteNote{
 		ID: note.ID, AttributedTo: note.AttributedTo, Content: note.Content,
 		Summary: note.Summary, InReplyTo: note.InReplyTo, Attachment: note.Attachment,
-		Tag: note.Tag,
+		Tag: note.Tag, Published: note.Published,
 	})
 }
 
@@ -372,7 +377,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	imageURLs, videoURL := matchAttachments(note.Attachment)
-	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
+	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 }
 
 // fetchRemoteNoteSignedAsInstance dereferences a relay-announced post URL,
@@ -414,7 +419,8 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 		Summary      string         `json:"summary"`
 		InReplyTo    string         `json:"inReplyTo"`
 		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"` // AGORA-213
+		Tag          []apTagEntry   `json:"tag"`       // AGORA-213
+		Published    string         `json:"published"` // AGORA-270
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&note); err != nil {
 		return nil, err
@@ -425,7 +431,7 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 	return &apRemoteNote{
 		ID: note.ID, AttributedTo: note.AttributedTo, Content: note.Content,
 		Summary: note.Summary, InReplyTo: note.InReplyTo, Attachment: note.Attachment,
-		Tag: note.Tag,
+		Tag: note.Tag, Published: note.Published,
 	}, nil
 }
 
@@ -464,7 +470,7 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.
-func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string, emojis map[string]string) {
+func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string, emojis map[string]string, publishedAt time.Time) {
 	if actorURL == "" || noteID == "" {
 		return
 	}
@@ -476,11 +482,11 @@ func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, i
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis), publishedAt).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second subscribed relay forwarding the same

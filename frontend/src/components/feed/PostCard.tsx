@@ -4,7 +4,7 @@ import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizonta
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
-import { formatDistanceToNow } from 'date-fns'
+import { formatDistanceToNow, format } from 'date-fns'
 import CommentsSection, { renderContent, renderName } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
@@ -80,12 +80,23 @@ interface Post {
   page_name?: string
   page_avatar_url?: string
   created_at: string
+  published_at?: string // AGORA-270: real origin publish time for a remote post, distinct from when Agora ingested it
   edited_at?: string
   // Custom emoji (AGORA-258)
   author_emojis?: Record<string, string>
   content_emojis?: Record<string, string>
   repost_author_emojis?: Record<string, string>
   repost_content_emojis?: Record<string, string>
+}
+
+// AGORA-273: an exact, locale-formatted timestamp — shown outright on the
+// single-post detail view, and as a hover tooltip on the feed's relative
+// time (the Twitter/Bluesky convention), since federated content benefits
+// from real precision more than a purely personal feed does. Sourced from
+// published_at (AGORA-270's real origin publish time), falling back to
+// created_at for a local post that has none.
+function exactTimestamp(post: Pick<Post, 'published_at' | 'created_at'>): string {
+  return format(new Date(post.published_at || post.created_at), "h:mm a '·' MMM d, yyyy")
 }
 
 const visIcons: Record<string, React.ReactNode> = {
@@ -371,7 +382,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
 
 // ── PostCard ──────────────────────────────────────────────────────────────────
 
-export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post, invalidateKey?: string }) {
+export default function PostCard({ post, invalidateKey = 'feed', detail = false }: { post: Post, invalidateKey?: string, detail?: boolean }) {
   const [lightboxPhotos, setLightboxPhotos] = useState<string[] | null>(null)
   const [lightboxIdx, setLightboxIdx] = useState(0)
   const [twExpanded, setTwExpanded] = useState(false)
@@ -615,10 +626,17 @@ export default function PostCard({ post, invalidateKey = 'feed' }: { post: Post,
                 </span>
               )}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
-              <Link to={`/post/${post.id}`}
-                className="text-agora-400 text-xs hover:underline">
-                {formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}
-              </Link>
+              {detail ? (
+                <span className="text-agora-400 text-xs" title={exactTimestamp(post)}>
+                  {exactTimestamp(post)}
+                </span>
+              ) : (
+                <Link to={`/post/${post.id}`}
+                  className="text-agora-400 text-xs hover:underline"
+                  title={exactTimestamp(post)}>
+                  {formatDistanceToNow(new Date(post.published_at || post.created_at), { addSuffix: true })}
+                </Link>
+              )}
               <span className="text-agora-300 dark:text-agora-600 flex items-center gap-0.5 text-xs">
                 {visIcons[post.visibility]}
               </span>

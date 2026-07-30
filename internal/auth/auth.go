@@ -32,18 +32,42 @@ func NewService(db *store.DB, cfg *config.Config, notifSvc *notifications.Servic
 	return &Service{db: db, cfg: cfg, notifSvc: notifSvc}
 }
 
+// dummyPasswordHash is a valid bcrypt hash of no known password, compared
+// against on login when the username/email doesn't match any account, so
+// that branch costs about as much time as a genuine wrong-password compare.
+const dummyPasswordHash = "$2a$10$ExB7Elp.05RKMLYFuiynf.sOW8e2BKLCBYKYWym4FNWv8fvmp5idG"
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Support ?token= for WebSocket connections (can't set headers)
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "missing token"); return
+		}
+		tokenStr := strings.TrimPrefix(header, "Bearer ")
+		claims, err := s.parseToken(tokenStr)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid token"); return
+		}
+		ctx := context.WithValue(r.Context(), ctxkeys.UserID, claims.UserID)
+		ctx  = context.WithValue(ctx, ctxkeys.UserRole, claims.Role)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// WebSocketMiddleware is Middleware's counterpart for the WebSocket upgrade
+// route (/api/ws) specifically. Browsers cannot set an Authorization header
+// on a WebSocket handshake, so this route alone accepts the JWT via a
+// ?token= query parameter. Every other authenticated route must use
+// Middleware and reject query-param tokens: query strings leak into access
+// logs, proxy/CDN logs, browser history, and Referer headers in a way
+// headers do not.
+func (s *Service) WebSocketMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
-			header := r.Header.Get("Authorization")
-			if !strings.HasPrefix(header, "Bearer ") {
-				writeError(w, http.StatusUnauthorized, "missing token"); return
-			}
-			tokenStr = strings.TrimPrefix(header, "Bearer ")
+			writeError(w, http.StatusUnauthorized, "missing token"); return
 		}
 		claims, err := s.parseToken(tokenStr)
 		if err != nil {
@@ -61,12 +85,10 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 // for read routes that guests may access (public posts, profiles).
 func (s *Service) OptionalMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenStr := r.URL.Query().Get("token")
-		if tokenStr == "" {
-			header := r.Header.Get("Authorization")
-			if strings.HasPrefix(header, "Bearer ") {
-				tokenStr = strings.TrimPrefix(header, "Bearer ")
-			}
+		var tokenStr string
+		header := r.Header.Get("Authorization")
+		if strings.HasPrefix(header, "Bearer ") {
+			tokenStr = strings.TrimPrefix(header, "Bearer ")
 		}
 		if tokenStr != "" {
 			if claims, err := s.parseToken(tokenStr); err == nil {
@@ -380,12 +402,23 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		&u.AvatarURL, &u.Role, &u.IsSuspended, &u.SuspensionReason,
 		&u.EmailVerified, &u.ProfilePrivate)
 	if err != nil {
+		// No such account — still run a bcrypt compare against a fixed dummy
+		// hash so this branch takes about as long as a real wrong-password
+		// compare, and return the exact same response either way. Without
+		// this, response content and timing would both leak whether the
+		// username/email is registered (AGORA-208).
+		bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(req.Password))
 		writeError(w, 401, "invalid credentials"); return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
 		writeError(w, 401, "invalid credentials"); return
 	}
+
+	// Only reveal *why* a login can't proceed once the password has already
+	// been confirmed correct — at that point the caller has demonstrated
+	// they hold the real credentials, so it's no longer an enumeration risk
+	// to tell them their account is suspended/unverified/waitlisted.
 	if u.IsSuspended {
 		writeError(w, 403, "account suspended: "+u.SuspensionReason); return
 	}

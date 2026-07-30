@@ -135,19 +135,27 @@ function emojiImg(shortcode: string, url: string, key: string | number) {
 // Render text with @mentions as profile links, URLs as clickable links, and
 // (AGORA-258) recognized :shortcode: custom emoji as inline images.
 export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap) {
-  // Split on @mentions (local @username or fediverse @handle@instance.tld —
-  // AGORA-163, ordered before the bare-local pattern so a full remote handle
-  // is captured as one token, not just its handle portion), +group-tags,
-  // URLs, and :shortcode: custom-emoji tokens. No nested capturing groups
-  // within any alternative — String.split splices every capture group's
-  // result into the output, so an inner group here would corrupt the parts
-  // array.
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)/g)
+  // Split on @mentions (local @username, bridged fediverse @handle@instance.tld
+  // — AGORA-163 —, or a single-@ dotted handle like @alice.bsky.social /
+  // @alice@mastodon.social typed as one token — AGORA-276), +group-tags,
+  // URLs, and :shortcode: custom-emoji tokens. The dotted single-@ pattern
+  // must be ordered before the bare-local pattern so the full dotted handle
+  // is captured as one token, not truncated at the first dot. No nested
+  // capturing groups within any alternative — String.split splices every
+  // capture group's result into the output, so an inner group here would
+  // corrupt the parts array.
+  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)/g)
   return parts.map((part, i) => {
     // Fediverse mention (@handle@instance.tld) — links to the same
     // synthetic-username profile route already used everywhere else a
     // remote user is linked (handle@domain, per the remote-stub convention).
     if (/^@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+$/.test(part)) {
+      return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+    }
+    // Bluesky / single-@ fediverse mention typed as one dotted token
+    // (@alice.bsky.social) — same profile route, remote users are stored
+    // with their full dotted handle as username (AGORA-276).
+    if (/^@[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+$/.test(part)) {
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
@@ -557,7 +565,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
         {/* Action row */}
         <div className="flex items-center gap-3 mt-1 px-1">
           <span className="text-xs text-agora-400">
-            {formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}
+            {formatDistanceToNow(new Date(c.published_at || c.created_at), { addSuffix: true })}
           </span>
           {c.edited_at && <span className="text-xs text-agora-400 italic">edited</span>}
 

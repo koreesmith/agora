@@ -144,7 +144,7 @@ const postVisibilityClause = `
 
 const postResultColumns = `
 	p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-	p.content, p.image_url, p.visibility, p.created_at,
+	p.content, p.image_url, p.visibility, p.created_at, p.published_at,
 	p.is_remote, p.remote_instance,
 	(SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 	(SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
@@ -180,7 +180,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
 			  AND `+postVisibilityClause+`
-			ORDER BY p.created_at DESC
+			ORDER BY p.published_at DESC
 			LIMIT $3 OFFSET $4
 		`, viewerID, tag, limit, offset)
 	} else {
@@ -192,7 +192,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 			  AND p.deleted_at IS NULL
 			  AND p.content ILIKE '%' || $2 || '%'
 			  AND `+postVisibilityClause+`
-			ORDER BY p.created_at DESC
+			ORDER BY p.published_at DESC
 			LIMIT $3 OFFSET $4
 		`, viewerID, q, limit, offset)
 	}
@@ -212,6 +212,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		ImageURL       string          `json:"image_url"`
 		Visibility     string          `json:"visibility"`
 		CreatedAt      string          `json:"created_at"`
+		PublishedAt    string          `json:"published_at"`
 		IsRemote       bool            `json:"is_remote"`
 		RemoteInstance string          `json:"remote_instance,omitempty"`
 		LikeCount      int             `json:"like_count"`
@@ -226,7 +227,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		var p PostResult
 		var authorEmojis, contentEmojis string
 		rows.Scan(&p.ID, &p.AuthorID, &p.Username, &p.DisplayName, &p.AvatarURL,
-			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt,
+			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt, &p.PublishedAt,
 			&p.IsRemote, &p.RemoteInstance,
 			&p.LikeCount, &p.CommentCount, &p.Liked,
 			&authorEmojis, &contentEmojis)

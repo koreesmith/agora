@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +40,83 @@ func truncateForBluesky(content, permalinkURL string) string {
 		budget = 0
 	}
 	return strings.TrimRight(string(runes[:budget]), " \n\t") + suffix
+}
+
+// blueskyURLRe matches a bare URL in a record's plain "text" — used to build
+// link facets (AGORA-277). Unlike ActivityPub's Note.content (HTML, where a
+// plain-text URL still renders as visible text but isn't a clickable link
+// either), Bluesky clients render "text" completely literally with no
+// auto-linking of their own: a URL is only clickable if a byte-range facet
+// says so explicitly. Same character class federation.linkifyURLs already
+// uses for the equivalent HTML-side gap.
+var blueskyURLRe = regexp.MustCompile(`https?://[^\s]+`)
+
+// linkFacetsForURLs finds every bare URL in text and returns the
+// app.bsky.richtext.facet#link facets needed to make each one clickable —
+// without these, a URL we append ourselves (the Bluesky-length-limit
+// fallback link, or a flattened poll's "Vote:" link) renders as inert text
+// on Bluesky, unlike Mastodon which auto-linkifies plain-text URLs in an
+// ActivityPub Note's HTML content. Byte offsets, not rune offsets, per the
+// app.bsky.richtext.facet lexicon (UTF-8 byte indexing).
+func linkFacetsForURLs(text string) []*bsky.RichtextFacet {
+	var facets []*bsky.RichtextFacet
+	for _, loc := range blueskyURLRe.FindAllStringIndex(text, -1) {
+		start, end := loc[0], loc[1]
+		// Trailing punctuation likely belongs to the sentence, not the URL —
+		// same trim federation.linkifyURLs already does for the same reason.
+		trimmed := strings.TrimRight(text[start:end], ".,!?)")
+		end = start + len(trimmed)
+		facets = append(facets, &bsky.RichtextFacet{
+			Index: &bsky.RichtextFacet_ByteSlice{ByteStart: int64(start), ByteEnd: int64(end)},
+			Features: []*bsky.RichtextFacet_Features_Elem{{
+				RichtextFacet_Link: &bsky.RichtextFacet_Link{
+					LexiconTypeID: "app.bsky.richtext.facet#link",
+					Uri:           trimmed,
+				},
+			}},
+		})
+	}
+	return facets
+}
+
+// flattenPollForBluesky renders a poll as plain text (AGORA-277) — AT
+// Proto's app.bsky.feed.post lexicon has no poll/question record type at
+// all, so unlike ActivityPub's Question object there's no way to make this
+// natively votable on Bluesky. This is the same "structured content as
+// plain text + link back to Agora" fallback already used for quote-shares
+// (see federation.BroadcastPublicPost's AGORA-239 comment): list the
+// options and link to the real, votable poll on Agora, rather than
+// silently dropping them the way the plain FeedPost.Text build below used to.
+func flattenPollForBluesky(content string, options []string, permalinkURL string) string {
+	var b strings.Builder
+	b.WriteString(content)
+	for _, opt := range options {
+		b.WriteString("\n☐ ")
+		b.WriteString(opt)
+	}
+	b.WriteString("\n\nVote: ")
+	b.WriteString(permalinkURL)
+	return b.String()
+}
+
+// pollOptions returns a post's poll option text in display order, or nil if
+// the post isn't a poll — shared by BroadcastPost and BroadcastPostUpdate
+// (AGORA-277).
+func (s *Service) pollOptions(ctx context.Context, postID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var options []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return nil, err
+		}
+		options = append(options, text)
+	}
+	return options, rows.Err()
 }
 
 // BroadcastPost federates a new public post as an app.bsky.feed.post record
@@ -83,12 +161,22 @@ func (s *Service) BroadcastPost(userID, postID string) {
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
+
+	// AGORA-277: poll options were never queried here, so a poll federated
+	// to Bluesky as bare commentary text with no indication a poll existed.
+	text := content
+	if pollOptions, err := s.pollOptions(ctx, postID); err == nil && len(pollOptions) > 0 {
+		text = flattenPollForBluesky(content, pollOptions, permalink)
+	}
+
+	finalText := truncateForBluesky(text, permalink)
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(content, permalink),
+		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
+		Facets:        linkFacetsForURLs(finalText),
 	}
 	recordCid, rkey, err := repo.CreateRecord(ctx, "app.bsky.feed.post", rec)
 	if err != nil {
@@ -159,12 +247,22 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + postID
+
+	// AGORA-277: same poll fallback as BroadcastPost, so an edited poll
+	// post's re-written Bluesky record still lists its options.
+	text := content
+	if pollOptions, err := s.pollOptions(ctx, postID); err == nil && len(pollOptions) > 0 {
+		text = flattenPollForBluesky(content, pollOptions, permalink)
+	}
+
+	finalText := truncateForBluesky(text, permalink)
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
-		Text:          truncateForBluesky(content, permalink),
+		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		Embed:         s.buildImageEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
+		Facets:        linkFacetsForURLs(finalText),
 	}
 	path := "app.bsky.feed.post/" + rkey
 	recordCid, err := repo.UpdateRecord(ctx, path, rec)

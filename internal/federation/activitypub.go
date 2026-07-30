@@ -661,17 +661,68 @@ func guessImageMediaType(url string) string {
 // DeliverReply (comment replies).
 func (s *Service) buildCreateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
 	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	return s.wrapCreateActivity(actor, postID, note)
+}
+
+// outboundPoll holds the data needed to render a local poll as an
+// ActivityPub Question object (AGORA-277) — the outbound mirror of
+// parseAPPoll/applyInboundPoll (AGORA-210), which already parse this same
+// shape coming from a remote Mastodon poll.
+type outboundPoll struct {
+	Options   []string
+	Multiple  bool
+	ExpiresAt *time.Time
+}
+
+// buildQuestionObject builds the ActivityPub Question object for a poll
+// post: oneOf for single-choice, anyOf for multiple-choice, per the
+// Mastodon/ActivityStreams poll convention parseAPPoll already expects on
+// the inbound side.
+func (s *Service) buildQuestionObject(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildNoteObject(actor, postID, content, createdAt, "", contentWarning)
+	note["type"] = "Question"
+	options := make([]map[string]any, len(poll.Options))
+	for i, opt := range poll.Options {
+		options[i] = map[string]any{
+			"type": "Note",
+			"name": opt,
+			"replies": map[string]any{
+				"type":       "Collection",
+				"totalItems": 0,
+			},
+		}
+	}
+	if poll.Multiple {
+		note["anyOf"] = options
+	} else {
+		note["oneOf"] = options
+	}
+	if poll.ExpiresAt != nil {
+		note["endTime"] = poll.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	note["votersCount"] = 0
+	return note
+}
+
+// buildCreateActivityForPoll is BroadcastPublicPost's poll-aware counterpart
+// to buildCreateActivity (AGORA-277) — same Create wrapper, but around a
+// Question object instead of a Note so the poll federates as an actual,
+// votable poll rather than silently degrading to plain text.
+func (s *Service) buildCreateActivityForPoll(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildQuestionObject(actor, postID, content, createdAt, contentWarning, poll)
+	return s.wrapCreateActivity(actor, postID, note)
+}
+
+func (s *Service) wrapCreateActivity(actor, postID string, note map[string]any) map[string]any {
 	objID := actor + "/posts/" + postID
-	to := note["to"]
-	cc := note["cc"]
 	return map[string]any{
 		"@context":  "https://www.w3.org/ns/activitystreams",
 		"id":        objID + "/activity",
 		"type":      "Create",
 		"actor":     actor,
 		"published": note["published"],
-		"to":        to,
-		"cc":        cc,
+		"to":        note["to"],
+		"cc":        note["cc"],
 		"object":    note,
 	}
 }
@@ -680,6 +731,21 @@ func (s *Service) buildCreateActivity(actor, postID, content string, createdAt t
 // when a previously-federated post is edited (AGORA-150).
 func (s *Service) buildUpdateActivity(actor, postID, content string, createdAt time.Time, inReplyTo, contentWarning string) map[string]any {
 	note := s.buildNoteObject(actor, postID, content, createdAt, inReplyTo, contentWarning)
+	return s.wrapUpdateActivity(actor, postID, note)
+}
+
+// buildUpdateActivityForPoll is BroadcastUpdatePost's poll-aware counterpart
+// to buildUpdateActivity (AGORA-277): an edited poll post must keep being
+// sent as a Question, not degrade back to a Note, since Mastodon already
+// knows this object's id as a Question from the original Create — an Update
+// changing its type would likely be rejected or ignored on arrival rather
+// than actually clearing the poll.
+func (s *Service) buildUpdateActivityForPoll(actor, postID, content string, createdAt time.Time, contentWarning string, poll *outboundPoll) map[string]any {
+	note := s.buildQuestionObject(actor, postID, content, createdAt, contentWarning, poll)
+	return s.wrapUpdateActivity(actor, postID, note)
+}
+
+func (s *Service) wrapUpdateActivity(actor, postID string, note map[string]any) map[string]any {
 	objID := actor + "/posts/" + postID
 	to := note["to"]
 	cc := note["cc"]
@@ -1342,6 +1408,18 @@ func hashtagsFromAPTags(entries []apTagEntry) []string {
 	return tags
 }
 
+// parseAPTime parses an ActivityStreams object's "published" field (ISO
+// 8601/RFC3339, per the Note/Create vocabulary) into the real origin
+// publish time (AGORA-270). Falls back to now for an empty or malformed
+// value — a missing/bad timestamp shouldn't block ingestion, and "just
+// ingested" is the same fallback creating a local post already uses.
+func parseAPTime(published string) time.Time {
+	if t, err := time.Parse(time.RFC3339, published); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
 // storeHashtags mirrors feed.Service's own helper of the same name —
 // replaces postID's stored hashtag set, the same replace-not-merge
 // convention this file already uses for a Note's attachments/poll options
@@ -1458,6 +1536,8 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		OneOf        []apPollOption `json:"oneOf"`
 		AnyOf        []apPollOption `json:"anyOf"`
 		EndTime      string         `json:"endTime"`
+		Name         string         `json:"name"` // AGORA-268: set only on a poll-vote Note, never a normal reply
+		Published    string         `json:"published"` // AGORA-270: origin publish time
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1477,6 +1557,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
+	// AGORA-268: a poll vote is a bare Note with "name" set to the chosen
+	// option and inReplyTo the poll — never real reply content, so it must
+	// be intercepted before the normal reply-threading path below tries to
+	// ingest it as a comment.
+	if note.Name != "" && note.InReplyTo != "" && s.handleInboundVote(verifiedActor, note.InReplyTo, note.Name) {
+		return
+	}
+
 	imageURLs, videoURL := matchAttachments(note.Attachment)
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 	poll := parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime)
@@ -1488,7 +1576,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// practice (no real AP client posts a poll as a reply), so poll data
 	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag))
+		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 		return
 	}
 
@@ -1513,12 +1601,12 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	domain := domainFromURL(note.ID)
 	var commentID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
 	`, remoteUserID, HTMLToPlainText(note.Content), visibility, parentID, note.ID, domain, HTMLToPlainText(note.Summary),
-		emojisJSON(emojisFromAPTags(note.Tag))).Scan(&commentID)
+		emojisJSON(emojisFromAPTags(note.Tag)), parseAPTime(note.Published)).Scan(&commentID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING with a RETURNING clause yields sql.ErrNoRows
 		// when the row already existed — expected on redelivery, not an error.
@@ -1663,7 +1751,7 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string) {
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1678,11 +1766,11 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	domain := domainFromURL(noteID)
 	var postID string
 	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis)).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis), publishedAt).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same
@@ -2134,6 +2222,11 @@ func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, object
 	}
 	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
 	if !ok {
+		// Not one of our own posts. resolveFederatableTarget only ever
+		// resolves against Agora-originated content, so a followed actor
+		// boosting a post genuinely native to their own (or a third) instance
+		// used to fall through to a silent no-op here (AGORA-265).
+		s.handleInboundAnnounceOfRemotePost(activityID, verifiedActor, objectURL)
 		return
 	}
 	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
@@ -2157,6 +2250,73 @@ func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, object
 	if s.notif != nil && postAuthorID != remoteUserID {
 		s.notif.Create(postAuthorID, remoteUserID, "post_repost", postID, "")
 	}
+}
+
+// handleInboundAnnounceOfRemotePost is handleInboundAnnounce's fallback
+// (AGORA-265) for boosting content that didn't originate on Agora. Only
+// proceeds if some local user actually follows the boosting actor — same
+// audience gate ingestFollowedPost uses — since otherwise there's no local
+// follower whose feed the resulting repost should appear in. Dereferences
+// the boosted object signed as the instance (mirrors the relay path's
+// fetchRemoteNoteSignedAsInstance, since there's no single local user this
+// fetch is "on behalf of" the way a Like/reply's signerUserID is), ingests it
+// as a remote post if not already known, then attaches a repost row to it
+// attributed to the boosting actor's own remote-user stub — matching how the
+// Agora-originated case above already renders a "Reposted" boost.
+func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, objectURL string) {
+	var followerUserID string
+	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, verifiedActor).Scan(&followerUserID)
+	if followerUserID == "" {
+		return
+	}
+	if s.isInstanceBlocked(domainFromURL(objectURL)) {
+		return
+	}
+	note, err := s.fetchRemoteNoteSignedAsInstance(objectURL)
+	if err != nil || note == nil || note.ID == "" || note.AttributedTo == "" {
+		return
+	}
+	if s.isInstanceBlocked(domainFromURL(note.AttributedTo)) {
+		return
+	}
+
+	remoteAuthorID, err := s.getOrCreateRemoteAPUserAsInstance(note.AttributedTo)
+	if err != nil || remoteAuthorID == "" {
+		return
+	}
+
+	domain := domainFromURL(note.ID)
+	imageURLs, videoURL := matchAttachments(note.Attachment)
+	var postID string
+	err = s.db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, remoteAuthorID, HTMLToPlainText(note.Content), note.ID, domain, HTMLToPlainText(note.Summary), emojisJSON(emojisFromAPTags(note.Tag)), parseAPTime(note.Published)).Scan(&postID)
+	if err != nil {
+		// Already ingested (e.g. a previous boost of the same post, or a
+		// relay forwarded it too) — look up its id so the repost below still
+		// attaches to it instead of dropping.
+		if s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND remote_instance = $2 AND is_remote = true`,
+			note.ID, domain).Scan(&postID) != nil {
+			return
+		}
+	} else {
+		s.storeInboundImages(postID, imageURLs)
+		s.storeInboundVideo(postID, videoURL)
+		s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
+	}
+
+	remoteReposterID, err := s.getOrCreateRemoteAPUserAsInstance(verifiedActor)
+	if err != nil || remoteReposterID == "" {
+		return
+	}
+	s.db.Exec(`
+		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance)
+		VALUES ($1, 'public', $2, true, $3, $4)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+	`, remoteReposterID, postID, activityID, domainFromURL(activityID))
 }
 
 func (s *Service) handleInboundUndoAnnounce(verifiedActor string, objectRaw json.RawMessage) {
@@ -2922,17 +3082,36 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, pollMultiple bool
 	var createdAt time.Time
 	var repostOfID *string
+	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
 		return
+	}
+
+	// AGORA-277: a poll's options were previously never queried at all here,
+	// so BroadcastPublicPost always emitted a plain Note — the poll
+	// federated as inert commentary text with no way to vote on it.
+	var poll *outboundPoll
+	if rows, err := s.db.Query(`SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID); err == nil {
+		var options []string
+		for rows.Next() {
+			var text string
+			if rows.Scan(&text) == nil {
+				options = append(options, text)
+			}
+		}
+		rows.Close()
+		if len(options) > 0 {
+			poll = &outboundPoll{Options: options, Multiple: pollMultiple, ExpiresAt: pollExpiresAt}
+		}
 	}
 	// AGORA-239: a quote-share's own Create(Note) only ever carried the
 	// sharer's new commentary — the quoted post itself was never
@@ -2942,31 +3121,61 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	// feature); appending a plain link here is the universally-compatible
 	// fallback that works on every receiver with no protocol support
 	// needed — plainTextToHTML/linkifyURLs (below) auto-linkifies it.
+	// AGORA-267: DeliverAnnounce already delivers the Announce half of a
+	// quote-share directly to the quoted remote author's inbox (via
+	// lookupRemoteTarget), but this Create(Note) — the half that actually
+	// carries the quoting user's commentary — never did, addressing only
+	// followers/mentions/relays. An Announce carries no content, so a quoted
+	// remote author with few/no local followers of the quoter never saw the
+	// quote text at all. Reuse the same lookupRemoteTarget DeliverAnnounce
+	// and DeliverReply already call, rather than re-deriving remoteness
+	// ad hoc the way quotedPostURL below does for its own, different purpose
+	// (a human-readable fallback link, not an addressee).
+	var quotedActorURL, quotedInboxURL string
+	quotedOK := false
 	if repostOfID != nil {
 		if quoteURL := s.quotedPostURL(*repostOfID); quoteURL != "" {
 			content = strings.TrimRight(content, " \n") + "\n\nRE: " + quoteURL
 		}
+		quotedActorURL, quotedInboxURL, _, quotedOK = s.lookupRemoteTarget(*repostOfID)
 	}
 
-	activity := s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	var activity map[string]any
+	if poll != nil {
+		activity = s.buildCreateActivityForPoll(s.actorURL(username), postID, content, createdAt, contentWarning, poll)
+	} else {
+		activity = s.buildCreateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	}
 	// AGORA-163: a fediverse mention adds recipients on top of the normal
 	// Public/followers audience — it doesn't replace it.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	log.Printf("federation: BroadcastPublicPost %s resolved %d fediverse mention(s)", postID, len(tags))
-	if len(tags) > 0 {
+	if len(tags) > 0 || quotedOK {
 		if note, ok := activity["object"].(map[string]any); ok {
-			note["tag"] = tags
-			if content, ok := note["content"].(string); ok {
-				note["content"] = linkifyMentionTags(content, tags)
+			if len(tags) > 0 {
+				note["tag"] = tags
+				if content, ok := note["content"].(string); ok {
+					note["content"] = linkifyMentionTags(content, tags)
+				}
 			}
-			to := append([]string{"https://www.w3.org/ns/activitystreams#Public"}, mentionedActorURLs...)
+			to := []string{"https://www.w3.org/ns/activitystreams#Public"}
+			if quotedOK {
+				to = append(to, quotedActorURL)
+			}
+			to = append(to, mentionedActorURLs...)
 			note["to"] = to
 			activity["to"] = to
 		}
 	}
 	s.deliverToFollowers(userID, activity)
-	for _, inboxURL := range mentionedInboxURLs {
-		s.enqueueAPDelivery(userID, inboxURL, activity)
+	if quotedOK {
+		s.enqueueAPDelivery(userID, quotedInboxURL, activity)
+	}
+	for i, actorURL := range mentionedActorURLs {
+		if quotedOK && actorURL == quotedActorURL {
+			continue // already delivered above
+		}
+		s.enqueueAPDelivery(userID, mentionedInboxURLs[i], activity)
 	}
 	// AGORA-221: a relay only forwards what instances actually publish to
 	// it — being subscribed (AGORA-220) alone doesn't make this post
@@ -3035,18 +3244,39 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, pollMultiple bool
 	var createdAt time.Time
+	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt)
 	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
 		return
 	}
 
-	activity := s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	var poll *outboundPoll
+	if rows, err := s.db.Query(`SELECT text FROM poll_options WHERE post_id = $1 ORDER BY position ASC`, postID); err == nil {
+		var options []string
+		for rows.Next() {
+			var text string
+			if rows.Scan(&text) == nil {
+				options = append(options, text)
+			}
+		}
+		rows.Close()
+		if len(options) > 0 {
+			poll = &outboundPoll{Options: options, Multiple: pollMultiple, ExpiresAt: pollExpiresAt}
+		}
+	}
+
+	var activity map[string]any
+	if poll != nil {
+		activity = s.buildUpdateActivityForPoll(s.actorURL(username), postID, content, createdAt, contentWarning, poll)
+	} else {
+		activity = s.buildUpdateActivity(s.actorURL(username), postID, content, createdAt, "", contentWarning)
+	}
 	// AGORA-163: re-resolve current mentions on every edit too, same as a
 	// fresh Create — not attempting to diff against what was previously sent.
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
@@ -3425,6 +3655,119 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	}
 	s.deliverToFollowers(userID, activity)
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// ── Outbound / Inbound Poll Vote (AGORA-268) ─────────────────────────────────
+//
+// A vote in ActivityPub isn't its own activity type — Mastodon's convention
+// (ActivityPub::VoteSerializer) wraps a bare Note in a Create, with the
+// chosen option's text in "name" instead of "content", inReplyTo the poll
+// (Question) object, and addressed directly to the poll's actor rather than
+// Public/followers. It's never rendered as a visible post anywhere, on
+// either side. A multiple-choice vote is one such Create per selected
+// option, not a single activity carrying several.
+
+// DeliverVote sends an outbound Vote when a local user votes on a poll that
+// originated from a remote Mastodon/ActivityPub actor. No-ops if postID
+// isn't an AP remote target (lookupRemoteTarget's ok=false covers both a
+// local poll and a Bluesky-origin post, neither of which has an ap_actor_url
+// to address this at) — feed.PollVote calls this unconditionally on every
+// vote, the same way it does for DeliverLike.
+func (s *Service) DeliverVote(userID, postID, optionID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+	targetActorURL, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
+	if !ok {
+		log.Printf("federation: DeliverVote %s: not a remote target, skipping", postID)
+		return
+	}
+
+	var optionText string
+	if err := s.db.QueryRow(`SELECT text FROM poll_options WHERE id = $1 AND post_id = $2`, optionID, postID).
+		Scan(&optionText); err != nil || optionText == "" {
+		log.Printf("federation: DeliverVote %s: option %s lookup failed (err=%v)", postID, optionID, err)
+		return
+	}
+
+	var username string
+	var apEnabled bool
+	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
+		Scan(&username, &apEnabled); err != nil || !apEnabled {
+		log.Printf("federation: DeliverVote %s: voter %s lookup failed or activitypub disabled (err=%v)", postID, userID, err)
+		return
+	}
+
+	actor := s.actorURL(username)
+	note := map[string]any{
+		"id":           fmt.Sprintf("%s/votes/%s/%s", actor, postID, optionID),
+		"type":         "Note",
+		"attributedTo": actor,
+		"to":           []string{targetActorURL},
+		"inReplyTo":    targetRemotePostID,
+		"name":         optionText,
+	}
+	activity := map[string]any{
+		"@context":  "https://www.w3.org/ns/activitystreams",
+		"id":        fmt.Sprintf("%s/votes/%s/%s/activity", actor, postID, optionID),
+		"type":      "Create",
+		"actor":     actor,
+		"published": time.Now().UTC().Format(time.RFC3339),
+		"to":        []string{targetActorURL},
+		"object":    note,
+	}
+	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+}
+
+// handleInboundVote accepts a remote actor's vote on one of our own polls —
+// the reverse of DeliverVote above. Returns true whenever objectURL/name
+// were recognized as targeting one of our own local polls at all (a
+// matching post + option text), regardless of whether the vote was actually
+// recorded, so handleInboundCreate's caller knows not to also fall through
+// and ingest this as a normal reply/comment; returns false for anything that
+// isn't a vote on one of our polls, so it still gets a chance at the normal
+// reply-handling path.
+func (s *Service) handleInboundVote(verifiedActor, pollObjectURL, optionName string) bool {
+	postID := localPostIDFromURL(pollObjectURL, s.cfg.InstanceDomain)
+	if postID == "" {
+		return false
+	}
+	var optionID, postAuthorID string
+	var multipleChoice, isExpired bool
+	err := s.db.QueryRow(`
+		SELECT po.id, p.author_id, p.poll_multiple_choice, (p.poll_expires_at IS NOT NULL AND p.poll_expires_at < NOW())
+		FROM poll_options po JOIN posts p ON p.id = po.post_id
+		WHERE po.post_id = $1 AND po.text = $2 AND p.deleted_at IS NULL
+	`, postID, optionName).Scan(&optionID, &postAuthorID, &multipleChoice, &isExpired)
+	if err != nil {
+		return false // not a vote on one of our own polls — let the caller try the normal reply path
+	}
+	if isExpired {
+		log.Printf("federation: handleInboundVote %s: poll has ended, ignoring vote for %q", postID, optionName)
+		return true
+	}
+	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
+		return true
+	}
+
+	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	if err != nil || remoteUserID == "" {
+		log.Printf("federation: handleInboundVote %s: could not resolve voter %s: %v", postID, verifiedActor, err)
+		return true
+	}
+
+	if !multipleChoice {
+		// Single choice: replayed/changed vote replaces this actor's previous
+		// one, mirroring feed.PollVote's own single-choice handling.
+		s.db.Exec(`
+			DELETE FROM poll_votes
+			WHERE user_id = $1 AND option_id IN (SELECT id FROM poll_options WHERE post_id = $2)
+		`, remoteUserID, postID)
+	}
+	// poll_votes' (user_id, option_id) primary key already makes a redelivered
+	// Vote idempotent — no separate dedup/replay tracking needed.
+	s.db.Exec(`INSERT INTO poll_votes (user_id, option_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, remoteUserID, optionID)
+	return true
 }
 
 // ── Outbound: broadcast page posts to page followers (AGORA-115) ─────────────

@@ -31,6 +31,18 @@ func displayNameOr(displayName, fallback string) string {
 	return fallback
 }
 
+// parseBlueskyTime parses a record's client-declared createdAt (RFC3339,
+// per the app.bsky.feed.post lexicon) into the real origin publish time
+// (AGORA-270). Falls back to now for an empty or malformed value — a
+// missing/bad timestamp shouldn't block ingestion, and "just ingested" is
+// the same fallback creating a local post already uses.
+func parseBlueskyTime(createdAt string) time.Time {
+	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
 // getOrCreateRemoteATUser mirrors federation's getOrCreateRemoteAPUser/
 // upsertRemoteAPUser (internal/federation/activitypub.go) — a cached local
 // stub `users` row for a remote account. Keyed by DID (atproto_remote_did)
@@ -172,11 +184,11 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
 		RETURNING id
-	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels)).Scan(&postID)
+	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt)).Scan(&postID)
 	if err != nil || postID == "" {
 		return ""
 	}
@@ -286,8 +298,18 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 	}
 
 	for _, item := range out.Feed {
-		if item.Post == nil || item.Reason != nil {
-			continue // skip reposts surfaced in the author feed — not this account's own post
+		if item.Post == nil {
+			continue
+		}
+		if item.Reason != nil {
+			// AGORA-266: a reasonRepost item is this DID's repost of someone
+			// else's post, not a post of their own — ingest it via the
+			// dedicated path below. A reasonPin item is neither; either way,
+			// the "own post" ingestion beneath this block doesn't apply.
+			if item.Reason.FeedDefs_ReasonRepost != nil {
+				s.ingestFollowedRepost(ctx, did, item.Reason.FeedDefs_ReasonRepost, item.Post)
+			}
+			continue
 		}
 		post := item.Post
 		rec, ok := post.Record.Val.(*bsky.FeedPost)
@@ -318,11 +340,11 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels)).Scan(&postID)
+		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
@@ -356,6 +378,126 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 
 		log.Printf("atproto: ingested post %s from %s (%s)", postID, handle, post.Uri)
 	}
+}
+
+// ingestFollowedRepost handles a followed DID's repost of someone else's post
+// (AGORA-266), surfaced in their own author feed as a feed item whose Reason
+// is a reasonRepost rather than the post being their own. This was previously
+// the entire handling of reposts anywhere in this package: ingestAuthorFeed
+// just skipped any item.Reason != nil, so a followed account's repost never
+// reached the local feed at all — the AT Proto counterpart to AGORA-265's
+// equivalent Mastodon Announce gap.
+//
+// Ingests the reposted post itself, attributed to its *original* author (not
+// the reposting DID), reusing ingestQuotedPost's upsert shape since — like a
+// quote target — the local post id is needed back whether the post was
+// already known (from a previous poll, a quote elsewhere, etc.) or is being
+// seen for the first time now. A repost row is then attached to it,
+// attributed to the reposting DID's own stub user, mirroring how
+// storeInboundQuote sets repost_of_id for a quote-post embed.
+func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *bsky.FeedDefs_ReasonRepost, post *bsky.FeedDefs_PostView) {
+	if reason == nil || reason.By == nil || post == nil || post.Author == nil {
+		return
+	}
+	rec, ok := post.Record.Val.(*bsky.FeedPost)
+	if !ok || rec == nil {
+		return
+	}
+	reposter := reason.By
+	if s.isBlueskyActorBlocked(reposter.Did, reposter.Handle) || s.isBlueskyActorBlocked(post.Author.Did, post.Author.Handle) {
+		return
+	}
+
+	var authorDisplayName, authorAvatarURL string
+	if post.Author.DisplayName != nil {
+		authorDisplayName = *post.Author.DisplayName
+	}
+	if post.Author.Avatar != nil {
+		authorAvatarURL = *post.Author.Avatar
+	}
+	authorID, err := s.getOrCreateRemoteATUser(post.Author.Did, post.Author.Handle, authorDisplayName, authorAvatarURL, "")
+	if err != nil {
+		log.Printf("atproto: could not upsert remote user for %s: %v", post.Author.Did, err)
+		return
+	}
+
+	var postID string
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		RETURNING id
+	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
+	if err != nil || postID == "" {
+		return
+	}
+	s.storeInboundEmbed(ctx, postID, post.Embed)
+	s.storeHashtagsFromFacets(postID, rec.Facets)
+
+	var reposterDisplayName, reposterAvatarURL string
+	if reposter.DisplayName != nil {
+		reposterDisplayName = *reposter.DisplayName
+	}
+	if reposter.Avatar != nil {
+		reposterAvatarURL = *reposter.Avatar
+	}
+	reposterID, err := s.getOrCreateRemoteATUser(reposter.Did, reposter.Handle, reposterDisplayName, reposterAvatarURL, "")
+	if err != nil {
+		log.Printf("atproto: could not upsert remote user for %s: %v", reposter.Did, err)
+		return
+	}
+
+	// The repost record's own AT-URI is this repost action's stable identity
+	// — distinct from post.Uri (the original post, which may be reposted by
+	// many different DIDs, each needing its own row here). Falls back to a
+	// synthetic id on the rare chance the AppView omits it, so a redelivery
+	// still dedupes even without one.
+	repostURI := ""
+	if reason.Uri != nil {
+		repostURI = *reason.Uri
+	}
+	if repostURI == "" {
+		repostURI = post.Uri + "#repost-by-" + reposter.Did
+	}
+
+	var repostID string
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO posts (author_id, visibility, repost_of_id, is_remote, remote_post_id, remote_instance, published_at)
+		VALUES ($1, 'public', $2, true, $3, 'bsky.app', $4)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
+		RETURNING id
+	`, reposterID, postID, repostURI, parseBlueskyTime(reason.IndexedAt)).Scan(&repostID)
+	if err != nil {
+		return // ErrNoRows on redelivery — expected, not an error
+	}
+
+	// AGORA-198's notify loop, keyed on the reposting DID rather than the
+	// original post's author — did should already equal reposter.Did here
+	// (this item came from polling the reposter's own author feed), but the
+	// reposter's own profile is what a follower who opted into notifications
+	// is following, not the original author's. Reuses the existing
+	// "atproto_post" notification type — ingestAuthorFeed's own-post branch
+	// uses the same type for this DID's activity, and introducing a distinct
+	// "reposted" variant would need matching frontend/push-copy support that
+	// doesn't exist yet.
+	if s.notif != nil {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT af.local_user_id
+			FROM at_following af JOIN users u ON u.id = af.local_user_id
+			WHERE af.remote_did = $1 AND af.notify = true AND u.atproto_notifications_enabled = true
+		`, did)
+		if err == nil {
+			for rows.Next() {
+				var followerID string
+				if rows.Scan(&followerID) == nil {
+					s.notif.Create(followerID, reposterID, "atproto_post", postID, "")
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	log.Printf("atproto: ingested repost %s of %s by %s", postID, post.Uri, reposter.Handle)
 }
 
 // StartBlueskyIngestion polls every followed DID's author feed on an

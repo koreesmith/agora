@@ -1048,4 +1048,20 @@ var schema = []string{
 	// always '{}' for a native Bluesky stub/post.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS emojis JSONB NOT NULL DEFAULT '{}'`,
+
+	// AGORA-270: created_at was overloaded to mean "when this row was
+	// inserted", for every post, local or remote — for an ingested
+	// Bluesky/Fediverse post that meant the feed displayed and sorted by
+	// when Agora happened to poll/receive it, not when the post was
+	// actually published on the origin network. published_at is the real
+	// origin timestamp (record.createdAt / Note.published) for a remote
+	// post, and mirrors created_at for a locally-authored one. Backfilled
+	// to the existing created_at for every already-stored row — correct
+	// for local posts, best-effort/unchanged for already-ingested remote
+	// ones, since the real origin time was never captured before now.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`,
+	`UPDATE posts SET published_at = created_at WHERE published_at IS NULL`,
+	`ALTER TABLE posts ALTER COLUMN published_at SET DEFAULT NOW()`,
+	`ALTER TABLE posts ALTER COLUMN published_at SET NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published_at DESC)`,
 }

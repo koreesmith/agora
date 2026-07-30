@@ -5,6 +5,7 @@ import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
 import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import { renderName } from '../components/feed/CommentsSection'
 
 const typeIcon: Record<string, React.ReactNode> = {
   friend_request:        <UserPlus size={16} className="text-blue-500" />,
@@ -107,17 +108,21 @@ function notifTarget(n: any): string | null {
   }
 }
 
-function groupedActorText(actors: any[], count: number): string {
-  const names = actors.map(a => a.display_name || a.username || 'Someone')
+// AGORA-269: renders each actor's name through renderName so a Fediverse
+// display name's :shortcode: (already serialized onto each actor as
+// `emojis` by the backend) shows as its inline image here too, same as the
+// feed/comments/search already do — this page just never called it.
+function groupedActorText(actors: any[], count: number): React.ReactNode {
+  const names = actors.map(a => renderName(a.display_name || a.username || 'Someone', a.emojis))
   // Use names.length (distinct actors) for interpolation — count may exceed
   // names.length when the same actor acted multiple times (AGORA-135).
   if (names.length === 0) return 'Someone'
   if (names.length === 1) return names[0]
-  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  if (names.length === 2) return <>{names[0]} and {names[1]}</>
   // 3+ distinct actors shown; remaining folded into "X others"
   const others = count - 2
-  if (others <= 0) return `${names[0]}, ${names[1]}, and ${names[2]}`
-  return `${names[0]}, ${names[1]}, and ${others} other${others !== 1 ? 's' : ''}`
+  if (others <= 0) return <>{names[0]}, {names[1]}, and {names[2]}</>
+  return <>{names[0]}, {names[1]}, and {others} other{others !== 1 ? 's' : ''}</>
 }
 
 export default function NotificationsPage() {
@@ -269,7 +274,7 @@ function NotifBody({ n }: { n: any }) {
     ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
   const actorText = n.grouped
     ? groupedActorText(n.actors ?? [], n.count ?? 1)
-    : (n.actor_display_name || n.actor_username)
+    : renderName(n.actor_display_name || n.actor_username, n.actor_emojis)
   return (
     <div className="flex-1 min-w-0">
       <p className="text-sm">

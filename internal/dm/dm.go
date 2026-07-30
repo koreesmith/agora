@@ -64,7 +64,14 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/conversations/{id}/read",      s.MarkRead)
 	r.Post("/conversations/{id}/accept",    s.AcceptRequest)
 	r.Delete("/conversations/{id}",         s.LeaveConversation)
-	r.Get("/ws",                            s.WebSocket)
+}
+
+// RegisterWebSocketRoute registers /ws on its own, separate from
+// RegisterRoutes, so callers can guard it with a WebSocket-specific auth
+// middleware (browsers can't set headers on the upgrade request) instead of
+// the header-only middleware used for the rest of the DM API.
+func RegisterWebSocketRoute(r chi.Router, s *Service) {
+	r.Get("/ws", s.WebSocket)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

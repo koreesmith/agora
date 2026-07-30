@@ -45,6 +45,16 @@ type atprotoSyncer interface {
 	// GetRemoteActorStats mirrors fedSender's method of the same name, for a
 	// Bluesky account (AGORA-253).
 	GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool)
+	// SearchActorsForMention returns live, network-wide Bluesky accounts
+	// matching q for the @-mention dropdown (AGORA-274) — unlike the
+	// ap_following block in UnifiedMentionSearch (limited to accounts
+	// already followed, since ActivityPub has no directory-search API to
+	// relay), Bluesky's actor search covers the whole network, so this can
+	// go straight to the AppView instead of only what's already known
+	// locally. Parallel slices (rather than a shared struct) keep this
+	// package from needing to import internal/atproto's types, matching
+	// this interface's existing primitive-only convention.
+	SearchActorsForMention(ctx context.Context, viewerID, q string, limit int) (handles, displayNames, avatarURLs []string, disabled bool)
 }
 
 type Service struct {
@@ -878,6 +888,27 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 			rRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.RemoteInstance, &emojis)
 			u.Emojis = json.RawMessage(emojis)
 			users = append(users, u)
+		}
+	}
+	// ── Bluesky live search (AGORA-274) ─────────────────────────────────────
+	// Complements the ap_following block above: a fediverse instance has no
+	// directory-search API, so that block is limited to already-followed
+	// accounts, but Bluesky's actor search covers the whole network — this
+	// mirrors mobile's existing Search screen, just relayed through
+	// mention-search so the composer can offer it too (AMOBILE-153).
+	if q != "" && s.atproto != nil {
+		handles, displayNames, avatarURLs, disabled := s.atproto.SearchActorsForMention(r.Context(), userID, q, 5)
+		if !disabled {
+			for i, h := range handles {
+				users = append(users, UserHit{
+					ID:             "bsky:" + h,
+					Username:       h,
+					DisplayName:    displayNames[i],
+					AvatarURL:      avatarURLs[i],
+					IsRemote:       true,
+					RemoteInstance: "bsky.app",
+				})
+			}
 		}
 	}
 	if users == nil { users = []UserHit{} }

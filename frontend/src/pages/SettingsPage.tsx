@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
 import { usersApi, authApi, notificationsApi, blocksApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
+import CustomDomainPanel from '../components/common/CustomDomainPanel'
 
 export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
@@ -389,6 +390,7 @@ export default function SettingsPage() {
           ActivityPub. Follow management lands here once AGORA-195 exists;
           for now this is just the opt-out toggle. */}
       {tab === 'bluesky' && (
+        <div className="space-y-4">
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Bluesky (AT Protocol)</h3>
           <p className="text-sm text-agora-500">
@@ -422,6 +424,12 @@ export default function SettingsPage() {
             Following a Bluesky handle and managing who you already follow moved to{' '}
             <Link to="/connections?tab=bluesky" className="underline hover:text-agora-700">Connections → Bluesky</Link>.
           </p>
+        </div>
+        {/* AGORA-284: a custom handle is an AT Proto identity feature, so it
+            lives with the rest of the Bluesky settings rather than in a tab
+            of its own — but as a separate card, since it's a setup flow with
+            its own state, not another toggle. */}
+        <CustomDomainPanel />
         </div>
       )}
 

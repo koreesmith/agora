@@ -15,6 +15,11 @@ import (
 
 // Requires the local agora-postgres-test instance (localhost:15433); skips
 // rather than failing the suite if it isn't reachable.
+//
+// Closing is registered as the first cleanup so it runs last: t.Cleanup is
+// LIFO, and the per-test row deletions registered later would otherwise fire
+// against an already-closed pool and silently no-op, leaving seeded rows
+// behind in the shared test database.
 func testDB(t *testing.T) *store.DB {
 	t.Helper()
 	dsn := "postgres://agora:agora@localhost:15433/agora_test?sslmode=disable"
@@ -22,6 +27,7 @@ func testDB(t *testing.T) *store.DB {
 	if err != nil {
 		t.Skipf("test DB not reachable at %s, skipping: %v", dsn, err)
 	}
+	t.Cleanup(func() { db.Close() })
 	return db
 }
 
@@ -102,7 +108,6 @@ func TestNormalizeDomain(t *testing.T) {
 // held until it goes stale.
 func TestAssertClaimableBlocksOtherAccounts(t *testing.T) {
 	db := testDB(t)
-	defer db.Close()
 	s := testService(db)
 
 	holderID, _ := seedUser(t, db, "agora290_holder")

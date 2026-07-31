@@ -252,6 +252,10 @@ export const adminApi = {
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
+  // Custom domain approval queue (AGORA-286)
+  listCustomDomains:   (status?: string)            => api.get('/admin/custom-domains', { params: { status } }),
+  approveCustomDomain: (id: string)                 => api.post(`/admin/custom-domains/${id}/approve`),
+  rejectCustomDomain:  (id: string, reason: string) => api.post(`/admin/custom-domains/${id}/reject`, { reason }),
   // Fediverse relays (AGORA-223)
   listRelays:   ()               => api.get('/admin/relays'),
   addRelay:     (inboxUrl: string) => api.post('/admin/relays', { inbox_url: inboxUrl }),
@@ -299,6 +303,17 @@ export const atprotoApi = {
   // handle/DID resolve, and from searchApi's own Agora+cached-remote search.
   searchBlueskyActors: (q: string) => api.get('/atproto/search/actors', { params: { q } }),
   searchBlueskyPosts:  (q: string) => api.get('/atproto/search/posts', { params: { q } }),
+}
+
+// ── Custom domain handles (AGORA-278) ────────────────────────────────────────
+// One claim per account: the endpoints are singular and take no id, since an
+// AT Proto DID has exactly one handle and a second claim would only raise the
+// question of which one it is.
+export const customDomainApi = {
+  get:     ()               => api.get('/custom-domain'),
+  claim:   (domain: string) => api.post('/custom-domain', { domain }),
+  verify:  ()               => api.post('/custom-domain/verify'),
+  release: ()               => api.delete('/custom-domain'),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

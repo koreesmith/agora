@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud, AlertCircle } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import { renderName } from '../components/feed/CommentsSection'
 
@@ -33,6 +33,27 @@ const typeIcon: Record<string, React.ReactNode> = {
   page_member_invite:    <UserPlus size={16} className="text-agora-500" />,
   fediverse_post:        <Globe size={16} className="text-sky-500" />,
   atproto_post:          <Cloud size={16} className="text-sky-500" />,
+
+  // Custom domain handles (AGORA-287) — see systemNotifText below for why
+  // these are their own shape rather than another "<actor> did a thing".
+  custom_domain_live:     <CheckCircle size={16} className="text-green-500" />,
+  custom_domain_verified: <Globe size={16} className="text-amber-500" />,
+  custom_domain_failed:   <AlertCircle size={16} className="text-red-400" />,
+  custom_domain_lost:     <AlertCircle size={16} className="text-red-500" />,
+  custom_domain_rejected: <XCircle size={16} className="text-red-400" />,
+}
+
+// AGORA-287: custom domain notifications come from the instance itself, not
+// from another person — there's no actor to name, and naming the admin who
+// reviewed a request would only invite them to be argued with personally.
+// They render as a whole sentence with the domain (carried in `data`) inlined,
+// rather than the "<actor> <predicate>" shape every other type is built from.
+const systemNotifText: Record<string, (domain: string) => string> = {
+  custom_domain_live:     d => `${d} is verified and live — it's your handle on Bluesky now`,
+  custom_domain_verified: d => `${d} is verified and waiting for an administrator to approve it`,
+  custom_domain_failed:   d => `We couldn't verify ${d} — tap to see what went wrong`,
+  custom_domain_lost:     d => `${d} stopped verifying, so your handle has gone back to the one this instance issued you`,
+  custom_domain_rejected: d => `Your request to use ${d} as your handle was declined`,
 }
 
 const REACTION_EMOJIS: Record<string, string> = {
@@ -103,6 +124,12 @@ function notifTarget(n: any): string | null {
       return '/admin?tab=reports'
     case 'waitlist_join':
       return '/admin?tab=waitlist'
+    case 'custom_domain_live':
+    case 'custom_domain_verified':
+    case 'custom_domain_failed':
+    case 'custom_domain_lost':
+    case 'custom_domain_rejected':
+      return '/settings?tab=bluesky'
     default:
       return null
   }
@@ -270,6 +297,17 @@ function NotifAvatar({ n }: { n: any }) {
 }
 
 function NotifBody({ n }: { n: any }) {
+  const system = systemNotifText[n.type]
+  if (system) {
+    return (
+      <div className="flex-1 min-w-0">
+        <p className="text-sm">{system(n.data || 'your custom domain')}</p>
+        <p className="text-xs text-agora-400 mt-0.5">
+          {formatDistanceToNow(new Date(n.created_at), { addSuffix: true })}
+        </p>
+      </div>
+    )
+  }
   const reactionEmoji = (n.type === 'post_reaction' || n.type === 'comment_reaction') && n.data
     ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
   const actorText = n.grouped

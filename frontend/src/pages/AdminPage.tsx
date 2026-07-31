@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio, AtSign } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
     (searchParams.get('tab') as any) || 'overview'
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
@@ -30,6 +30,10 @@ export default function AdminPage() {
   const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
   const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='relays' })
+  // AGORA-286: the queue defaults to what needs a decision; ?status=all is
+  // how an admin sees claims that are rejected or not yet verified too.
+  const [domainFilter, setDomainFilter] = useState<'pending'|'all'>('pending')
+  const { data: domainsData } = useQuery({ queryKey:['admin-custom-domains', domainFilter], queryFn: ()=>adminApi.listCustomDomains(domainFilter).then(r=>r.data), enabled: tab==='domains' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
@@ -76,6 +80,7 @@ export default function AdminPage() {
     { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
     { id:'fediverse',   label:'Fediverse',   icon: Globe },
     { id:'bluesky',     label:'Bluesky',     icon: Cloud },
+    { id:'domains',     label:'Domains',     icon: AtSign },
     { id:'federation',  label:'Federation',  icon: Link2 },
     { id:'relays',      label:'Relays',      icon: Radio },
     { id:'invites',     label:'Invites',     icon: Ticket },
@@ -541,6 +546,19 @@ export default function AdminPage() {
             ))}
           </div>
         </div>
+      )}
+
+      {/* AGORA-286: custom domain handles. Its own tab rather than a section
+          of the Bluesky one — the review queue is recurring work an admin
+          comes here specifically to do, not a setting they set once. */}
+      {tab==='domains' && (
+        <CustomDomainsPanel
+          domains={domainsData?.domains||[]}
+          approvalMode={domainsData?.approval_mode||'manual'}
+          filter={domainFilter}
+          onFilter={setDomainFilter}
+          onChanged={()=>qc.invalidateQueries({queryKey:['admin-custom-domains']})}
+        />
       )}
 
       {tab==='federation' && (
@@ -1037,6 +1055,174 @@ function RelaysPanel({ relays, onChanged }: {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// ── Custom Domains Panel (AGORA-286) ──────────────────────────────────────────
+//
+// The review queue for "bring your own domain" claims. What an admin is
+// actually deciding here is narrow: DNS has already proven the claimant
+// controls the domain, so this is a policy call about whether the instance
+// wants to publish that handle — not a second ownership check. The panel
+// leads with the verification proof so that distinction is visible rather
+// than implied.
+//
+// The auto/manual setting (AGORA-285) lives here rather than on the generic
+// Settings tab because it's the switch that decides whether this queue is
+// used at all.
+
+function CustomDomainsPanel({ domains, approvalMode, filter, onFilter, onChanged }: {
+  domains: any[]
+  approvalMode: string
+  filter: 'pending'|'all'
+  onFilter: (f: 'pending'|'all') => void
+  onChanged: () => void
+}) {
+  const qc = useQueryClient()
+  const [reasons, setReasons] = useState<Record<string,string>>({})
+  const [err, setErr] = useState('')
+
+  const fail = (e: any) => setErr(e.response?.data?.error || 'Something went wrong')
+
+  const setMode = useMutation({
+    mutationFn: (mode: string) => adminApi.updateSettings({ custom_domain_approval: mode }),
+    onSuccess: () => { setErr(''); qc.invalidateQueries({queryKey:['admin-settings']}); onChanged() },
+    onError: fail,
+  })
+  const approve = useMutation({
+    mutationFn: (id: string) => adminApi.approveCustomDomain(id),
+    onSuccess: () => { setErr(''); onChanged() },
+    onError: fail,
+  })
+  const reject = useMutation({
+    mutationFn: ({ id, reason }: { id: string, reason: string }) => adminApi.rejectCustomDomain(id, reason),
+    onSuccess: () => { setErr(''); onChanged() },
+    onError: fail,
+  })
+
+  const statusPill = (d: any) => {
+    if (d.live) return ['✓ Live', 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400']
+    if (d.approval_status === 'rejected') return ['Rejected', 'bg-red-100 dark:bg-red-900/30 text-red-600']
+    if (d.verification_status === 'verified') return ['⏳ Awaiting review', 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400']
+    if (d.verification_status === 'failed') return ['Not verifying', 'bg-red-100 dark:bg-red-900/30 text-red-600']
+    return ['Unverified', 'bg-agora-100 dark:bg-agora-700 text-agora-500']
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Custom domain handles</h3>
+        <p className="text-sm text-agora-500">
+          Users can point a domain they own at their account so it becomes their handle on Bluesky and the wider
+          AT Protocol network. Ownership is proven by a DNS record or a file on the domain before a request reaches
+          this queue — approving is a decision about whether this instance wants to publish that handle, not a
+          second ownership check.
+        </p>
+        <div className="flex items-center justify-between py-2 border-t border-agora-100 dark:border-agora-700">
+          <div>
+            <p className="font-medium text-sm">Approve verified domains automatically</p>
+            <p className="text-xs text-agora-400">
+              On, a domain goes live as soon as it verifies and this queue stays empty. Off, every verified domain
+              waits here for a decision.
+            </p>
+          </div>
+          <button
+            onClick={()=>setMode.mutate(approvalMode === 'auto' ? 'manual' : 'auto')}
+            disabled={setMode.isPending}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${approvalMode === 'auto' ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}
+          >
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${approvalMode === 'auto' ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+      </div>
+
+      {err && <div className="card p-3 text-sm text-red-600">{err}</div>}
+
+      <div className="flex gap-2">
+        {(['pending','all'] as const).map(f => (
+          <button key={f} onClick={()=>onFilter(f)}
+            className={`px-3 py-1 rounded-lg text-sm font-medium ${filter===f?'bg-agora-700 text-white':'btn-secondary'}`}>
+            {f === 'pending' ? 'Awaiting review' : 'All requests'}
+          </button>
+        ))}
+      </div>
+
+      {domains.length === 0 && (
+        <div className="card p-4 text-center text-agora-400 text-sm">
+          {filter === 'pending' ? 'Nothing waiting for review.' : 'No custom domain requests yet.'}
+        </div>
+      )}
+
+      {domains.map((d: any) => {
+        const [label, cls] = statusPill(d)
+        return (
+          <div key={d.id} className="card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <p className="font-medium">{d.domain}</p>
+                <p className="text-sm text-agora-500">
+                  Requested by <Link to={`/profile/${d.username}`} className="hover:underline">{d.display_name || d.username}</Link>
+                  {' '}<span className="text-agora-400">@{d.username}</span>
+                </p>
+              </div>
+              <span className={`px-1.5 py-0.5 rounded text-xs flex-shrink-0 ${cls}`}>{label}</span>
+            </div>
+
+            {/* The proof, stated plainly: which challenge passed, when, and
+                against which DID — the three things that make "verified" mean
+                something an admin can act on rather than a status word. */}
+            <div className="rounded-lg bg-agora-50 dark:bg-agora-800/50 p-3 space-y-1 text-xs">
+              <p>
+                <span className="text-agora-400">Proof: </span>
+                {d.verification_status === 'verified'
+                  ? <>{d.verification_method === 'dns'
+                        ? <>DNS TXT record at <code>_atproto.{d.domain}</code></>
+                        : <>file at <code>https://{d.domain}/.well-known/atproto-did</code></>}
+                      {d.verified_at && <> · verified {new Date(d.verified_at).toLocaleString()}</>}</>
+                  : <>not currently verifying{d.last_error && <> — {d.last_error}</>}</>}
+              </p>
+              <p className="font-mono text-agora-400 truncate">{d.did}</p>
+              {d.last_checked_at && (
+                <p className="text-agora-400">Last checked {new Date(d.last_checked_at).toLocaleString()}</p>
+              )}
+              {d.rejection_reason && <p className="text-red-500">Rejected: {d.rejection_reason}</p>}
+            </div>
+
+            <div className="flex gap-2 flex-wrap items-center">
+              {d.approval_status !== 'approved' && (
+                <button
+                  onClick={()=>approve.mutate(d.id)}
+                  disabled={approve.isPending || d.verification_status !== 'verified'}
+                  title={d.verification_status !== 'verified' ? 'This claim is not currently verifying' : ''}
+                  className="btn-primary text-sm"
+                >
+                  Approve
+                </button>
+              )}
+              <input
+                className="input text-sm flex-1 min-w-40"
+                autoComplete="off"
+                placeholder="Reason (shown to the user)"
+                value={reasons[d.id] || ''}
+                onChange={e=>setReasons(r=>({...r,[d.id]:e.target.value}))}
+              />
+              <button
+                onClick={()=>{
+                  const what = d.approval_status === 'approved'
+                    ? `Revoke ${d.domain}? Their handle goes back to the one this instance issued.`
+                    : `Decline ${d.domain}?`
+                  if (confirm(what)) reject.mutate({ id: d.id, reason: reasons[d.id] || '' })
+                }}
+                disabled={reject.isPending || d.approval_status === 'rejected'}
+                className="btn-danger text-sm"
+              >
+                {d.approval_status === 'approved' ? 'Revoke' : 'Decline'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

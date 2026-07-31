@@ -83,7 +83,6 @@ func alsoKnownAs(t *testing.T, doc map[string]any) []string {
 // original handle both keep working.
 func TestDIDDocumentPublishesApprovedCustomDomain(t *testing.T) {
 	db := testDB(t)
-	defer db.Close()
 	enableATProto(t, db)
 	s := customHandleService(db)
 
@@ -118,7 +117,6 @@ func TestDIDDocumentPublishesApprovedCustomDomain(t *testing.T) {
 // to the instance handle automatic rather than a teardown step).
 func TestDIDDocumentWithholdsUnapprovedDomain(t *testing.T) {
 	db := testDB(t)
-	defer db.Close()
 	enableATProto(t, db)
 	s := customHandleService(db)
 
@@ -154,7 +152,6 @@ func TestDIDDocumentWithholdsUnapprovedDomain(t *testing.T) {
 // they just proved they own resolves to nothing.
 func TestResolvesCustomDomainHost(t *testing.T) {
 	db := testDB(t)
-	defer db.Close()
 	enableATProto(t, db)
 	s := customHandleService(db)
 
@@ -190,7 +187,6 @@ func TestResolvesCustomDomainHost(t *testing.T) {
 // the approval step would be advisory.
 func TestCustomDomainHostRequiresLiveClaim(t *testing.T) {
 	db := testDB(t)
-	defer db.Close()
 	enableATProto(t, db)
 	s := customHandleService(db)
 

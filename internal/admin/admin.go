@@ -92,6 +92,9 @@ var adminEditableSettings = map[string]bool{
 	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "deletion_grace_days": true, "logo_url": true,
 	"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
 	"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
+	// AGORA-285: 'auto' or 'manual' — whether a DNS-verified custom domain
+	// claim goes live on its own or waits in the approval queue (AGORA-286).
+	"custom_domain_approval": true,
 }
 
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {

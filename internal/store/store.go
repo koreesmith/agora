@@ -220,7 +220,13 @@ var schema = []string{
 		('smtp_from',            'noreply@localhost'),
 		('smtp_enabled',         'false'),
 		('logo_url',             ''),
-		('atproto_enabled',      'false')
+		('atproto_enabled',      'false'),
+		-- AGORA-285: 'manual' or 'auto'. Defaults to manual so the feature
+		-- can't silently start binding handles on an instance that upgrades
+		-- into it — DNS verification already proves the user controls the
+		-- domain, so auto is a perfectly reasonable choice, just not one to
+		-- make on an admin's behalf.
+		('custom_domain_approval', 'manual')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────
@@ -1064,4 +1070,57 @@ var schema = []string{
 	`ALTER TABLE posts ALTER COLUMN published_at SET DEFAULT NOW()`,
 	`ALTER TABLE posts ALTER COLUMN published_at SET NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published_at DESC)`,
+
+	// AGORA-281: a user's claim on their own domain as a handle alias. The
+	// protocol column is what makes this table shared rather than AT-Proto-
+	// specific: AGORA-278 only ever writes 'atproto' rows, but the fediverse
+	// custom-domain epic (AGORA-279) verifies domain ownership the same way
+	// and differs only in what it does with a verified domain, so it lands as
+	// a second protocol value here rather than a parallel table.
+	//
+	// verification_status and approval_status are deliberately separate axes,
+	// not one lifecycle column: DNS proves the user controls the domain,
+	// approval is the instance's policy decision about whether to honor it
+	// (AGORA-285), and either can change without the other. A handle only
+	// goes live when both say yes — see liveCustomDomain in internal/domains.
+	`CREATE TABLE IF NOT EXISTS custom_domains (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		domain              TEXT        NOT NULL,
+		protocol            VARCHAR(20) NOT NULL DEFAULT 'atproto'
+		                      CHECK (protocol IN ('atproto','activitypub')),
+		verification_method VARCHAR(20) NOT NULL DEFAULT ''
+		                      CHECK (verification_method IN ('','dns','well-known')),
+		verification_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+		                      CHECK (verification_status IN ('pending','verified','failed')),
+		approval_status     VARCHAR(20) NOT NULL DEFAULT 'pending'
+		                      CHECK (approval_status IN ('pending','approved','rejected')),
+		last_error          TEXT        NOT NULL DEFAULT '',
+		rejection_reason    TEXT        NOT NULL DEFAULT '',
+		reviewed_by         UUID        REFERENCES users(id) ON DELETE SET NULL,
+		verified_at         TIMESTAMPTZ,
+		last_checked_at     TIMESTAMPTZ,
+		reviewed_at         TIMESTAMPTZ,
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	// AGORA-290: one live claimant per domain. Rejected rows are excluded so an
+	// admin's rejection doesn't permanently burn the domain for everybody —
+	// the row sticks around only so the rejected user can still see why.
+	// Claim-jumping an *unverified* row is handled in ClaimDomain (stale
+	// claims are reclaimable), not here; this index is the hard backstop that
+	// keeps two accounts from ever holding the same live handle.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_domains_domain
+		ON custom_domains(domain, protocol) WHERE approval_status <> 'rejected'`,
+	// One row per user per protocol, full stop — an AT Proto DID has exactly
+	// one handle, so a second claim would only raise the question of which of
+	// them is the handle. Claiming a new domain replaces the row rather than
+	// adding to it (see ClaimDomain), which also means a rejected claim can't
+	// accumulate as clutter the user can never clear.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_domains_user
+		ON custom_domains(user_id, protocol)`,
+	// Drives both the admin approval queue (AGORA-286) and the periodic
+	// re-verification sweep (AGORA-289), which scan by status, not by user.
+	`CREATE INDEX IF NOT EXISTS idx_custom_domains_status
+		ON custom_domains(verification_status, approval_status)`,
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/customfeeds"
 	"github.com/agora-social/agora/internal/dm"
+	"github.com/agora-social/agora/internal/domains"
 	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/friends"
@@ -72,6 +73,7 @@ func main() {
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
 	atprotoSvc      := atproto.NewService(db, cfg, notifSvc)
+	domainsSvc      := domains.NewService(db, cfg, notifSvc)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
@@ -80,6 +82,11 @@ func main() {
 	pagesSvc.SetFed(fedSvc)
 	userSvc.SetAtproto(atprotoSvc)
 	feedSvc.SetAtproto(atprotoSvc)
+	// AGORA-278: internal/domains owns the claim/verify/approve workflow and
+	// internal/atproto owns what a verified domain means for identity. Wired
+	// rather than imported — internal/atproto reads custom_domains directly,
+	// so a direct import back would be a cycle.
+	domainsSvc.SetAtproto(atprotoSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -180,6 +187,10 @@ func main() {
 			// fediverse servers dereferencing our public actor/WebFinger URLs.
 			federation.RegisterAuthedRoutes(r, fedSvc)
 			atproto.RegisterAuthedRoutes(r, atprotoSvc)
+			// AGORA-284: claiming/verifying your own domain as a handle. Its
+			// own rate limits are applied inside RegisterRoutes, keyed by
+			// account rather than IP (AGORA-290).
+			domains.RegisterRoutes(r, domainsSvc)
 		})
 
 		// WebSocket upgrade — browsers can't set an Authorization header on
@@ -209,6 +220,8 @@ func main() {
 			// AGORA-270 follow-up: published_at backfill needs the AppView
 			// client, which only exists in the atproto package.
 			atproto.RegisterAdminRoutes(r, atprotoSvc)
+			// AGORA-286: the custom domain approval queue.
+			domains.RegisterAdminRoutes(r, domainsSvc)
 		})
 	})
 
@@ -234,6 +247,9 @@ func main() {
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
 	go atprotoSvc.StartBlueskyIngestion(context.Background())
+	// AGORA-289: re-checks verified custom domains so a removed DNS record or
+	// a lapsed registration takes the handle out of service on its own.
+	go domainsSvc.StartReverification(context.Background())
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{

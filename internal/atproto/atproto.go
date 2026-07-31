@@ -245,23 +245,28 @@ type resolvedIdentity struct {
 	Username string
 	DID      string
 	Priv     *atcrypto.PrivateKeyK256
+	// Handles is every handle this DID claims, most-preferred first — see
+	// handlesFor. A user with no custom domain has exactly one.
+	Handles []string
 }
 
-// resolveFromHost extracts the username from the request's per-user-subdomain
-// Host header (AGORA-186's routing target; a spoofed Host header stands in
-// for it until that infra exists), and resolves the eligible user's DID and
+// resolveFromHost resolves the request's Host header to a local user's DID and
 // signing key, persisting either if this is their first resolution.
+//
+// Two kinds of host resolve here. The per-user subdomain (AGORA-186's routing
+// target; a spoofed Host header stands in for it until that infra exists) is
+// the instance-issued one every account has. A verified custom domain
+// (AGORA-283) is the second: a user who points their own domain at this
+// instance rather than serving the well-known file themselves needs these
+// endpoints to answer for that domain too, or the handle they just proved
+// they own resolves to nothing.
 func (s *Service) resolveFromHost(r *http.Request) (*resolvedIdentity, bool) {
 	host := r.Host
 	if i := strings.IndexByte(host, ':'); i != -1 {
 		host = host[:i] // strip a port, if present (e.g. local dev on :8099)
 	}
-	username := strings.TrimSuffix(host, "."+domainFromURL(s.cfg.InstanceDomain))
-	if username == "" || username == host {
-		return nil, false
-	}
 
-	u, ok := s.eligibleUser(username)
+	u, ok := s.eligibleUserForHost(host)
 	if !ok {
 		return nil, false
 	}
@@ -271,7 +276,28 @@ func (s *Service) resolveFromHost(r *http.Request) (*resolvedIdentity, bool) {
 		return nil, false
 	}
 
-	return &resolvedIdentity{Username: u.Username, DID: did, Priv: priv}, true
+	return &resolvedIdentity{
+		Username: u.Username,
+		DID:      did,
+		Priv:     priv,
+		Handles:  s.handlesFor(u.ID, u.Username),
+	}, true
+}
+
+// eligibleUserForHost tries the instance subdomain first and a verified custom
+// domain second. Subdomain first because it's the common case and costs a
+// string comparison before any query, and because the instance's own domain
+// is never claimable as a custom one (normalizeDomain rejects it), so the two
+// namespaces can't overlap and the order can't shadow a valid claim.
+func (s *Service) eligibleUserForHost(host string) (*eligibleUser, bool) {
+	username := strings.TrimSuffix(host, "."+domainFromURL(s.cfg.InstanceDomain))
+	if username != "" && username != host {
+		if u, ok := s.eligibleUser(username); ok {
+			return u, true
+		}
+		return nil, false
+	}
+	return s.userByCustomDomain(host)
 }
 
 // ensureIdentity resolves (lazily generating/persisting if needed) a user's
@@ -320,12 +346,21 @@ func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	keyID := id.DID + "#atproto"
-	// at:// handle URI, listed in alsoKnownAs so resolution is verifiable in
-	// both directions (AGORA-188): the DID document claims this handle, and
-	// AtprotoDIDText independently confirms the handle resolves back to this
+	// at:// handle URIs, listed in alsoKnownAs so resolution is verifiable in
+	// both directions (AGORA-188): the DID document claims these handles, and
+	// AtprotoDIDText independently confirms each one resolves back to this
 	// same DID — the same mutual-verification requirement WebFinger has for
 	// ActivityPub actors.
-	handle := id.Username + "." + domainFromURL(s.cfg.InstanceDomain)
+	//
+	// A verified custom domain (AGORA-282) is published here as an additional
+	// entry, ahead of the instance handle since AT Proto reads the first as
+	// primary. The DID itself is untouched: this is an alias, not a migration,
+	// so nothing that already resolved this account by its did:web identifier
+	// or instance handle stops working.
+	aka := make([]string, 0, len(id.Handles))
+	for _, h := range id.Handles {
+		aka = append(aka, "at://"+h)
+	}
 	doc := map[string]any{
 		"@context": []string{
 			"https://www.w3.org/ns/did/v1",
@@ -333,7 +368,7 @@ func (s *Service) DIDDocument(w http.ResponseWriter, r *http.Request) {
 			"https://w3id.org/security/suites/secp256k1-2019/v1",
 		},
 		"id":          id.DID,
-		"alsoKnownAs": []string{"at://" + handle},
+		"alsoKnownAs": aka,
 		"verificationMethod": []map[string]any{{
 			"id":                 keyID,
 			"type":               "Multikey",

@@ -9,6 +9,7 @@ import CommentsSection, { renderContent, renderName } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
 import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
+import CustomHandle from '../common/CustomHandle'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -21,6 +22,10 @@ interface Post {
   author_display_name: string
   author_pronouns: string
   author_avatar_url: string
+  // AGORA-288: a domain the author has verified they control, shown alongside
+  // @username rather than replacing it — see components/common/CustomHandle.
+  author_custom_domain?: string
+  repost_author_custom_domain?: string
   is_remote?: boolean
   remote_instance?: string
   content: string
@@ -625,6 +630,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   {handle(post.author_username, post.is_remote, post.remote_instance)}
                 </span>
               )}
+              {!post.page_id && <CustomHandle domain={post.author_custom_domain} />}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               {detail ? (
                 <span className="text-agora-400 text-xs" title={exactTimestamp(post)}>
@@ -826,6 +832,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       <span className="text-agora-400 dark:text-agora-500 text-xs">({post.repost_author_pronouns})</span>
                     )}
                     <span className="text-agora-400 text-xs">{handle(post.repost_author_username!)}</span>
+                    <CustomHandle domain={post.repost_author_custom_domain} />
                   </div>
                   {post.repost_content && (
                     <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">

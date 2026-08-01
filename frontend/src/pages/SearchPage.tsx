@@ -8,6 +8,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2, BookOpen, ExternalLink } from 'lucide-react'
 import { useMutation as useSubscribeMutation } from '@tanstack/react-query'
+import CustomHandle from '../components/common/CustomHandle'
 
 export default function SearchPage() {
   // AGORA-217: a hashtag link elsewhere in the app (renderContent) navigates
@@ -290,8 +291,9 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
         <Link to={`/profile/${u.username}`} className="font-medium text-sm hover:underline block truncate">
           {u.display_name ? renderName(u.display_name, u.emojis) : u.username}
         </Link>
-        <p className="text-xs text-agora-400 truncate">
-          {handle(u.username, u.is_remote, u.remote_instance)}
+        <p className="text-xs text-agora-400 truncate flex items-center gap-1.5">
+          <span className="truncate">{handle(u.username, u.is_remote, u.remote_instance)}</span>
+          <CustomHandle domain={u.custom_domain} />
         </p>
         {u.bio && <p className="text-xs text-agora-500 truncate mt-0.5">{u.bio}</p>}
       </div>

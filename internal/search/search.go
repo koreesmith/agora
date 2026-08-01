@@ -39,6 +39,7 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio,
 		       u.is_remote, u.remote_instance, COALESCE(u.emojis::text,'{}'),
+		       COALESCE(cd.domain, ''),
 		       COALESCE(
 		           CASE
 		               WHEN u.id = $1 THEN 'self'
@@ -53,6 +54,11 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 			(f.requester_id = $1 AND f.addressee_id = u.id)
 		 OR (f.requester_id = u.id AND f.addressee_id = $1)
 		)
+		-- AGORA-288: a live custom domain is how this person is known on
+		-- Bluesky, and search results are where someone decides whether
+		-- they've found the right account.
+		LEFT JOIN custom_domains cd ON cd.user_id = u.id AND cd.protocol = 'atproto'
+		     AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
 		WHERE u.deletion_scheduled_at IS NULL
 		  AND u.is_suspended = false
 		  AND u.id != $1
@@ -82,6 +88,7 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		IsRemote       bool            `json:"is_remote"`
 		RemoteInstance string          `json:"remote_instance,omitempty"`
 		Emojis         json.RawMessage `json:"emojis,omitempty"`
+		CustomDomain   string          `json:"custom_domain,omitempty"`
 		FriendStatus   string          `json:"friendship_status"`
 	}
 
@@ -90,7 +97,7 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		var u Result
 		var emojis string
 		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio,
-			&u.IsRemote, &u.RemoteInstance, &emojis, &u.FriendStatus)
+			&u.IsRemote, &u.RemoteInstance, &emojis, &u.CustomDomain, &u.FriendStatus)
 		u.Emojis = json.RawMessage(emojis)
 		results = append(results, u)
 	}

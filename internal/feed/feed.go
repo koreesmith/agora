@@ -363,6 +363,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -694,6 +695,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 
@@ -770,6 +772,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 
@@ -970,6 +973,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -1313,6 +1317,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
@@ -1744,6 +1749,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -2605,6 +2611,10 @@ type Post struct {
 	AuthorName     string  `json:"author_display_name"`
 	AuthorPronouns string  `json:"author_pronouns"`
 	AuthorAvatar   string  `json:"author_avatar_url"`
+	// AGORA-288: the author's own domain, if they have a live one (AGORA-278).
+	// Filled in by enrichCustomHandles rather than selected in the queries
+	// above — see that function for why it isn't a join.
+	AuthorCustomDomain string `json:"author_custom_domain,omitempty"`
 	Content        string  `json:"content"`
 	ImageURL       string  `json:"image_url"`
 	Visibility     string  `json:"visibility"`
@@ -2663,6 +2673,7 @@ type Post struct {
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
 	RepostAuthorPronouns *string `json:"repost_author_pronouns,omitempty"`
 	RepostAuthorAvatar   *string `json:"repost_author_avatar_url,omitempty"`
+	RepostAuthorCustomDomain string `json:"repost_author_custom_domain,omitempty"`
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
 	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
@@ -2736,6 +2747,75 @@ func scanPosts(rows interface {
 	}
 	if posts == nil { return []Post{} }
 	return posts
+}
+
+// enrichCustomHandles fills in each post author's live custom-domain handle
+// (AGORA-288). Done as one extra query over the already-scanned posts, in the
+// same shape as enrichReactions, rather than as a join in the feed queries
+// themselves: the author column list is repeated across a dozen SELECTs that
+// all have to stay positionally in step with scanPosts, and adding a
+// LEFT JOIN to every one of them — including the hottest queries in the app —
+// is a lot of risk and per-row cost for a label almost no author has.
+//
+// Keyed by username rather than user id because a repost's source author is
+// only ever scanned as a username, with no id column to match on.
+func (s *Service) enrichCustomHandles(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	var names []any
+	for _, p := range posts {
+		for _, n := range []string{p.AuthorUsername, derefOr(p.RepostAuthorUsername)} {
+			if n != "" && !seen[n] {
+				seen[n] = true
+				names = append(names, n)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+
+	ph := make([]string, len(names))
+	for i := range names {
+		ph[i] = fmt.Sprintf("$%d", i+1)
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT u.username, cd.domain
+		FROM custom_domains cd
+		JOIN users u ON u.id = cd.user_id
+		WHERE cd.protocol = 'atproto'
+		  AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
+		  AND u.username IN (%s)
+	`, strings.Join(ph, ",")), names...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	byUsername := map[string]string{}
+	for rows.Next() {
+		var username, domain string
+		if rows.Scan(&username, &domain) == nil {
+			byUsername[username] = domain
+		}
+	}
+	if len(byUsername) == 0 {
+		return
+	}
+
+	for i := range posts {
+		posts[i].AuthorCustomDomain = byUsername[posts[i].AuthorUsername]
+		posts[i].RepostAuthorCustomDomain = byUsername[derefOr(posts[i].RepostAuthorUsername)]
+	}
+}
+
+func derefOr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // enrichReactions loads reaction counts and the current user's reaction for a slice of posts.

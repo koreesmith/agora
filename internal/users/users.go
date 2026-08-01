@@ -143,18 +143,28 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// DisplayName/Bio, sourced from the actor's own "tag" array at
 		// ingestion time.
 		Emojis json.RawMessage `json:"emojis,omitempty"`
+		// AGORA-288: the user's own domain, once verified and approved
+		// (AGORA-278) — their handle on Bluesky and the wider AT Protocol
+		// network. Omitted entirely unless it's live, so the frontend never
+		// has to re-derive "is this actually in effect" from two status
+		// fields; a claim that lapses simply stops appearing.
+		CustomDomain string `json:"custom_domain,omitempty"`
 	}
 	var emojisRaw string
 
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, pronouns, bio, avatar_url, cover_url, cover_position,
-		       location, website, profile_private, hide_timeline, is_remote, remote_instance, ap_actor_url,
-		       atproto_remote_did, created_at, COALESCE(emojis::text,'{}')
-		FROM users WHERE username = $1 AND deletion_scheduled_at IS NULL
+		SELECT u.id, u.username, u.display_name, u.pronouns, u.bio, u.avatar_url, u.cover_url, u.cover_position,
+		       u.location, u.website, u.profile_private, u.hide_timeline, u.is_remote, u.remote_instance, u.ap_actor_url,
+		       u.atproto_remote_did, u.created_at, COALESCE(u.emojis::text,'{}'),
+		       COALESCE(cd.domain, '')
+		FROM users u
+		LEFT JOIN custom_domains cd ON cd.user_id = u.id AND cd.protocol = 'atproto'
+		     AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
+		WHERE u.username = $1 AND u.deletion_scheduled_at IS NULL
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
-		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw,
+		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw, &u.CustomDomain,
 	)
 	if err != nil {
 		writeError(w, 404, "user not found")

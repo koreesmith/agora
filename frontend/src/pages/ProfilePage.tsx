@@ -9,6 +9,7 @@ import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import CustomHandle from '../components/common/CustomHandle'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={10} />,
@@ -339,8 +340,12 @@ export default function ProfilePage() {
               <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
             )}
           </h1>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+            {/* AGORA-288: the profile is where identity lives, so a verified
+                custom domain gets full size here rather than the compact
+                treatment it gets in feeds and search results. */}
+            <CustomHandle domain={profile.custom_domain} size="md" />
             {/* AGORA-249: fediverse/Bluesky mutual-follow indicator — meaningful
                 regardless of whether the viewer follows them back. */}
             {(isFediverse || isBluesky) && profile.follows_back && (

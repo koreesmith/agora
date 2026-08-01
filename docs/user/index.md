@@ -30,6 +30,7 @@ Welcome to Agora — a private, federated social network built for the people yo
 
 - [Following Mastodon and other fediverse accounts](fediverse.md)
 - [Following Bluesky accounts](bluesky.md)
+- [Using your own domain as your handle](custom-domain.md)
 
 ## Messaging
 

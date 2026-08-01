@@ -12,6 +12,7 @@ Every Agora account is also a real Bluesky account — no bridge, no separate si
 - **Search covers Bluesky too.** The unified **Search** page has an "On Bluesky" section for both People and Posts — this is a live, network-wide search against Bluesky itself, not limited to accounts you already follow.
 - **Very long posts get trimmed.** Bluesky caps post length well below Agora's own limit. If a post is too long to fit, what appears on Bluesky is truncated with a link back to the full post on Agora.
 - **Content warnings cross over as a generic warning.** Bluesky doesn't have free-text content warnings like Agora does — a CW you set still applies a warning label on the Bluesky side, but the specific wording doesn't carry over, just the fact that a warning exists.
+- **You can use your own domain as your handle.** If you own a domain, people can find you as `@your-domain.example` instead of the handle this instance gave you. See [Using your own domain as your handle](custom-domain.md).
 
 ## Turning it off
 

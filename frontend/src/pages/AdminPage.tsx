@@ -2,12 +2,19 @@ import { useState, useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio, AtSign } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
-    (searchParams.get('tab') as any) || 'overview'
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+    // AGORA-302: relays moved from a tab of their own into the Fediverse tab,
+    // so ?tab=relays is aliased rather than dropped — it's a live entry point
+    // in existing links and bookmarks, and would otherwise land on a tab that
+    // no longer exists.
+    (() => {
+      const t = searchParams.get('tab')
+      return (t === 'relays' ? 'fediverse' : t as any) || 'overview'
+    })()
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
@@ -29,7 +36,7 @@ export default function AdminPage() {
   const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' || tab==='bluesky' })
   const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
-  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='relays' })
+  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='fediverse' })
   // AGORA-286: the queue defaults to what needs a decision; ?status=all is
   // how an admin sees claims that are rejected or not yet verified too.
   const [domainFilter, setDomainFilter] = useState<'pending'|'all'>('pending')
@@ -82,7 +89,6 @@ export default function AdminPage() {
     { id:'bluesky',     label:'Bluesky',     icon: Cloud },
     { id:'domains',     label:'Domains',     icon: AtSign },
     { id:'federation',  label:'Federation',  icon: Link2 },
-    { id:'relays',      label:'Relays',      icon: Radio },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
     { id:'pages',       label:'Pages',       icon: Star },
@@ -426,6 +432,20 @@ export default function AdminPage() {
             <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
           </div>
 
+          {/* AGORA-302: relays are ActivityPub-only — the instance actor's
+              Follow handshake, Announces to relay inboxes, an inbox URL as
+              the identifier. A top-level tab beside Federation read as
+              though they were protocol-neutral, so they live here with the
+              rest of the fediverse controls instead. */}
+          <div>
+            <h3 className="font-semibold mb-3">Relays</h3>
+            <p className="text-sm text-agora-500 mb-3">Subscribe this instance to a fediverse relay to exchange public posts in bulk with every other server subscribed to it — the usual way a small or new instance gets a populated federated timeline without its users having to find and follow remote accounts one at a time.</p>
+            <RelaysPanel
+              relays={relaysData?.relays||[]}
+              onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
+            />
+          </div>
+
           <div>
             <h3 className="font-semibold mb-3">Instance Bans</h3>
             <p className="text-sm text-agora-500 mb-3">Block a whole fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
@@ -567,13 +587,6 @@ export default function AdminPage() {
           onAdd={()=>qc.invalidateQueries({queryKey:['admin-fed']})}
           onBlock={(id)=>blockInst.mutate(id)}
           onUnblock={(id)=>unblockInst.mutate(id)}
-        />
-      )}
-
-      {tab==='relays' && (
-        <RelaysPanel
-          relays={relaysData?.relays||[]}
-          onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
         />
       )}
 
@@ -998,12 +1011,9 @@ function RelaysPanel({ relays, onChanged }: {
       {/* Add relay */}
       <div className="card p-4 space-y-3">
         <h3 className="font-semibold">Add new relay</h3>
-        <p className="text-sm text-agora-500">
-          A federation relay is an intermediary server that exchanges large volumes of public posts between
-          servers that subscribe and publish to it. It can help small and medium servers discover content from
-          the fediverse, which would otherwise require local users manually following other people on remote
-          servers.
-        </p>
+        {/* AGORA-302: what a relay is now lives in the section explainer
+            above this panel, alongside every other Fediverse-tab section —
+            repeating it here would put the same paragraph on screen twice. */}
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
         <div className="flex gap-2">

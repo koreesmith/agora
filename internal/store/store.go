@@ -1123,4 +1123,44 @@ var schema = []string{
 	// re-verification sweep (AGORA-289), which scan by status, not by user.
 	`CREATE INDEX IF NOT EXISTS idx_custom_domains_status
 		ON custom_domains(verification_status, approval_status)`,
+
+	// AGORA-303: pinned feeds drive the feed picker. Only pinned feeds get a
+	// pill; the rest live in the picker's overflow menu. position orders the
+	// pinned set and is meaningless for unpinned rows.
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS pinned   BOOLEAN NOT NULL DEFAULT false`,
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0`,
+	`CREATE INDEX IF NOT EXISTS idx_custom_feeds_pinned ON custom_feeds(owner_id, pinned, position)`,
+
+	// One-shot data backfills, which this migration list cannot otherwise
+	// express: it re-runs every statement on every startup, so any backfill
+	// whose WHERE clause can become true again will silently undo the user's
+	// later edits. A named marker row is the guard. Backfills stay as two
+	// statements (do the work, then claim the name) so that a crash between
+	// them just repeats an idempotent update rather than skipping it.
+	`CREATE TABLE IF NOT EXISTS schema_backfills (
+		name       TEXT        PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-303: existing users predate pinning and would otherwise land on a
+	// picker showing only Home with every feed buried in the overflow menu, so
+	// pin their 3 oldest feeds. Oldest-first because the pre-AGORA-303 picker
+	// listed newest-first, which means the feeds a user has lived with longest
+	// are the ones that kept getting pushed rightward off the row.
+	//
+	// Guarded rather than idempotent-by-nature: "user has no pinned feeds" goes
+	// true again the moment someone unpins everything, and re-pinning on the
+	// next restart would read as the picker undoing their choice.
+	`UPDATE custom_feeds cf
+		SET pinned   = true,
+		    position = r.rn - 1
+		FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY owner_id ORDER BY created_at ASC) AS rn
+			  FROM custom_feeds
+		) r
+		WHERE cf.id = r.id
+		  AND r.rn <= 3
+		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_303_pin_oldest_feeds')`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_303_pin_oldest_feeds')
+		ON CONFLICT (name) DO NOTHING`,
 }

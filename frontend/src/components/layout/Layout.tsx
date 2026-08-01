@@ -154,8 +154,12 @@ export default function Layout() {
         </div>
       )}
 
-      {/* Main content */}
-      <div className="flex-1 md:ml-60">
+      {/* Main content. min-w-0 because a flex item defaults to min-width:auto,
+          which makes this column refuse to shrink below its widest content:
+          anything too wide pushed the whole page sideways instead of scrolling
+          or wrapping inside its own box. Both the topbar search field and the
+          feed pill row (AGORA-303) rely on this column being constrained. */}
+      <div className="flex-1 min-w-0 md:ml-60">
         {/* Topbar — search lives here now (AGORA-304), so unlike the mobile-only
             bar it replaced it renders at every breakpoint; desktop previously had
             no header at all. The instance name is gone from it: on mobile the

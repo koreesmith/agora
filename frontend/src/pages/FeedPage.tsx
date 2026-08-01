@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { feedApi } from '../api'
 import CreatePost from '../components/feed/CreatePost'
@@ -8,7 +8,18 @@ import { useEffect, useRef } from 'react'
 
 export default function FeedPage() {
   const bottomRef = useRef<HTMLDivElement>(null)
-  const [activeFeedId, setActiveFeedId] = useState<string | null>(null)
+
+  // AGORA-303: the selected feed lives in the URL, not component state, so a
+  // refresh keeps you where you were and a feed can be linked or bookmarked.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeFeedId = searchParams.get('f')
+
+  function setActiveFeedId(id: string | null) {
+    // replace, not push: switching feeds is a filter, and stacking every switch
+    // onto history would make Back walk the user through each one instead of
+    // leaving the feed.
+    setSearchParams(id ? { f: id } : {}, { replace: true })
+  }
 
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } = useInfiniteQuery({
     queryKey: ['feed', activeFeedId],

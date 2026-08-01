@@ -382,4 +382,6 @@ export const customFeedsApi = {
   create: (data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] })      => api.post('/feeds', data),
   update: (id: string, data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
   delete: (id: string)                                                                                               => api.delete(`/feeds/${id}`),
+  setPinned: (id: string, pinned: boolean)                                                                           => api.put(`/feeds/${id}/pin`, { pinned }),
+  reorderPins: (feed_ids: string[])                                                                                  => api.put('/feeds/pins/order', { feed_ids }),
 }

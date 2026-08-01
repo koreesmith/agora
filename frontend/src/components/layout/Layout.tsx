@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Search, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen, HelpCircle, Sparkles } from 'lucide-react'
+import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Compass, Users2, Images, MessageCircle, Mail, Rss, BookOpen, HelpCircle, Sparkles } from 'lucide-react'
 import WhatsNewModal from '../common/WhatsNewModal'
+import SearchBar from './SearchBar'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
@@ -54,7 +55,6 @@ export default function Layout() {
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
     { to: '/albums',                    icon: Images,         label: 'Photo Albums' },
     { to: '/discover',                  icon: Compass,        label: 'Find Friends' },
-    { to: '/search',                    icon: Search,         label: 'Search' },
     { to: `/profile/${user?.username}`, icon: User,           label: 'Profile' },
     { to: '/settings',                  icon: Settings,       label: 'Settings' },
     ...(invitesEnabled
@@ -67,6 +67,10 @@ export default function Layout() {
 
   const isActive = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
+
+  // Shared by the topbar and <main> so the search field sits directly over the
+  // content column instead of drifting out of line on the wider DM view.
+  const contentWidth = location.pathname.startsWith('/messages') ? 'max-w-5xl' : 'max-w-2xl'
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full">
@@ -152,16 +156,23 @@ export default function Layout() {
 
       {/* Main content */}
       <div className="flex-1 md:ml-60">
-        {/* Mobile topbar */}
-        <header className="md:hidden flex items-center justify-between px-4 h-14 border-b border-agora-200 dark:border-agora-700 bg-white dark:bg-agora-900 sticky top-0 z-10">
-          <button onClick={() => setMobileOpen(true)} className="text-agora-600 dark:text-agora-300">
-            <Menu size={22} />
-          </button>
-          <span className="font-bold text-agora-800 dark:text-agora-100">{instanceName}</span>
-          <div className="w-6" />
+        {/* Topbar — search lives here now (AGORA-304), so unlike the mobile-only
+            bar it replaced it renders at every breakpoint; desktop previously had
+            no header at all. The instance name is gone from it: on mobile the
+            search field needs the width, and the name is still in the sidebar
+            header one tap away. */}
+        <header className="sticky top-0 z-10 border-b border-agora-200 dark:border-agora-700 bg-white dark:bg-agora-900">
+          <div className={`mx-auto flex items-center gap-3 px-4 h-14 ${contentWidth}`}>
+            <button onClick={() => setMobileOpen(true)}
+              aria-label={`Open ${instanceName} menu`}
+              className="md:hidden text-agora-600 dark:text-agora-300 flex-shrink-0">
+              <Menu size={22} />
+            </button>
+            <SearchBar menuOpen={mobileOpen} />
+          </div>
         </header>
 
-        <main className={`mx-auto px-4 py-6 ${location.pathname.startsWith('/messages') ? 'max-w-5xl' : 'max-w-2xl'}`}>
+        <main className={`mx-auto px-4 py-6 ${contentWidth}`}>
           <Outlet />
         </main>
       </div>

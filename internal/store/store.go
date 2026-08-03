@@ -154,7 +154,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS reactions (
 		user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		post_id         UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit')),
+		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike')),
 		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (user_id, post_id)
 	)`,
@@ -506,7 +506,13 @@ var schema = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_token TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_users_waitlist ON users(waitlist_status, created_at) WHERE waitlist_status = 'pending'`,
 	`ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_reaction_type_check`,
-	`ALTER TABLE reactions ADD CONSTRAINT reactions_reaction_type_check CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit'))`,
+	// AGORA-305: 'vomit' retired in favour of 'dislike'. Must sit between the
+	// DROP and the ADD above/below, because with either constraint in force the
+	// UPDATE violates it (the old list has no 'dislike', the new one no 'vomit').
+	// Idempotent by nature rather than guarded: once the new constraint is on,
+	// no row can become 'vomit' again, so this can never re-fire on live data.
+	`UPDATE reactions SET reaction_type = 'dislike' WHERE reaction_type = 'vomit'`,
+	`ALTER TABLE reactions ADD CONSTRAINT reactions_reaction_type_check CHECK (reaction_type IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike'))`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_expires_at TIMESTAMPTZ`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_multiple_choice BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_allows_new_options BOOLEAN NOT NULL DEFAULT FALSE`,
@@ -1163,4 +1169,36 @@ var schema = []string{
 		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_303_pin_oldest_feeds')`,
 	`INSERT INTO schema_backfills (name) VALUES ('agora_303_pin_oldest_feeds')
 		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-305: DM reactions predate the shared reaction set and stored the
+	// raw glyph, while post reactions have always stored a type name. Fold DMs
+	// onto the type names so both surfaces read from one source of truth and a
+	// future emoji change applies retroactively here too, instead of leaving
+	// historical DM reactions frozen at whatever glyph was current when they
+	// were sent. The six glyphs the picker ever offered map one-to-one, so
+	// nothing is lost. The heart is matched both with and without its
+	// variation selector, since only the composed form was ever sent but the
+	// bare codepoint is indistinguishable to a reader.
+	`UPDATE message_reactions
+		SET reaction = CASE reaction
+			WHEN '❤️' THEN 'love'
+			WHEN '❤'  THEN 'love'
+			WHEN '😂' THEN 'laugh'
+			WHEN '😮' THEN 'wow'
+			WHEN '😢' THEN 'sad'
+			WHEN '👍' THEN 'like'
+			WHEN '👎' THEN 'dislike'
+		END
+		WHERE reaction IN ('❤️','❤','😂','😮','😢','👍','👎')`,
+
+	// The react endpoint accepted any non-empty string before AGORA-305 added
+	// validation, so a crafted request could have stored a value the picker
+	// never offered. Those rows would block the constraint below and cannot
+	// render as anything meaningful now, so they're dropped rather than left to
+	// fail startup. Real reactions are covered by the remap above.
+	`DELETE FROM message_reactions
+		WHERE reaction NOT IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike')`,
+	`ALTER TABLE message_reactions DROP CONSTRAINT IF EXISTS message_reactions_reaction_check`,
+	`ALTER TABLE message_reactions ADD CONSTRAINT message_reactions_reaction_check
+		CHECK (reaction IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike'))`,
 }

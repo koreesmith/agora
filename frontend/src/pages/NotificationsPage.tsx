@@ -6,6 +6,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud, AlertCircle } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import { renderName } from '../components/feed/CommentsSection'
+import { REACTION_MAP } from '../utils/reactions'
 
 const typeIcon: Record<string, React.ReactNode> = {
   friend_request:        <UserPlus size={16} className="text-blue-500" />,
@@ -54,11 +55,6 @@ const systemNotifText: Record<string, (domain: string) => string> = {
   custom_domain_failed:   d => `We couldn't verify ${d} — tap to see what went wrong`,
   custom_domain_lost:     d => `${d} stopped verifying, so your handle has gone back to the one this instance issued you`,
   custom_domain_rejected: d => `Your request to use ${d} as your handle was declined`,
-}
-
-const REACTION_EMOJIS: Record<string, string> = {
-  like: '❤️', love: '😍', laugh: '😂', angry: '😡',
-  care: '🤗', pride: '🏳️‍🌈', thankful: '🙏', vomit: '🤮',
 }
 
 const notifText: Record<string, string> = {
@@ -309,7 +305,7 @@ function NotifBody({ n }: { n: any }) {
     )
   }
   const reactionEmoji = (n.type === 'post_reaction' || n.type === 'comment_reaction') && n.data
-    ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
+    ? ` ${REACTION_MAP[n.data]?.emoji || ''}` : ''
   const actorText = n.grouped
     ? groupedActorText(n.actors ?? [], n.count ?? 1)
     : renderName(n.actor_display_name || n.actor_username, n.actor_emojis)

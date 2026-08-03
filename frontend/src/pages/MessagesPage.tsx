@@ -8,6 +8,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { Send, Image, X, Edit2, Trash2, Check, Search, MessageCircle, Plus, ArrowLeft } from 'lucide-react'
 import { isGifUrl } from '../utils/gif'
 import { renderContent } from '../components/feed/CommentsSection'
+import { REACTIONS, reactionDisplay } from '../utils/reactions'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -281,7 +282,6 @@ function MessageBubble({ msg, isOwn, onEdit, onDelete, onReact, participants }: 
 }) {
   const [showMenu, setShowMenu] = useState(false)
   const [showReactions, setShowReactions] = useState(false)
-  const REACTIONS = ['❤️','😂','😮','😢','👍','👎']
 
   if (msg.deleted_at) {
     return (
@@ -306,8 +306,8 @@ function MessageBubble({ msg, isOwn, onEdit, onDelete, onReact, participants }: 
           {showReactions && (
             <div className={`absolute bottom-8 ${isOwn ? 'right-0' : 'left-0'} bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-xl shadow-lg p-1.5 flex gap-1 z-10`}>
               {REACTIONS.map(r => (
-                <button key={r} onClick={() => { onReact(msg.id, r); setShowReactions(false) }}
-                  className="text-lg hover:scale-125 transition-transform p-0.5">{r}</button>
+                <button key={r.type} title={r.label} onClick={() => { onReact(msg.id, r.type); setShowReactions(false) }}
+                  className="text-lg hover:scale-125 transition-transform p-0.5">{r.emoji}</button>
               ))}
             </div>
           )}
@@ -353,9 +353,10 @@ function MessageBubble({ msg, isOwn, onEdit, onDelete, onReact, participants }: 
             {Object.entries(msg.reactions.reduce((acc, r) => {
               acc[r.reaction] = (acc[r.reaction] || 0) + 1
               return acc
-            }, {} as Record<string, number>)).map(([emoji, count]) => (
-              <span key={emoji} className="text-xs bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5 border border-agora-200 dark:border-agora-600">
-                {emoji} {count}
+            }, {} as Record<string, number>)).map(([type, count]) => (
+              <span key={type} title={reactionDisplay(type).label}
+                className="text-xs bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5 border border-agora-200 dark:border-agora-600">
+                {reactionDisplay(type).emoji} {count}
               </span>
             ))}
           </div>

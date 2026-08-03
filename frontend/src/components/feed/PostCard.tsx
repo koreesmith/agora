@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -115,13 +115,16 @@ const visIcons: Record<string, React.ReactNode> = {
 
 function ReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-9 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
+    // AGORA-305: ten reactions overflow a phone viewport at the old sizing (405px
+    // against 375px), so the glyphs and spacing step down below sm. max-w plus
+    // overflow-x is the backstop for anything the sizing alone can't cover.
+    <div className="absolute bottom-9 left-0 z-30 flex items-center gap-1 sm:gap-1.5 max-w-[calc(100vw-1rem)] overflow-x-auto bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 sm:px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
           data-reaction-type={r.type}
           title={r.label}
-          className={`text-2xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+          className={`text-xl sm:text-2xl leading-none transition-transform duration-150 px-0 sm:px-0.5 rounded-full select-none shrink-0 ${
             r.type === highlightedReaction ? 'scale-150' :
             r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
             'hover:scale-125'
@@ -1081,11 +1084,14 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       }
                     }}
                     onContextMenu={e => e.preventDefault()}
-                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
+                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-agora-700 dark:hover:text-agora-200 ${myReaction ? 'text-agora-700 dark:text-agora-200' : ''}`}
                     title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
                   >
-                    <span className="text-base leading-none" style={{lineHeight:1}}>
-                      {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                    {/* AGORA-305: unreacted is an outline thumb, matching the
+                        sibling action icons. The filled glyph only appears once
+                        the user has actually reacted. */}
+                    <span className="flex items-center text-base leading-none" style={{lineHeight:1}}>
+                      {myReaction ? REACTION_MAP[myReaction]?.emoji : <ThumbsUp size={16} />}
                     </span>
                     <span className="text-sm">{post.reaction_count || ''}</span>
                   </button>
@@ -1095,7 +1101,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 </div>
               ) : (
                 <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to react">
-                  <span className="text-base leading-none" style={{lineHeight:1}}>🤍</span>
+                  <span className="flex items-center text-base leading-none" style={{lineHeight:1}}><ThumbsUp size={16} /></span>
                   <span className="text-sm">{post.reaction_count || ''}</span>
                 </span>
               )}

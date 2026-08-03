@@ -1434,11 +1434,6 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 
 // ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
 
-var validReactions = map[string]bool{
-	"like": true, "love": true, "laugh": true, "wow": true, "angry": true,
-	"care": true, "pride": true, "thankful": true, "vomit": true,
-}
-
 func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
@@ -1447,7 +1442,7 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		Type string `json:"type"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	if !validReactions[req.Type] {
+	if !store.IsValidReaction(req.Type) {
 		writeError(w, 400, "invalid reaction type")
 		return
 	}

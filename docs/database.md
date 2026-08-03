@@ -149,7 +149,7 @@ Migrations run automatically at startup via `store.Migrate()` in `internal/store
 | `id` | uuid PK | |
 | `post_id` | uuid FK→posts | |
 | `user_id` | uuid FK→users | |
-| `type` | text | `like`, `love`, `laugh`, `wow`, `angry`, `care`, `pride`, `thankful`, `vomit` |
+| `type` | text | `like`, `love`, `laugh`, `wow`, `care`, `thankful`, `pride`, `sad`, `angry`, `dislike` (CHECK-constrained) |
 | `created_at` | timestamptz | |
 
 **Unique:** `(post_id, user_id)`
@@ -329,7 +329,7 @@ Key values include: `instance_name`, `instance_description`, `registration_mode`
 | `id` | uuid PK | |
 | `message_id` | uuid FK→messages | |
 | `user_id` | uuid FK→users | |
-| `type` | text | Reaction emoji/type |
+| `type` | text | Same CHECK-constrained set as `reactions.type`. Stored the raw emoji glyph before v4.0.0; existing rows were remapped to type names. |
 | `created_at` | timestamptz | |
 
 ---

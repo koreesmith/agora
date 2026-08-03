@@ -116,7 +116,10 @@ Creates/deletes a like. Sends `post_like` notification to author on like.
 
 One reaction per user per post. Replaces any existing reaction.
 
-**Body (react):** `{"type": "like|love|laugh|wow|angry|care|pride|thankful|vomit"}`
+**Body (react):** `{"type": "like|love|laugh|wow|care|thankful|pride|sad|angry|dislike"}`
+
+The accept-list is `store.ValidReactions`, shared with the DM react endpoint and
+matching the CHECK constraints on both reaction tables.
 
 ### `GetReactions(w, r)`
 `GET /api/posts/{id}/reactions`

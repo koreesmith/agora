@@ -8,7 +8,7 @@ import { useAuthStore } from '../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent } from '../components/feed/CommentsSection'
 import CommentsSection from '../components/feed/CommentsSection'
-import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList, BarChart2, Plus, Minus } from 'lucide-react'
+import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList, BarChart2, Plus, Minus, ThumbsUp } from 'lucide-react'
 import { REACTIONS, REACTION_MAP } from '../utils/reactions'
 import CoverPhoto from '../components/common/CoverPhoto'
 
@@ -374,19 +374,22 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
               <button
                 onClick={() => post.my_reaction ? reactPost.mutate({ id: post.id, type: post.my_reaction, myReaction: post.my_reaction }) : setOpenReactionPicker(openReactionPicker === post.id ? null : post.id)}
                 onContextMenu={e => { e.preventDefault(); setOpenReactionPicker(openReactionPicker === post.id ? null : post.id) }}
-                className={`flex items-center gap-1.5 text-sm transition-colors ${post.my_reaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+                className={`flex items-center gap-1.5 text-sm transition-colors ${post.my_reaction ? 'text-agora-700 dark:text-agora-200' : 'text-agora-400 hover:text-agora-600 dark:hover:text-agora-300'}`}
                 title={post.my_reaction ? 'Click to remove · Right-click to change' : 'React'}
               >
-                <span style={{ fontSize: 15 }}>{post.my_reaction ? REACTION_MAP[post.my_reaction]?.emoji || '❤️' : '🤍'}</span>
+                <span className="flex items-center" style={{ fontSize: 15 }}>
+                  {post.my_reaction ? REACTION_MAP[post.my_reaction]?.emoji || '👍' : <ThumbsUp size={15} />}
+                </span>
                 {(post.reaction_count || 0) > 0 && <span>{post.reaction_count}</span>}
               </button>
+              {/* AGORA-305: see PostCard's picker for the mobile-width sizing. */}
               {openReactionPicker === post.id && (
-                <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
+                <div className="absolute bottom-8 left-0 z-30 flex items-center gap-1 sm:gap-1.5 max-w-[calc(100vw-1rem)] overflow-x-auto bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 py-1.5 shadow-xl"
                   onMouseLeave={e => e.stopPropagation()}>
                   {REACTIONS.map(r => (
                     <button key={r.type} title={r.label}
                       onClick={e => { e.stopPropagation(); reactPost.mutate({ id: post.id, type: r.type, myReaction: post.my_reaction || '' }); setOpenReactionPicker(null) }}
-                      className={`text-xl leading-none hover:scale-125 transition-transform duration-150 px-0.5 rounded-full ${post.my_reaction === r.type ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
+                      className={`text-lg sm:text-xl leading-none hover:scale-125 transition-transform duration-150 px-0 sm:px-0.5 rounded-full shrink-0 ${post.my_reaction === r.type ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' : ''}`}
                       style={{ lineHeight: 1 }}>
                       {r.emoji}
                     </button>

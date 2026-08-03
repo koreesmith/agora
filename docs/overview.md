@@ -7,7 +7,7 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 - **Mutual friendships** — both users must accept before either sees the other's private content
 - **Friend groups** — organize friends into named lists; target posts to specific groups
 - **Post visibility** — public, friends-only, specific friend group, or private
-- **Reactions** — like, love, laugh, wow, angry, care, pride, thankful, vomit
+- **Reactions** — like, love, laugh, wow, care, thankful, pride, sad, angry, dislike (shared by posts, comments, and direct messages)
 - **Single-click like / hold-to-pick reactions** — tap to like, hold to choose a reaction
 - **Community groups** — public or private groups with owner/mod/member roles
 - **Photo albums** — with per-album visibility controls

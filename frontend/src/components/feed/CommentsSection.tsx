@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag } from 'lucide-react'
+import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, ThumbsUp } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
@@ -16,13 +16,15 @@ import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
 function CommentReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-7 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
+    // AGORA-305: see PostCard's picker. Comments nest, so this one starts from an
+    // indented origin and has even less room than the post picker does.
+    <div className="absolute bottom-7 left-0 z-30 flex items-center gap-1 sm:gap-1.5 max-w-[calc(100vw-1rem)] overflow-x-auto bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 sm:px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
           data-reaction-type={r.type}
           title={r.label}
-          className={`text-xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+          className={`text-lg sm:text-xl leading-none transition-transform duration-150 px-0 sm:px-0.5 rounded-full select-none shrink-0 ${
             r.type === highlightedReaction ? 'scale-150' :
             r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
             'hover:scale-125'
@@ -597,11 +599,11 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                   }
                 }}
                 onContextMenu={e => e.preventDefault()}
-                className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+                className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-agora-700 dark:text-agora-200' : 'text-agora-400 hover:text-agora-600 dark:hover:text-agora-300'}`}
                 title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
               >
-                <span style={{ lineHeight: 1 }}>
-                  {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                <span className="flex items-center" style={{ lineHeight: 1 }}>
+                  {myReaction ? REACTION_MAP[myReaction]?.emoji : <ThumbsUp size={13} />}
                 </span>
               </button>
               {showReactionPicker && (
@@ -609,7 +611,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
               )}
             </div>
           ) : (
-            <span className="text-xs text-agora-300 dark:text-agora-600" title="Sign in to react">🤍</span>
+            <span className="inline-flex items-center text-agora-300 dark:text-agora-600" title="Sign in to react"><ThumbsUp size={13} /></span>
           )}
           {reactionCount > 0 && (
             <button

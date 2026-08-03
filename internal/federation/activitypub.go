@@ -2957,6 +2957,9 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 		"object":   req.ActorURL,
 	}
 	s.enqueueAPDelivery(userID, profile.Inbox, follow)
+	// AGORA-307: don't make the requester wait out the queue ticker (up to
+	// 20s) before the Follow even leaves this instance.
+	go s.drainAPQueue()
 
 	writeJSON(w, 201, map[string]string{"message": "follow requested"})
 }

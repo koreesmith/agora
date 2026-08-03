@@ -91,8 +91,18 @@ export default function ProfilePage() {
 
   // AGORA-167: fediverse accounts have no friending concept — follow/notify
   // (ap_following) is the equivalent, surfaced here instead of Add friend.
+  // AGORA-307: flip the button to "Requested"/"Following" on click instead of
+  // waiting on the round trip (actor resolution + queue drain) to finish, and
+  // roll back if the request actually fails.
   const followFed = useMutation({
     mutationFn: () => federationApi.followFediverseAccount(profile.ap_actor_url),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ['profile', username] })
+      const previous = qc.getQueryData(['profile', username])
+      qc.setQueryData(['profile', username], (old: any) => old && { ...old, follow_pending: true })
+      return { previous }
+    },
+    onError: (_err, _vars, ctx) => { if (ctx?.previous) qc.setQueryData(['profile', username], ctx.previous) },
     onSuccess: inv,
   })
   const unfollowFed = useMutation({
@@ -111,6 +121,13 @@ export default function ProfilePage() {
   // the handle as the username), so it doubles as the "actor" to follow.
   const followBsky = useMutation({
     mutationFn: () => atprotoApi.followBlueskyAccount(profile.username),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ['profile', username] })
+      const previous = qc.getQueryData(['profile', username])
+      qc.setQueryData(['profile', username], (old: any) => old && { ...old, following: true })
+      return { previous }
+    },
+    onError: (_err, _vars, ctx) => { if (ctx?.previous) qc.setQueryData(['profile', username], ctx.previous) },
     onSuccess: inv,
   })
   const unfollowBsky = useMutation({

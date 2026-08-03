@@ -38,6 +38,13 @@ export default function ConnectionsPage() {
     queryKey: ['fediverse-following'],
     queryFn: () => federationApi.listFollowing().then(r => r.data),
     enabled: tab === 'fediverse' || tab === 'lists',
+    // AGORA-307: while any follow is still awaiting an Accept from the remote
+    // instance, poll for it instead of leaving "Requested" stuck until the
+    // user refocuses the tab or navigates away and back.
+    refetchInterval: (query) => {
+      const rows: any[] = query.state.data?.following ?? []
+      return rows.some(f => !f.accepted) ? 10_000 : false
+    },
   })
   const following: any[] = followingData?.following ?? []
 

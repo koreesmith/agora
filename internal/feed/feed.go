@@ -1442,10 +1442,14 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		Type string `json:"type"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	if !store.IsValidReaction(req.Type) {
+	// Normalize rather than reject: a mobile build predating AGORA-305 still
+	// offers `vomit`, and nothing can force those clients to update.
+	reactionType, ok := store.NormalizeReaction(req.Type)
+	if !ok {
 		writeError(w, 400, "invalid reaction type")
 		return
 	}
+	req.Type = reactionType
 
 	// Upsert — replaces any existing reaction from this user on this post
 	s.db.Exec(`

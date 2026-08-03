@@ -497,8 +497,12 @@ func (s *Service) ReactMessage(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reaction == "" { writeError(w, 400, "reaction required"); return }
 	// AGORA-305: DM reactions moved from raw emoji glyphs onto the shared
 	// reaction types, so the same accept-list posts use applies here. Before
-	// this, any non-empty string was stored verbatim.
-	if !store.IsValidReaction(req.Reaction)                                          { writeError(w, 400, "invalid reaction"); return }
+	// this, any non-empty string was stored verbatim. Older mobile builds still
+	// send glyphs and cannot be forced to update, so those are rewritten to the
+	// canonical type rather than refused.
+	reaction, ok := store.NormalizeReaction(req.Reaction)
+	if !ok                                                                           { writeError(w, 400, "invalid reaction"); return }
+	req.Reaction = reaction
 
 	s.db.Exec(`INSERT INTO message_reactions (message_id, user_id, reaction) VALUES ($1,$2,$3) ON CONFLICT (message_id, user_id) DO UPDATE SET reaction=$3`,
 		msgID, userID, req.Reaction)

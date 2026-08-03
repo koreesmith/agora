@@ -55,7 +55,7 @@ Soft-delete. Sender only.
 **Response 204**
 
 ### `POST /api/messages/{id}/react`
-**Body:** `{"type": "string"}`
+**Body:** `{"reaction": "like|love|laugh|wow|care|thankful|pride|sad|angry|dislike"}`
 **Response 200:** Updated reactions
 
 ### `DELETE /api/messages/{id}/react`

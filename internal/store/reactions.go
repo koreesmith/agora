@@ -13,6 +13,50 @@ var ValidReactions = map[string]bool{
 	"thankful": true, "pride": true, "sad": true, "angry": true, "dislike": true,
 }
 
-// IsValidReaction reports whether a client-supplied reaction type is one this
-// instance accepts.
+// IsValidReaction reports whether a reaction type is already canonical. Callers
+// handling client input want NormalizeReaction instead, which also accepts the
+// older shapes described below.
 func IsValidReaction(t string) bool { return ValidReactions[t] }
+
+// Shapes older clients still send, mapped onto their canonical replacements.
+//
+// The mobile app ships through the App Store with no minimum-version check or
+// forced-update prompt, so a build predating AGORA-305 stays in use for as long
+// as its owner declines to update, and there is no mechanism to hurry them. Two
+// of those older shapes would otherwise fail outright:
+//
+//   - DM reactions were sent as the raw emoji glyph, because the endpoint
+//     stored whatever string it was handed until AGORA-305 gave it an
+//     accept-list. Rejecting them breaks DM reactions entirely on older builds.
+//   - `vomit` was a real reaction type until AGORA-305 replaced it with
+//     `dislike`, and an old picker still offers it.
+//
+// Accepting and rewriting them costs one map lookup and keeps those clients
+// working; rejecting them buys nothing a user can act on. The heart is listed
+// both with and without its variation selector, since only the composed form
+// was ever sent but the bare codepoint is indistinguishable to a reader.
+//
+// The web app's DM picker offered thumbs-down where the mobile app's offered
+// the pouting face, so both appear here.
+//
+// Safe to drop once old builds have aged out; nothing depends on it beyond
+// backwards compatibility.
+var legacyReactions = map[string]string{
+	"❤️": "love", "❤": "love", "😂": "laugh", "😮": "wow", "😢": "sad",
+	"👍": "like", "👎": "dislike", "😡": "angry",
+	"vomit": "dislike",
+}
+
+// NormalizeReaction maps a client-supplied reaction onto a canonical type,
+// accepting both the current type names and the older shapes above. The second
+// return reports whether the value was recognised at all; callers should reject
+// anything it says no to, since the CHECK constraints will refuse it anyway.
+func NormalizeReaction(v string) (string, bool) {
+	if ValidReactions[v] {
+		return v, true
+	}
+	if canonical, ok := legacyReactions[v]; ok {
+		return canonical, true
+	}
+	return "", false
+}

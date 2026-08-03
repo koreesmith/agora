@@ -1960,16 +1960,20 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	// permalink 403'd for everyone. A followed remote account's posts are
 	// public by definition (ingestFollowedPost only ever ingests public
 	// posts), so the stub itself has no reason to read as private.
+	// AGORA-306: manually_approves_followers is refreshed on conflict, not just
+	// set on insert — it's the one cached field a remote account can toggle at
+	// will (locking or unlocking their account), so a first-seen value kept
+	// forever would leave the lock badge permanently wrong for them.
 	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
-		                   ap_actor_url, ap_inbox_url, profile_private, emojis)
-		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10)
+		                   ap_actor_url, ap_inbox_url, profile_private, emojis, manually_approves_followers)
+		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10, $11)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10
+		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10, manually_approves_followers = $11
 		RETURNING id
 	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
-		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis),
+		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis), profile.ManuallyApprovesFollowers,
 	).Scan(&id)
 	if err != nil {
 		return "", err
@@ -2382,6 +2386,10 @@ type remoteActorProfile struct {
 	// AGORA-258: shortcode (":stl_blues:") -> image URL, parsed from the
 	// actor's own "tag" array. nil/empty for an actor with no custom emoji.
 	Emojis map[string]string
+	// AGORA-306: the actor gates follows behind manual approval (a "locked"
+	// account). Absent from most actor documents, in which case the zero
+	// value is the correct reading: no gate.
+	ManuallyApprovesFollowers bool
 }
 
 // fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
@@ -2572,6 +2580,11 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		// "Koree A. Smith :stl_blues:") resolve to an image only via this
 		// separate tag array — the shortcode text alone is meaningless.
 		Tag []apTagEntry `json:"tag"`
+		// AGORA-306: a plain top-level boolean on the actor object, same shape
+		// as followers/following/outbox above. Mastodon, Pleroma and Misskey
+		// all publish it; an actor that omits it decodes to false, which is
+		// the right default (an unlocked account).
+		ManuallyApprovesFollowers bool `json:"manuallyApprovesFollowers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&actor); err != nil {
 		return nil, err
@@ -2590,6 +2603,8 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		FollowingURL:      actor.Following,
 		OutboxURL:         actor.Outbox,
 		Emojis:            emojisFromAPTags(actor.Tag),
+
+		ManuallyApprovesFollowers: actor.ManuallyApprovesFollowers,
 	}, nil
 }
 
@@ -2646,19 +2661,24 @@ func (s *Service) fetchCollectionTotal(userID, collectionURL string) (int, bool)
 // fetch, for GetProfile's benefit. Each collection fetch is independently
 // best-effort (an instance hiding its followers list, say, just leaves that
 // one count unknown rather than failing the whole profile view).
-func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool) {
+//
+// AGORA-306: also returns the actor's locked flag. It rides along here rather
+// than in a method of its own precisely because this call already dereferences
+// the actor document on every remote profile view — a separate accessor would
+// double the fetches to read a field the response already contains.
+func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool) {
 	signerID := s.signerUserIDForActorFetch(actorURL)
 	if signerID == "" {
-		return 0, 0, 0, "", false
+		return 0, 0, 0, "", false, false
 	}
 	profile, err := s.fetchActorProfileSigned(signerID, actorURL)
 	if err != nil {
-		return 0, 0, 0, "", false
+		return 0, 0, 0, "", false, false
 	}
 	followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL)
 	following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL)
 	posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL)
-	return followers, following, posts, HTMLToPlainText(profile.Summary), true
+	return followers, following, posts, HTMLToPlainText(profile.Summary), profile.ManuallyApprovesFollowers, true
 }
 
 // resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger
@@ -2999,7 +3019,8 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		         SELECT 1 FROM ap_followers apf
 		         WHERE apf.followed_user_id = $1 AND apf.follower_actor_url = af.followed_actor_url
 		       ),
-		       COALESCE(u.emojis::text, '{}')
+		       COALESCE(u.emojis::text, '{}'),
+		       COALESCE(u.manually_approves_followers, false)
 		FROM ap_following af
 		LEFT JOIN users u ON u.ap_actor_url = af.followed_actor_url
 		WHERE af.follower_user_id = $1
@@ -3029,6 +3050,12 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		// already lives in ap_followers.
 		FollowsBack bool            `json:"follows_back"`
 		Emojis      json.RawMessage `json:"emojis,omitempty"`
+		// AGORA-306: the account gates follows behind manual approval, which
+		// is why an entry can sit un-Accepted indefinitely. COALESCEd because
+		// the users join is a LEFT JOIN — a follow whose stub hasn't been
+		// created yet has no row to read the flag from, and "unknown" reads
+		// as "not locked" rather than showing a lock we can't stand behind.
+		ManuallyApprovesFollowers bool `json:"manually_approves_followers"`
 	}
 	var list []followingEntry
 	for rows.Next() {
@@ -3036,7 +3063,8 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		var createdAt time.Time
 		var emojis string
 		if err := rows.Scan(&f.ID, &f.ActorURL, &f.Accepted, &f.Notify, &f.ShowInFeed, &createdAt,
-			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack, &emojis); err != nil {
+			&f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.Instance, &f.FollowsBack, &emojis,
+			&f.ManuallyApprovesFollowers); err != nil {
 			continue
 		}
 		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
@@ -3059,8 +3087,8 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 		}
 		list[i].UserID = uid
 		var emojis string
-		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance, COALESCE(emojis::text,'{}') FROM users WHERE id = $1`, uid).
-			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance, &emojis)
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance, COALESCE(emojis::text,'{}'), manually_approves_followers FROM users WHERE id = $1`, uid).
+			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance, &emojis, &list[i].ManuallyApprovesFollowers)
 		list[i].Emojis = json.RawMessage(emojis)
 	}
 

@@ -28,7 +28,10 @@ type fedSender interface {
 	// following/post counts and bio (AGORA-253) — Agora never tracks a
 	// remote account's own social graph locally, only its follow
 	// relationship with them, so GetProfile needs a live fetch to show this.
-	GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, ok bool)
+	// locked (AGORA-306) is the actor's own manuallyApprovesFollowers flag,
+	// returned here rather than by a separate accessor because this call
+	// already dereferences the actor document that carries it.
+	GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool)
 }
 
 // atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
@@ -126,6 +129,13 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		FollowID     string `json:"follow_id,omitempty"`
 		Following    bool   `json:"following"`
 		FollowNotify bool   `json:"follow_notify"`
+		// AGORA-306: an outbound fediverse follow that's been sent but not yet
+		// Accepted. Following deliberately keeps its existing "accepted"
+		// meaning so no existing consumer changes behaviour; without this
+		// second field a pending follow is indistinguishable from no follow
+		// at all, and the profile reverts to a plain Follow button the moment
+		// you click it on a locked account.
+		FollowPending bool `json:"follow_pending"`
 		// AGORA-249: whether this profile follows the viewer back, fediverse
 		// or Bluesky — surfaced regardless of whether the viewer follows them
 		// (unlike FollowID/FollowNotify, which only make sense once you do).
@@ -143,6 +153,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// DisplayName/Bio, sourced from the actor's own "tag" array at
 		// ingestion time.
 		Emojis json.RawMessage `json:"emojis,omitempty"`
+		// AGORA-306: this account requires manual approval of follow requests
+		// (a "locked" fediverse account). Cached on the stub by
+		// upsertRemoteAPUser and refreshed from the live actor fetch below.
+		// Always false for a Bluesky account: AT Proto has no follow-approval
+		// mechanism, so there is nothing to reflect.
+		ManuallyApprovesFollowers bool `json:"manually_approves_followers"`
 		// AGORA-288: the user's own domain, once verified and approved
 		// (AGORA-278) — their handle on Bluesky and the wider AT Protocol
 		// network. Omitted entirely unless it's live, so the frontend never
@@ -156,7 +172,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		SELECT u.id, u.username, u.display_name, u.pronouns, u.bio, u.avatar_url, u.cover_url, u.cover_position,
 		       u.location, u.website, u.profile_private, u.hide_timeline, u.is_remote, u.remote_instance, u.ap_actor_url,
 		       u.atproto_remote_did, u.created_at, COALESCE(u.emojis::text,'{}'),
-		       COALESCE(cd.domain, '')
+		       COALESCE(cd.domain, ''), u.manually_approves_followers
 		FROM users u
 		LEFT JOIN custom_domains cd ON cd.user_id = u.id AND cd.protocol = 'atproto'
 		     AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
@@ -164,7 +180,7 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	`, username).Scan(
 		&u.ID, &u.Username, &u.DisplayName, &u.Pronouns, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.CoverPosition,
 		&u.Location, &u.Website, &u.ProfilePrivate, &u.HideTimeline, &u.IsRemote, &u.RemoteInstance, &u.APActorURL,
-		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw, &u.CustomDomain,
+		&u.AtprotoRemoteDID, &u.CreatedAt, &emojisRaw, &u.CustomDomain, &u.ManuallyApprovesFollowers,
 	)
 	if err != nil {
 		writeError(w, 404, "user not found")
@@ -189,11 +205,16 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	// info, the same as bio. Prefers the freshly-fetched bio over the cached
 	// column when available, since this call already returns it for free.
 	if u.APActorURL != "" && s.fed != nil {
-		if followers, following, posts, bio, ok := s.fed.GetRemoteActorStats(u.APActorURL); ok {
+		if followers, following, posts, bio, locked, ok := s.fed.GetRemoteActorStats(u.APActorURL); ok {
 			u.RemoteFollowerCount, u.RemoteFollowingCount, u.RemotePostCount = &followers, &following, &posts
 			if bio != "" {
 				u.Bio = bio
 			}
+			// AGORA-306: prefer the live flag over the cached column for the
+			// same reason the bio is preferred above — an account that has
+			// just locked or unlocked itself should read correctly now, not
+			// after whatever next refreshes their stub.
+			u.ManuallyApprovesFollowers = locked
 		}
 	} else if u.RemoteInstance == "bsky.app" && u.AtprotoRemoteDID != "" && s.atproto != nil {
 		if followers, following, posts, bio, ok := s.atproto.GetRemoteActorStats(u.AtprotoRemoteDID); ok {
@@ -258,11 +279,16 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// AGORA-167: fediverse follow/notify state for this profile, if any.
 		if u.APActorURL != "" {
 			var followID string
-			var notify bool
-			if err := s.db.QueryRow(`SELECT id, notify FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2 AND accepted = true`,
-				viewerID, u.APActorURL).Scan(&followID, &notify); err == nil {
+			var notify, accepted bool
+			// AGORA-306: the accepted filter moved out of the WHERE clause and
+			// into the fields — filtering it away made a pending follow look
+			// identical to no follow at all, so following a locked account
+			// silently reverted the button to "Follow".
+			if err := s.db.QueryRow(`SELECT id, notify, accepted FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`,
+				viewerID, u.APActorURL).Scan(&followID, &notify, &accepted); err == nil {
 				u.FollowID = followID
-				u.Following = true
+				u.Following = accepted
+				u.FollowPending = !accepted
 				u.FollowNotify = notify
 			}
 		}

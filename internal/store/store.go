@@ -1201,4 +1201,16 @@ var schema = []string{
 	`ALTER TABLE message_reactions DROP CONSTRAINT IF EXISTS message_reactions_reaction_check`,
 	`ALTER TABLE message_reactions ADD CONSTRAINT message_reactions_reaction_check
 		CHECK (reaction IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike'))`,
+
+	// AGORA-306: the remote actor's own "manuallyApprovesFollowers" (Mastodon's
+	// "require follow requests" — a locked account). ap_following.accepted
+	// already records the outcome of a follow, but never the cause, so a follow
+	// waiting on a human's approval was indistinguishable from one whose Accept
+	// was merely slow or whose delivery failed outright.
+	//
+	// Defaults false so an actor document that omits the field, and every stub
+	// cached before this column existed, reads as unlocked rather than
+	// spuriously locked; upsertRemoteAPUser corrects each row on its next
+	// actor fetch, which is why there's no backfill statement here.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS manually_approves_followers BOOLEAN NOT NULL DEFAULT false`,
 }

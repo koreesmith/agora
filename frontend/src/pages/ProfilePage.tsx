@@ -10,6 +10,7 @@ import { handle } from '../utils/handle'
 import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import CustomHandle from '../components/common/CustomHandle'
+import LockedBadge from '../components/common/LockedBadge'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={10} />,
@@ -166,6 +167,16 @@ export default function ProfilePage() {
   const isBluesky = profile.remote_instance === 'bsky.app'
   const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
 
+  // AGORA-306: the account gates follows behind manual approval and this
+  // viewer isn't through that gate yet. Fediverse only — AT Proto has no
+  // follow-approval mechanism, so a Bluesky account is never locked.
+  // `following` means accepted (not merely requested), and a mutual follow
+  // clears the lock just as an Accept does: either way there's no gate left
+  // standing between the two accounts.
+  const showLock = isFediverse && !isSelf
+    && !!profile.manually_approves_followers
+    && !profile.following && !profile.follows_back
+
   const albums: any[] = albumsData?.albums ?? []
   const posts: any[]  = postsData?.posts ?? []
 
@@ -192,11 +203,17 @@ export default function ProfilePage() {
         </div>
         <div className="px-4 pb-4">
           <div className="flex items-end justify-between -mt-10 mb-3">
-            <div className="w-20 h-20 rounded-full border-4 border-white dark:border-agora-800 bg-agora-200 dark:bg-agora-700 overflow-hidden">
-              {profile.avatar_url
-                ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(profile.avatar_url)} />
-                : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
-              }
+            {/* AGORA-306: the badge is a sibling of the avatar circle, not a
+                child — that circle is overflow-hidden to crop the photo, so
+                anything positioned inside it gets clipped away at the edge. */}
+            <div className="relative flex-shrink-0">
+              <div className="w-20 h-20 rounded-full border-4 border-white dark:border-agora-800 bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                {profile.avatar_url
+                  ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(profile.avatar_url)} />
+                  : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
+                }
+              </div>
+              <LockedBadge size="md" locked={showLock} pending={profile.follow_pending} />
             </div>
             <div className="flex gap-2 mt-10">
               {!me && !isSelf && (
@@ -206,12 +223,28 @@ export default function ProfilePage() {
               )}
               {me && !isSelf && isFediverse && (
                 <div className="flex gap-2">
+                  {/* AGORA-306: three states, not two. A follow of a locked
+                      account sits un-Accepted for as long as its owner takes
+                      to approve it, and collapsing that into "not following"
+                      made the button spring back to "Follow" on click, as
+                      though nothing had been sent. Clicking through here
+                      withdraws the request, which is the same unfollow call. */}
                   <button
-                    onClick={() => { if (profile.following) { if (confirm(`Unfollow ${profile.display_name}?`)) unfollowFed.mutate() } else followFed.mutate() }}
+                    onClick={() => {
+                      if (profile.following || profile.follow_pending) {
+                        const q = profile.follow_pending
+                          ? `Withdraw your follow request to ${profile.display_name}?`
+                          : `Unfollow ${profile.display_name}?`
+                        if (confirm(q)) unfollowFed.mutate()
+                      } else followFed.mutate()
+                    }}
                     disabled={followFed.isPending || unfollowFed.isPending}
-                    className={profile.following ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
+                    title={profile.follow_pending ? 'Waiting for this account to approve your follow request' : undefined}
+                    className={profile.following || profile.follow_pending ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
                   >
-                    {profile.following ? <><UserCheck size={16}/> Following</> : <><UserPlus size={16}/> Follow</>}
+                    {profile.following  ? <><UserCheck size={16}/> Following</>
+                      : profile.follow_pending ? <><Clock size={16}/> Requested</>
+                      : <><UserPlus size={16}/> Follow</>}
                   </button>
                   {profile.following && (
                     <button

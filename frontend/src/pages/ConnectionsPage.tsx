@@ -5,6 +5,7 @@ import { friendsApi, federationApi, atprotoApi } from '../api'
 import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import LockedBadge from '../components/common/LockedBadge'
 import { renderName } from '../components/feed/CommentsSection'
 
 // AGORA-196: a fediverse actor federated through Bridgy Fed's bsky.brid.gy
@@ -400,21 +401,32 @@ export default function ConnectionsPage() {
             <div className="space-y-2">
               {following.map(f => (
                 <div key={f.id} className="flex items-center gap-3 py-2">
-                  {f.username
-                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                        {f.avatar_url
-                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
-                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
-                              {(f.display_name || f.username || '?')[0]}
-                            </span>}
-                      </Link>
-                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                        {f.avatar_url
-                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
-                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
-                              {(f.display_name || f.username || '?')[0]}
-                            </span>}
-                      </div>}
+                  {/* AGORA-306: the lock sits outside the avatar's clipping
+                      circle (see LockedBadge), so both branches get a relative
+                      wrapper rather than positioning it inside. Locked and
+                      already-accepted is not a state worth marking, which is
+                      what the !f.accepted guard says. */}
+                  <div className="relative flex-shrink-0">
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="block w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                          {f.avatar_url
+                            ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                            : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                                {(f.display_name || f.username || '?')[0]}
+                              </span>}
+                        </Link>
+                      : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                          {f.avatar_url
+                            ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                            : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                                {(f.display_name || f.username || '?')[0]}
+                              </span>}
+                        </div>}
+                    <LockedBadge
+                      locked={f.manually_approves_followers && !f.accepted && !f.follows_back}
+                      pending
+                    />
+                  </div>
                   <div className="flex-1 min-w-0">
                     {f.username
                       ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>

@@ -109,3 +109,59 @@ func TestHtmlToPlainText(t *testing.T) {
 		})
 	}
 }
+
+// AGORA-308: a remote actor's icon/image is spec'd as ActivityStreams
+// Image|Link, which allows either a single object or an array of them.
+// Decoding straight into a single-object struct used to throw a type-mismatch
+// error that aborted the whole actor decode the moment a remote server (e.g.
+// Threads) sent an array instead, discarding an otherwise-valid profile.
+func TestApImageFieldUnmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{
+			name: "single object (Mastodon-style)",
+			json: `{"type":"Image","url":"https://example.com/avatar.png"}`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "array of objects (Threads-style)",
+			json: `[{"type":"Image","url":"https://example.com/avatar.png"}]`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "array with an empty-url entry before a populated one",
+			json: `[{"type":"Image","url":""},{"type":"Image","url":"https://example.com/avatar.png"}]`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "bare string URL (Link shorthand)",
+			json: `"https://example.com/avatar.png"`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "null",
+			json: `null`,
+			want: "",
+		},
+		{
+			name: "empty array",
+			json: `[]`,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f apImageField
+			if err := f.UnmarshalJSON([]byte(tc.json)); err != nil {
+				t.Fatalf("UnmarshalJSON(%s) returned error: %v", tc.json, err)
+			}
+			if f.URL != tc.want {
+				t.Errorf("UnmarshalJSON(%s).URL = %q, want %q", tc.json, f.URL, tc.want)
+			}
+		})
+	}
+}

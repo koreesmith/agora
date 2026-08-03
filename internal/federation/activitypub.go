@@ -1339,17 +1339,59 @@ type apAttachment struct {
 	URL       string `json:"url"`
 }
 
+// apImageField (AGORA-308) decodes an ActivityStreams Image|Link property
+// that in practice shows up in three shapes across remote implementations:
+// a single {"url": "..."} object, an array of such objects (permitted by the
+// spec for a multi-valued property, and what Threads appears to send for at
+// least actor icons), or a bare string URL (Link shorthand). Any one of
+// these used to either fail outright or silently abort the decode of the
+// whole containing object; this tolerates all three and takes the first
+// non-empty URL.
+type apImageField struct {
+	URL string
+}
+
+func (f *apImageField) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	var single struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &single); err == nil {
+		f.URL = single.URL
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		f.URL = str
+		return nil
+	}
+	var list []struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+	for _, item := range list {
+		if item.URL != "" {
+			f.URL = item.URL
+			return nil
+		}
+	}
+	return nil
+}
+
 // apTagEntry (AGORA-213, extended AGORA-258) is a Note's or actor's "tag"
 // array element — shared shape for Mention, Hashtag, and Emoji entries.
 // Icon is only ever populated on an Emoji entry (Mention/Hashtag never set
 // it), which is exactly the field hashtagsFromAPTags ignores and
 // emojisFromAPTags reads.
 type apTagEntry struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-	Icon struct {
-		URL string `json:"url"`
-	} `json:"icon"`
+	Type string       `json:"type"`
+	Name string       `json:"name"`
+	Icon apImageField `json:"icon"`
 }
 
 // emojisFromAPTags extracts a shortcode->image-URL map from a Note's or
@@ -1964,13 +2006,17 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	// set on insert — it's the one cached field a remote account can toggle at
 	// will (locking or unlocking their account), so a first-seen value kept
 	// forever would leave the lock badge permanently wrong for them.
+	// AGORA-308: a re-sync whose actor fetch comes back with no icon/image
+	// (parse hiccup, or the remote server genuinely omitting it that time)
+	// must not blank out a previously-cached avatar/cover — NULLIF/COALESCE
+	// keeps the existing value when the freshly-fetched one is empty.
 	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
 		                   ap_actor_url, ap_inbox_url, profile_private, emojis, manually_approves_followers)
 		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10, $11)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = $3, cover_url = $4, bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10, manually_approves_followers = $11
+		  SET display_name = $2, avatar_url = COALESCE(NULLIF($3, ''), users.avatar_url), cover_url = COALESCE(NULLIF($4, ''), users.cover_url), bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10, manually_approves_followers = $11
 		RETURNING id
 	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis), profile.ManuallyApprovesFollowers,
@@ -2561,16 +2607,15 @@ func doActorProfileFetch(req *http.Request) (*remoteActorProfile, error) {
 		PreferredUsername string `json:"preferredUsername"`
 		Name              string `json:"name"`
 		Summary           string `json:"summary"`
-		Icon              struct {
-			URL string `json:"url"`
-		} `json:"icon"`
-		// "image" is the ActivityStreams Actor field Mastodon/Pleroma populate
-		// with the profile header/banner — was never parsed at all, so a
-		// remote account's cover photo never made it into the cached stub
-		// regardless of what the remote server actually served.
-		Image struct {
-			URL string `json:"url"`
-		} `json:"image"`
+		// AGORA-308: icon/image are typed as ActivityStreams Image|Link, and
+		// the spec allows either a single object or an array of them (some
+		// remote implementations, including Threads, send an array). Decoding
+		// straight into a single-object struct meant a type mismatch on this
+		// one field aborted the whole actor decode via the err check below,
+		// discarding an otherwise-valid profile. apImageField tolerates both
+		// shapes plus a bare string URL.
+		Icon  apImageField `json:"icon"`
+		Image apImageField `json:"image"`
 		// AGORA-253: followers/following/outbox are plain collection URLs on
 		// the actor object itself (not nested), per standard ActivityStreams.
 		Followers string `json:"followers"`

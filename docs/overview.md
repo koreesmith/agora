@@ -4,19 +4,19 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 
 ## Key Features
 
-- **Mutual friendships** — both users must accept before either sees the other's private content
-- **Friend groups** — organize friends into named lists; target posts to specific groups
-- **Post visibility** — public, friends-only, specific friend group, or private
-- **Reactions** — like, love, laugh, wow, care, thankful, pride, sad, angry, dislike (shared by posts, comments, and direct messages)
-- **Single-click like / hold-to-pick reactions** — tap to like, hold to choose a reaction
-- **Community groups** — public or private groups with owner/mod/member roles
-- **Photo albums** — with per-album visibility controls
-- **Direct messages** — real-time via WebSocket
-- **Wall posts** — post on another user's wall, with optional approval workflow
-- **Polls** — multi-choice with optional expiry
-- **Federation** — three protocols side by side: standard ActivityPub (the fediverse — Mastodon and friends), native AT Protocol (every Agora account is also a real Bluesky account, no bridge required), and a legacy Ed25519-signed Agora-to-Agora protocol
-- **Moderation** — reports, suspension, banning, instance bans
-- **GDPR** — data export (ZIP) and account deletion (30-day grace or immediate)
+- **Mutual friendships**: both users must accept before either sees the other's private content
+- **Friend groups**: organize friends into named lists; target posts to specific groups
+- **Post visibility**: public, friends-only, specific friend group, or private
+- **Reactions**: like, love, laugh, wow, care, thankful, pride, sad, angry, dislike (shared by posts, comments, and direct messages)
+- **Single-click like / hold-to-pick reactions**: tap to like, hold to choose a reaction
+- **Community groups**: public or private groups with owner/mod/member roles
+- **Photo albums**: with per-album visibility controls
+- **Direct messages**: real-time via WebSocket
+- **Wall posts**: post on another user's wall, with optional approval workflow
+- **Polls**: multi-choice with optional expiry
+- **Federation**: three protocols side by side. Standard ActivityPub (the fediverse, so Mastodon and friends), native AT Protocol (every Agora account is also a real Bluesky account, no bridge required), and a legacy Ed25519-signed Agora-to-Agora protocol
+- **Moderation**: reports, suspension, banning, instance bans
+- **GDPR**: data export (ZIP) and account deletion (30-day grace or immediate)
 
 ## Documentation Index
 
@@ -39,7 +39,7 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 | [Moderation](backend/moderation) | Reports, suspension, banning |
 | [Admin](backend/admin) | Instance settings, user management |
 | [Federation](backend/federation) | ActivityPub (fediverse) + legacy Agora-to-Agora protocol |
-| [AT Protocol / Bluesky](backend/atproto) | Native Bluesky support — Agora as its own PDS |
+| [AT Protocol / Bluesky](backend/atproto) | Native Bluesky support: Agora as its own PDS |
 | [Search](backend/search) | User, post, and hashtag search (+ live Bluesky search) |
 | [Media](backend/media) | File uploads and serving |
 | **API Reference** | |
@@ -59,7 +59,7 @@ Agora is an open-source, federated, privacy-first social network. It uses Facebo
 | [Media API](api/media) | `/api/media/upload` |
 | **Frontend** | |
 | [Frontend Overview](frontend/overview) | React app structure and tech stack |
-| [API Client](frontend/api-client) | Typed Axios client — all methods |
+| [API Client](frontend/api-client) | Typed Axios client, all methods |
 | [State Management](frontend/state) | Zustand auth store |
 
 ## Tech Stack

@@ -23,16 +23,19 @@ export const REACTION_MAP: Record<string, { emoji: string; label: string }> = Ob
   REACTIONS.map(r => [r.type, { emoji: r.emoji, label: r.label }])
 )
 
-// DM reactions stored the raw glyph until AGORA-305 folded them onto the shared
-// type set. Existing rows are migrated in place, but a client holding a stale
-// WebSocket payload can still hand us a glyph, so resolve those instead of
-// rendering an empty chip.
-const LEGACY_DM_GLYPHS: Record<string, string> = {
+// Values that are no longer canonical but can still reach a render. DM
+// reactions stored the raw glyph until AGORA-305 folded them onto the shared
+// type set, and 'vomit' was a real type until the same change retired it. Both
+// are migrated server-side, but a cached query result or a stale WebSocket
+// payload outlives a deploy, so a client can still hand us either well after
+// the backend has moved on.
+const LEGACY_VALUES: Record<string, string> = {
   '❤️': 'love', '😂': 'laugh', '😮': 'wow', '😢': 'sad', '👍': 'like', '👎': 'dislike',
+  vomit: 'dislike',
 }
 
-// Resolves a stored reaction value (type name, or a pre-AGORA-305 DM glyph) for
-// display. Unknown values render as-is rather than disappearing.
+// Resolves a stored reaction value (type name, or a retired value per above)
+// for display. Unknown values render as-is rather than disappearing.
 export function reactionDisplay(value: string): { emoji: string; label: string } {
-  return REACTION_MAP[value] ?? REACTION_MAP[LEGACY_DM_GLYPHS[value]] ?? { emoji: value, label: value }
+  return REACTION_MAP[value] ?? REACTION_MAP[LEGACY_VALUES[value]] ?? { emoji: value, label: value }
 }

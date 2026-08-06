@@ -450,6 +450,7 @@ func (s *Service) GetUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "user not found or profile is private")
 		return
 	}
+	u.AvatarURL = s.absoluteURL(u.AvatarURL)
 	writeJSON(w, 200, u)
 }
 

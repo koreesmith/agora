@@ -211,10 +211,9 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, requesterID).Scan(&requesterUsername)
 		if isRemote && remoteInstance != "" {
 			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":       "friend_request",
-				"actor":      requesterUsername,
-				"instance_id": domainFromCfg(s.db),
-				"timestamp":  time.Now().Unix(),
+				"type":      "friend_request",
+				"actor":     requesterUsername,
+				"timestamp": time.Now().Unix(),
 				"object": map[string]string{
 					"from_handle": requesterUsername,
 					"to_handle":   remoteUserID,
@@ -255,10 +254,9 @@ func (s *Service) Accept(w http.ResponseWriter, r *http.Request) {
 		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&accepterUsername)
 		if isRemote && remoteInstance != "" {
 			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":        "friend_accept",
-				"actor":       accepterUsername,
-				"instance_id": domainFromCfg(s.db),
-				"timestamp":   time.Now().Unix(),
+				"type":      "friend_accept",
+				"actor":     accepterUsername,
+				"timestamp": time.Now().Unix(),
 				"object": map[string]string{
 					"from_handle": accepterUsername,
 					"to_handle":   remoteUserID,
@@ -464,10 +462,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-func domainFromCfg(db *store.DB) string {
-	var domain string
-	db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&domain)
-	return domain
 }

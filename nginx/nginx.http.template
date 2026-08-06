@@ -3,6 +3,21 @@ events {
 }
 
 http {
+    # This box is only ever reached through an internal-network reverse
+    # proxy (never directly from the public internet), so every connection
+    # nginx sees arrives from that one upstream hop rather than the real
+    # visitor — without this, $binary_remote_addr is the same address for
+    # every client, and every limit_req zone below rate-limits the sum of
+    # all traffic as if it were one caller. Trusting the private ranges
+    # that hop lives on and reading the real address back out of
+    # X-Forwarded-For (which it sets from the original client, e.g. via
+    # Cloudflare's CF-Connecting-IP upstream of it) restores per-client
+    # keying.
+    set_real_ip_from 10.0.0.0/8;
+    set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from 192.168.0.0/16;
+    real_ip_header X-Forwarded-For;
+
     limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
     limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
     limit_req_zone $binary_remote_addr zone=federation:10m rate=60r/m;

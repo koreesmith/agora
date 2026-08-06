@@ -8,7 +8,12 @@ export function handle(username: string, isRemote?: boolean, remoteInstance?: st
   // "handle@instance" form (see upsertRemoteAPUser/getOrCreateRemoteUser) —
   // only append remoteInstance if username isn't already qualified, so a
   // remote user doesn't end up doubled as "@handle@instance@instance".
-  if (isRemote && remoteInstance && !username.includes('@')) {
+  //
+  // AT Proto actors are the exception: remoteInstance is 'bsky.app' there,
+  // but it's an internal origin marker, not a real instance domain, and
+  // username already holds the full Bluesky handle (e.g. foo.bsky.social),
+  // so appending it would double up as "@foo.bsky.social@bsky.app".
+  if (isRemote && remoteInstance && remoteInstance !== 'bsky.app' && !username.includes('@')) {
     return `@${username}@${remoteInstance}`
   }
   return `@${username}`

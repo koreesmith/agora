@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { friendsApi, federationApi, atprotoApi } from '../api'
+import { friendsApi, federationApi, atprotoApi, instanceApi } from '../api'
 import { handle } from '../utils/handle'
-import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud } from 'lucide-react'
+import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud, Compass, Mail } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import LockedBadge from '../components/common/LockedBadge'
 import { renderName } from '../components/feed/CommentsSection'
@@ -28,6 +28,15 @@ export default function ConnectionsPage() {
   const { data: friendsData } = useQuery({ queryKey: ['friends'],       queryFn: () => friendsApi.listFriends().then(r => r.data) })
   const { data: reqData }     = useQuery({ queryKey: ['requests'],      queryFn: () => friendsApi.listRequests().then(r => r.data) })
   const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listFriendLists().then(r => r.data) })
+
+  // AGORA-335: the Invite action moved here from the sidebar, so this page now
+  // needs the same instance flag the sidebar used to gate it on.
+  const { data: instanceData } = useQuery({
+    queryKey: ['instance-info'],
+    queryFn: () => instanceApi.getInfo().then(r => r.data),
+    staleTime: 5 * 60_000,
+  })
+  const invitesEnabled = instanceData?.user_invites_enabled === 'true'
 
   // ── Fediverse follows (moved from the standalone Fediverse page) ──────────
   const [fediHandle, setFediHandle] = useState('')
@@ -218,7 +227,23 @@ export default function ConnectionsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Connections</h1>
+      {/* AGORA-335: Find friends and Invite a friend used to be their own
+          sidebar entries. They are actions you take from here, not places, so
+          they sit beside the heading rather than competing with Feed and
+          Messages for a top-level slot. Both routes are unchanged. */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Connections</h1>
+        <div className="flex items-center gap-2">
+          <Link to="/discover" className="btn-secondary text-sm flex items-center gap-1.5">
+            <Compass size={15} /> Find friends
+          </Link>
+          {invitesEnabled && (
+            <Link to="/invite-friend" className="btn-secondary text-sm flex items-center gap-1.5">
+              <Mail size={15} /> Invite
+            </Link>
+          )}
+        </div>
+      </div>
 
       {listModalFriend && (
         <FriendListModal

@@ -76,6 +76,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/admin/federation/instances",              s.AddInstance)
 	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
 	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
+	r.Delete("/admin/federation/instances/{id}",       s.DisconnectInstance)
 
 	// Instance rules
 	r.Get("/admin/rules",             s.ListRules)
@@ -395,16 +396,21 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 	// and partly echoed back in the response.
 	domain, name, publicKey, err := s.fed.FetchInstanceInfo(req.Domain)
 	if err != nil {
-		writeError(w, 422, "could not reach instance — make sure it is an Agora instance with federation enabled ("+err.Error()+")")
+		writeError(w, 422, "could not reach instance. Make sure it is an Agora instance with federation enabled ("+err.Error()+")")
 		return
 	}
 	instanceURL := "https://" + domain
 
+	// AGORA-321: adding from here is an outbound peering. If they had already
+	// contacted us the row exists as 'inbound', and adding them makes it
+	// mutual rather than overwriting how it started.
 	s.db.Exec(`
-		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
-		VALUES ($1, $2, $3, $4, 'active')
+		INSERT INTO federated_instances (domain, name, public_key, instance_url, status, direction)
+		VALUES ($1, $2, $3, $4, 'active', 'outbound')
 		ON CONFLICT (domain) DO UPDATE
-		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW()
+		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW(),
+		      direction = CASE WHEN federated_instances.direction = 'inbound' THEN 'mutual'
+		                       ELSE 'outbound' END
 	`, domain, name, publicKey, instanceURL)
 
 	actorID := auth.UserIDFromCtx(r.Context())
@@ -416,7 +422,7 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, domain, name, instance_url, status, last_seen_at, created_at
+		SELECT id, domain, name, instance_url, status, direction, last_seen_at, created_at
 		FROM federated_instances
 		ORDER BY last_seen_at DESC
 	`)
@@ -432,14 +438,18 @@ func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		InstanceURL string `json:"instance_url"`
 		Status      string `json:"status"`
-		LastSeenAt  string `json:"last_seen_at"`
-		CreatedAt   string `json:"created_at"`
+		// AGORA-321: 'outbound' (an admin here added them), 'inbound' (they
+		// contacted us first), 'mutual' (both), or 'unknown' for rows that
+		// predate the column and can't be reconstructed.
+		Direction  string `json:"direction"`
+		LastSeenAt string `json:"last_seen_at"`
+		CreatedAt  string `json:"created_at"`
 	}
 	var instances []Instance
 	for rows.Next() {
 		var inst Instance
 		rows.Scan(&inst.ID, &inst.Domain, &inst.Name, &inst.InstanceURL,
-			&inst.Status, &inst.LastSeenAt, &inst.CreatedAt)
+			&inst.Status, &inst.Direction, &inst.LastSeenAt, &inst.CreatedAt)
 		instances = append(instances, inst)
 	}
 	if instances == nil { instances = []Instance{} }
@@ -449,15 +459,74 @@ func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 func (s *Service) BlockInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	actorID := auth.UserIDFromCtx(r.Context())
-	s.db.Exec(`UPDATE federated_instances SET status = 'blocked' WHERE id = $1`, id)
+	res, err := s.db.Exec(`UPDATE federated_instances SET status = 'blocked' WHERE id = $1`, id)
+	if err != nil {
+		writeError(w, 400, "invalid instance id")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "instance not found")
+		return
+	}
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'block_instance', 'instance', $2)`, actorID, id)
 	writeJSON(w, 200, map[string]string{"message": "instance blocked"})
 }
 
 func (s *Service) UnblockInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	s.db.Exec(`UPDATE federated_instances SET status = 'active' WHERE id = $1`, id)
+	res, err := s.db.Exec(`UPDATE federated_instances SET status = 'active' WHERE id = $1`, id)
+	if err != nil {
+		writeError(w, 400, "invalid instance id")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "instance not found")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"message": "instance unblocked"})
+}
+
+// DisconnectInstance forgets a peer (AGORA-320).
+//
+// Distinct from Block, which is a moderation verdict enforced everywhere by
+// isInstanceBlocked. Disconnect means "we are not peered with them", not "we
+// refuse them": the row goes away, nothing is delivered to them any more, and
+// if they later send a validly signed activity they re-register through the
+// normal first-contact path. An admin who wants a standing refusal wants
+// Block, which is why disconnecting a blocked instance is refused outright
+// rather than silently unblocking it.
+//
+// Remote accounts cached from that instance and their posts are deliberately
+// kept: a local user may be friends with them, and deleting would destroy
+// those friendships and their content as a side effect of an admin tidying up
+// a peer list. Re-peering then simply works. The delivery queue is cleared,
+// since those rows would otherwise retry against a peer that no longer exists
+// until they exhaust their attempts.
+func (s *Service) DisconnectInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actorID := auth.UserIDFromCtx(r.Context())
+
+	var domain, status string
+	if err := s.db.QueryRow(`SELECT domain, status FROM federated_instances WHERE id = $1`, id).
+		Scan(&domain, &status); err != nil {
+		writeError(w, 404, "instance not found")
+		return
+	}
+	if status == "blocked" {
+		writeError(w, 409, "this instance is blocked. Unblock it first if you also want to stop refusing its traffic, or leave it blocked to keep refusing it")
+		return
+	}
+
+	if _, err := s.db.Exec(`DELETE FROM federated_instances WHERE id = $1`, id); err != nil {
+		writeError(w, 500, "could not disconnect instance")
+		return
+	}
+	s.db.Exec(`DELETE FROM federation_queue WHERE instance_url = $1`, "https://"+domain)
+
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'disconnect_instance', 'instance', $2)`,
+		actorID, domain)
+
+	writeJSON(w, 200, map[string]string{"message": "instance disconnected", "domain": domain})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

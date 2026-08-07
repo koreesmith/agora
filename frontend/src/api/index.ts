@@ -238,6 +238,9 @@ export const adminApi = {
   addInstance:     (domain: string)            => api.post('/admin/federation/instances', { domain }),
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),
   unblockInstance: (id: string)                => api.post(`/admin/federation/instances/${id}/unblock`),
+  // AGORA-320: forget a peer, as distinct from blocking it. See the backend
+  // handler for what is kept and what is removed.
+  disconnectInstance: (id: string)             => api.delete(`/admin/federation/instances/${id}`),
   resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
   // Instance rules
   listRules:   ()                               => api.get('/admin/rules'),

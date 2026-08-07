@@ -15,8 +15,8 @@ import (
 // wrote the friendship row and told the recipient nothing, so the request only
 // surfaced if they happened to open the Friends screen and look. The notify
 // call is one line; what needs a test is the condition around it. A friend
-// request is not delivered exactly once — the sending instance retries on its
-// own schedule — so the notification has to be tied to the delivery that
+// request is not delivered exactly once: the sending instance retries on its
+// own schedule, so the notification has to be tied to the delivery that
 // actually created the row, not to the arrival of an activity.
 //
 // Requires the local agora-postgres-test instance (localhost:15433); skips if
@@ -86,7 +86,7 @@ func TestInboundFriendRequestNotifiesOnceAndRespectsBlocks(t *testing.T) {
 	// happened and the recipient must not be told again.
 	s.handleInboundFriendRequest(activity(remoteHandle))
 	if got := countNotifs(); got != 1 {
-		t.Errorf("redelivery produced %d notifications, want 1 — a retrying peer would ring the bell repeatedly", got)
+		t.Errorf("redelivery produced %d notifications, want 1. A retrying peer would ring the bell repeatedly", got)
 	}
 
 	t.Run("a blocked account cannot reach the person who blocked them", func(t *testing.T) {

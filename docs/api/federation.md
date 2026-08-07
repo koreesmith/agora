@@ -218,7 +218,7 @@ Public instance metadata, Ed25519 public key. Used by remote *Agora* instances t
   "data": { ... }
 }
 ```
-**Signature:** carried in the body's own `signature` field (base64 Ed25519), not in a header — the `X-Agora-Signature` header previously documented here has never existed in the code.
+**Signature:** carried in the body's own `signature` field (base64 Ed25519), not in a header. The `X-Agora-Signature` header previously documented here has never existed in the code.
 
 The signed bytes are the request body re-serialized from a JSON object with the `signature` field removed, which makes the signature independent of key order and whitespace (see `canonicalActivity`, AGORA-316). Signing the raw body as received would not interoperate: the sender's own queue table normalizes the document before it is ever sent.
 

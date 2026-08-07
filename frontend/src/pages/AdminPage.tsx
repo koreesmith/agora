@@ -66,6 +66,11 @@ export default function AdminPage() {
   const unblockDid   = useMutation({ mutationFn: (id:string)=>moderationApi.unblockDID(id), onSuccess:()=>qc.invalidateQueries({queryKey:['blocked-dids']}) })
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
+  const disconnectInst = useMutation({
+    mutationFn: (id:string)=>adminApi.disconnectInstance(id),
+    onSuccess: ()=>{ ok('Instance disconnected'); qc.invalidateQueries({queryKey:['admin-fed']}) },
+    onError:   (e:any)=>ok(e.response?.data?.error || 'Could not disconnect instance'),
+  })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const revokeInvite   = useMutation({ mutationFn: (id:string)=>adminApi.revokeInvite(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const resendVerif    = useMutation({ mutationFn: (id:string)=>adminApi.resendVerification(id) })
@@ -587,6 +592,7 @@ export default function AdminPage() {
           onAdd={()=>qc.invalidateQueries({queryKey:['admin-fed']})}
           onBlock={(id)=>blockInst.mutate(id)}
           onUnblock={(id)=>unblockInst.mutate(id)}
+          onDisconnect={(id)=>disconnectInst.mutate(id)}
         />
       )}
 
@@ -884,13 +890,32 @@ function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void 
 
 // ── Federation Panel ──────────────────────────────────────────────────────────
 
-function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
+// AGORA-321: how a peering started. 'unknown' is for rows that predate the
+// column: direction can't be reconstructed after the fact, so it says so
+// rather than guessing.
+const DIRECTION_LABEL: Record<string, string> = {
+  outbound: 'You added this',
+  inbound:  'They connected to you',
+  mutual:   'Connected both ways',
+  unknown:  'Origin unknown',
+}
+
+function FederationPanel({ instances, onAdd, onBlock, onUnblock, onDisconnect }: {
   instances: any[], onAdd: () => void,
-  onBlock: (id: string) => void, onUnblock: (id: string) => void
+  onBlock: (id: string) => void, onUnblock: (id: string) => void,
+  onDisconnect: (id: string) => void
 }) {
   const [domain, setDomain] = useState('')
   const [addMsg, setAddMsg] = useState('')
   const [addErr, setAddErr] = useState('')
+  // Disconnect removes a peer outright, and the button alone doesn't convey
+  // that it isn't the same thing as Block, so it confirms inline.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
+
+  // Grouped rather than filtered: an admin reviewing servers that arrived on
+  // their own wants them together, not interleaved with the ones they added.
+  const inbound  = instances.filter((i:any) => i.direction === 'inbound')
+  const others   = instances.filter((i:any) => i.direction !== 'inbound')
 
   const add = useMutation({
     mutationFn: () => adminApi.addInstance(domain.trim()),
@@ -913,6 +938,13 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
           Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
           This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
           instance, use the Fediverse tab's Instance Bans instead.
+        </p>
+        {/* AGORA-322 tracks making peering carry public posts on its own. Until
+            it lands, say what connecting actually does rather than letting an
+            admin infer that timelines will start flowing. */}
+        <p className="text-xs text-agora-400">
+          Connecting lets your users find and friend accounts on that instance, and posts flow between accounts
+          once a friend request is accepted. It does not by itself pull in that instance's public timeline.
         </p>
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
@@ -940,29 +972,102 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         {instances.length === 0 && (
           <div className="card p-8 text-center text-agora-400 space-y-1">
             <p className="font-medium">No federated instances yet</p>
-            <p className="text-sm">Add an instance above to start federating.</p>
+            <p className="text-sm">Add an instance above, or wait for another instance to connect to you.</p>
           </div>
         )}
-        {instances.map((inst: any) => (
-          <div key={inst.id} className={`card p-3 flex items-center gap-3 ${inst.status === 'blocked' ? 'opacity-60' : ''}`}>
-            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 text-sm font-bold text-agora-500">
-              {(inst.name || inst.domain)[0].toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-sm truncate">{inst.name || inst.domain}</p>
-              <p className="text-xs text-agora-400">
-                {inst.domain}
-                <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${inst.status === 'active' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-100 dark:bg-red-900/30 text-red-600'}`}>
-                  {inst.status}
-                </span>
-              </p>
-            </div>
-            {inst.status === 'active'
-              ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Block</button>
-              : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline flex-shrink-0">Unblock</button>}
-          </div>
-        ))}
+
+        {inbound.length > 0 && (
+          <>
+            <h4 className="text-sm font-semibold pt-2">Connected to you</h4>
+            <p className="text-xs text-agora-400 -mt-1">
+              These servers started federating with this instance on their own. Federation is open by
+              design. Disconnect one to forget it, or block it to refuse its traffic outright.
+            </p>
+            {inbound.map((inst: any) => (
+              <InstanceRow key={inst.id} inst={inst}
+                confirmingId={confirmingId} setConfirmingId={setConfirmingId}
+                onBlock={onBlock} onUnblock={onUnblock} onDisconnect={onDisconnect} />
+            ))}
+          </>
+        )}
+
+        {others.length > 0 && (
+          <>
+            {inbound.length > 0 && <h4 className="text-sm font-semibold pt-4">Instances you added</h4>}
+            {others.map((inst: any) => (
+              <InstanceRow key={inst.id} inst={inst}
+                confirmingId={confirmingId} setConfirmingId={setConfirmingId}
+                onBlock={onBlock} onUnblock={onUnblock} onDisconnect={onDisconnect} />
+            ))}
+          </>
+        )}
       </div>
+    </div>
+  )
+}
+
+function InstanceRow({ inst, confirmingId, setConfirmingId, onBlock, onUnblock, onDisconnect }: {
+  inst: any,
+  confirmingId: string | null, setConfirmingId: (id: string | null) => void,
+  onBlock: (id: string) => void, onUnblock: (id: string) => void, onDisconnect: (id: string) => void
+}) {
+  const blocked   = inst.status === 'blocked'
+  const confirming = confirmingId === inst.id
+
+  return (
+    <div className={`card p-3 ${blocked ? 'opacity-60' : ''}`}>
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 text-sm font-bold text-agora-500">
+          {(inst.name || inst.domain)[0].toUpperCase()}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-sm truncate">{inst.name || inst.domain}</p>
+          <p className="text-xs text-agora-400">
+            {inst.domain}
+            <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${!blocked ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-100 dark:bg-red-900/30 text-red-600'}`}>
+              {inst.status}
+            </span>
+            {inst.direction && (
+              <span className="ml-2 px-1.5 py-0.5 rounded text-xs bg-agora-100 dark:bg-agora-700/50 text-agora-500">
+                {DIRECTION_LABEL[inst.direction] || inst.direction}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          {!blocked
+            ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline">Block</button>
+            : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline">Unblock</button>}
+          {/* Blocked instances can't be disconnected in one step, since that would
+              silently stop refusing traffic the admin deliberately refused. */}
+          {!blocked && (
+            <button onClick={() => setConfirmingId(confirming ? null : inst.id)} className="text-xs text-agora-500 hover:underline">
+              Disconnect
+            </button>
+          )}
+        </div>
+      </div>
+
+      {confirming && (
+        <div className="mt-3 pt-3 border-t border-agora-200 dark:border-agora-700 space-y-2">
+          <p className="text-xs text-agora-500">
+            Disconnect <span className="font-medium">{inst.domain}</span>? This removes it from your peer list and
+            stops delivering to it. Accounts and posts already received from it are kept, so any friendships your
+            users have there keep working. It isn't blocked, so if it contacts this instance again it will reappear.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { onDisconnect(inst.id); setConfirmingId(null) }}
+              className="text-xs px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600"
+            >
+              Disconnect
+            </button>
+            <button onClick={() => setConfirmingId(null)} className="text-xs px-2 py-1 rounded bg-agora-200 dark:bg-agora-700">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -42,6 +42,12 @@ const typeIcon: Record<string, React.ReactNode> = {
   fediverse_follow:      <UserPlus size={16} className="text-sky-500" />,
   atproto_follow:        <UserPlus size={16} className="text-sky-500" />,
 
+  // AGORA-314: admin-attention type, so it takes the amber tint new_report
+  // and waitlist_join use rather than the sky one the "from another network"
+  // types share. What matters here is that an admin should look at it, not
+  // which network it came from.
+  federation_request:    <Globe size={16} className="text-amber-500" />,
+
   // Custom domain handles (AGORA-287) — see systemNotifText below for why
   // these are their own shape rather than another "<actor> did a thing".
   custom_domain_live:     <CheckCircle size={16} className="text-green-500" />,
@@ -62,6 +68,10 @@ const systemNotifText: Record<string, (domain: string) => string> = {
   custom_domain_failed:   d => `We couldn't verify ${d} — tap to see what went wrong`,
   custom_domain_lost:     d => `${d} stopped verifying, so your handle has gone back to the one this instance issued you`,
   custom_domain_rejected: d => `Your request to use ${d} as your handle was declined`,
+  // AGORA-314: same shape and for the same reason: the "actor" is a server,
+  // not a person, so there is no name to lead with and `data` carries the
+  // domain.
+  federation_request:     d => `${d} has started federating with this instance`,
 }
 
 const notifText: Record<string, string> = {
@@ -135,6 +145,8 @@ function notifTarget(n: any): string | null {
       return '/admin?tab=reports'
     case 'waitlist_join':
       return '/admin?tab=waitlist'
+    case 'federation_request':
+      return '/admin?tab=federation'
     case 'custom_domain_live':
     case 'custom_domain_verified':
     case 'custom_domain_failed':

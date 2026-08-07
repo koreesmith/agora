@@ -15,13 +15,13 @@ import (
 // AGORA-316: the legacy Agora-to-Agora protocol shipped with no test coverage
 // at all, and the defect that hid there was that the signer and the verifier
 // each built the signed byte string their own way. Signing and verifying
-// therefore have to be tested against each other, not separately — a test
+// therefore have to be tested against each other, not separately: a test
 // that only exercises one side would have passed throughout.
 
 // TestCanonicalActivityIsIndependentOfKeyOrder pins the property the fix rests
-// on. The same document written three ways — Go's alphabetical map ordering,
+// on. The same document is written three ways: Go's alphabetical map ordering,
 // Postgres's JSONB (length-then-bytewise) ordering, and an arbitrary
-// hand-written order — must canonicalize to one byte string.
+// hand-written order. All three must canonicalize to one byte string.
 //
 // The JSONB case is the one that mattered in production: federation_queue's
 // payload column is JSONB, so what drainQueue reads back is never what

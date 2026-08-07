@@ -253,8 +253,8 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 	case "profile_update":
 		s.handleInboundProfileUpdate(activity)
 	default:
-		// AGORA-325: still a 202 below — an unknown type is expected traffic
-		// from a peer on a newer version, not a client error — but silently
+		// AGORA-325: still a 202 below, since an unknown type is expected traffic
+		// from a peer on a newer version, not a client error. Silently
 		// discarding it left no way to tell "they sent nothing" apart from
 		// "they sent something we don't understand".
 		log.Printf("federation: ignoring unknown activity type %q from %s", activity.Type, activity.InstanceID)
@@ -279,7 +279,7 @@ func (s *Service) handleInboundPost(a Activity) {
 	// AGORA-319: published_at is the origin publish time, created_at is when
 	// this instance stored the row (AGORA-270's split). The sender has always
 	// put its own RFC3339 timestamp in the payload and this handler has always
-	// parsed it, but it went nowhere — both columns fell back to NOW(), so
+	// parsed it, but it went nowhere: both columns fell back to NOW(), so
 	// ingested posts sorted by delivery order rather than by when they were
 	// written. parseAPTime is the AP ingest path's own helper; reusing it
 	// keeps one convention for a malformed value rather than inventing a
@@ -316,7 +316,7 @@ func (s *Service) handleInboundFriendRequest(a Activity) {
 	// AGORA-318: friends.SendRequest refuses a request between blocked parties
 	// (internal/friends/friends.go). This path writes the row directly and had
 	// no equivalent check, which was survivable only because it also sent no
-	// notification — a blocked account could reach someone who blocked them the
+	// notification. A blocked account could reach someone who blocked them the
 	// moment one is added, so the guard lands with it.
 	if s.usersHaveBlock(remoteUserID, localUserID) { return }
 
@@ -338,6 +338,43 @@ func (s *Service) handleInboundFriendRequest(a Activity) {
 	// renders this type with its inline Accept/Decline controls.
 	if s.notif != nil {
 		s.notif.Create(localUserID, remoteUserID, "friend_request", "", "")
+	}
+}
+
+// notifyAdminsOfFederationRequest tells every admin that a server they've
+// never seen has started federating with this instance (AGORA-314).
+//
+// Until now the only trace was an audit_log row nobody has reason to read and
+// a new entry in the Federation tab nobody is prompted to look at, so an
+// instance could start exchanging posts and friend requests with no one
+// noticing. This does not gate anything: the accepted position is to stay open
+// and ban bad actors after the fact, and this makes the event visible so an
+// admin can make that call.
+//
+// Filters on role = 'admin', deliberately narrower than moderation's own
+// notifyAdmins (which includes moderators): the federation instance routes are
+// behind RequireAdmin, so a notified moderator would have no way to act.
+func (s *Service) notifyAdminsOfFederationRequest(domain string) {
+	if s.notif == nil { return }
+
+	rows, err := s.db.Query(`SELECT id FROM users WHERE role = 'admin' AND deletion_scheduled_at IS NULL`)
+	if err != nil { return }
+	defer rows.Close()
+
+	var adminIDs []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		adminIDs = append(adminIDs, id)
+	}
+	rows.Close()
+
+	log.Printf("federation: new instance %s federated with us, notifying %d admin(s)", domain, len(adminIDs))
+	for _, id := range adminIDs {
+		// No actor: this is an instance, not a user. The domain rides in the
+		// data column, the shape AGORA-287's custom_domain_* types set and
+		// new_report already uses for its report id.
+		s.notif.Create(id, "", "federation_request", "", domain)
 	}
 }
 
@@ -367,7 +404,7 @@ func (s *Service) handleInboundFriendAccept(a Activity) {
 	if localUserID == "" || remoteUserID == "" { return }
 
 	// AGORA-318: gated on the UPDATE actually matching a pending row, for the
-	// same reason the request handler checks its insert — a redelivered accept
+	// same reason the request handler checks its insert: a redelivered accept
 	// must not notify twice, and an accept for a friendship that was never
 	// pending must not notify at all.
 	res, err := s.db.Exec(`
@@ -420,7 +457,7 @@ func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 
 	// AGORA-317: profile_private has to be set explicitly. Its column default
 	// is TRUE, which is the right default for someone signing up locally and
-	// the wrong one for a stub standing in for a remote account — a private
+	// the wrong one for a stub standing in for a remote account. A private
 	// author is filtered out of PublicFeed and 403s on their own permalink, so
 	// every post ingested from a federated instance landed invisible. This is
 	// the same defect AGORA-164 found and fixed on the ActivityPub side; that
@@ -784,7 +821,7 @@ func (s *Service) drainQueue() {
 
 		signed, err := signActivity(privKey, j.payload)
 		if err != nil {
-			// Unsignable payload — malformed beyond what the Unmarshal above
+			// Unsignable payload, malformed beyond what the Unmarshal above
 			// caught. Retrying can't help, so drop it rather than let it
 			// occupy the queue for ten attempts.
 			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
@@ -811,7 +848,7 @@ func (s *Service) drainQueue() {
 			// federation_queue by hand.
 			//
 			// Log the first failure and the final abandonment, and stay quiet
-			// in between — a peer that is down for a day would otherwise
+			// in between. A peer that is down for a day would otherwise
 			// produce one line per activity per retry.
 			switch {
 			case j.attempts == 0:
@@ -845,7 +882,7 @@ func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
 // through this one function, which is the whole point of it existing.
 //
 // AGORA-316: they used to derive those bytes independently and never agreed,
-// so no inbound legacy activity was ever accepted — every one 401'd, which is
+// so no inbound legacy activity was ever accepted: every one 401'd, which is
 // why federated posts, friend requests and friend accepts were all silently
 // inert. drainQueue signed whatever it read back out of
 // federation_queue.payload, and that column is JSONB: Postgres stores JSONB
@@ -856,8 +893,8 @@ func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
 // document happens to sort the same way under both rules.
 //
 // Round-tripping through map[string]any is what makes the two sides agree: it
-// collapses every difference that isn't semantic — key order, whitespace, and
-// the integer-versus-float distinction json.Unmarshal erases — so both ends
+// collapses every difference that isn't semantic (key order, whitespace, and
+// the integer-versus-float distinction json.Unmarshal erases), so both ends
 // arrive at identical bytes regardless of what shape the document reached
 // them in. That also means the JSONB normalization above stops mattering
 // rather than needing to be avoided.
@@ -987,11 +1024,34 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 
 	decoded, _ := base64.StdEncoding.DecodeString(keyB64) // validated in FetchInstanceInfo
 
-	s.db.Exec(`
-		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
-		VALUES ($1, $2, $3, $4, 'active')
-		ON CONFLICT (domain) DO UPDATE SET public_key = $3, name = $2, last_seen_at = NOW()
-	`, normalized, name, keyB64, "https://"+normalized)
+	// AGORA-321/314: a row created here is an instance contacting us that we
+	// had no record of, which is a materially different event from an admin
+	// adding a peer. RETURNING (xmax = 0) is what tells them apart: true only
+	// on a genuine insert, false when the upsert took its update branch, so a
+	// burst of activities from the same new instance produces one notification
+	// rather than one per activity.
+	//
+	// An existing 'outbound' peering becomes 'mutual' once they contact us.
+	// 'unknown' deliberately stays 'unknown': inbound traffic proves they are
+	// talking to us, not that they initiated the peering, and guessing would
+	// turn every pre-existing row with a trimmed audit log into a false "they
+	// connected to you".
+	var firstContact bool
+	s.db.QueryRow(`
+		INSERT INTO federated_instances (domain, name, public_key, instance_url, status, direction)
+		VALUES ($1, $2, $3, $4, 'active', 'inbound')
+		ON CONFLICT (domain) DO UPDATE
+		  SET public_key   = $3,
+		      name         = $2,
+		      last_seen_at = NOW(),
+		      direction    = CASE WHEN federated_instances.direction = 'outbound' THEN 'mutual'
+		                          ELSE federated_instances.direction END
+		RETURNING (xmax = 0)
+	`, normalized, name, keyB64, "https://"+normalized).Scan(&firstContact)
+
+	if firstContact {
+		go s.notifyAdminsOfFederationRequest(normalized)
+	}
 
 	return ed25519.PublicKey(decoded), nil
 }

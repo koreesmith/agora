@@ -1242,7 +1242,7 @@ var schema = []string{
 	// AGORA-317: the same defect AGORA-164 fixed for ActivityPub stubs (783),
 	// on the legacy Agora-to-Agora protocol's own stub path. profile_private
 	// defaults to TRUE, getOrCreateRemoteUser never set it, so every account
-	// cached from a federated Agora instance was created private — filtered
+	// cached from a federated Agora instance was created private: filtered
 	// out of PublicFeed and 403ing on its own permalink, which meant nothing
 	// ingested over that protocol was ever visible. getOrCreateRemoteUser now
 	// sets it explicitly; this repairs the rows created before that.
@@ -1258,4 +1258,39 @@ var schema = []string{
 	`UPDATE users SET profile_private = false
 		WHERE is_remote = true AND profile_private = true
 		  AND remote_user_id != '' AND ap_actor_url = '' AND atproto_remote_did = ''`,
+
+	// AGORA-321: how a peering started. Two unrelated events wrote
+	// federated_instances rows that were then indistinguishable: an admin
+	// deliberately adding a peer (AddInstance), and an unknown instance being
+	// registered as a side effect of fetching its key to verify an inbound
+	// activity (getRemotePublicKey). An admin had no way to answer "who has
+	// federated with us", which is the question this column exists for.
+	//
+	// 'unknown' rather than a guess for pre-existing rows: direction cannot be
+	// reconstructed after the fact, and the backfill below only claims the
+	// ones the audit log can actually prove.
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS direction VARCHAR(10) NOT NULL DEFAULT 'unknown'`,
+	`ALTER TABLE federated_instances DROP CONSTRAINT IF EXISTS federated_instances_direction_check`,
+	`ALTER TABLE federated_instances ADD CONSTRAINT federated_instances_direction_check
+		CHECK (direction IN ('outbound','inbound','mutual','unknown'))`,
+
+	// AddInstance writes an audit_log row per add (target_type = 'instance',
+	// target_id = the domain), so a row with a matching entry was added from
+	// this side. Everything else stays 'unknown' rather than being assumed
+	// inbound. An audit log that has been trimmed would otherwise turn every
+	// old outbound peering into a false "they connected to you".
+	//
+	// Guarded: an admin may legitimately correct a direction later, and this
+	// list replays on every boot, so an unguarded version would keep
+	// overwriting their edit.
+	`UPDATE federated_instances fi
+		SET direction = 'outbound'
+		WHERE fi.direction = 'unknown'
+		  AND EXISTS (
+		    SELECT 1 FROM audit_log al
+		     WHERE al.action = 'add_instance' AND al.target_id = fi.domain
+		  )
+		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_321_instance_direction')`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_321_instance_direction')
+		ON CONFLICT (name) DO NOTHING`,
 }

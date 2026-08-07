@@ -11,7 +11,7 @@ import (
 // AGORA-317: users.profile_private defaults to TRUE, which is right for a
 // local signup and wrong for a stub standing in for a remote account.
 // getOrCreateRemoteUser never set it, so every account cached from a federated
-// Agora instance was created private — and PublicFeed filters on
+// Agora instance was created private, and PublicFeed filters on
 // `NOT u.profile_private`, so posts ingested from a peer were stored and then
 // never shown to anyone. AGORA-164 fixed the identical defect on the
 // ActivityPub stub path; its scoping (ap_actor_url != '') meant it never

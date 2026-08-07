@@ -416,6 +416,9 @@ func pushNotifContent(t, actorName, data string) (title, body string) {
 		return "⚠️ New Report", "A new report has been submitted — tap to review"
 	case "waitlist_join":
 		return "👤 New Waitlist Signup", "A new user has joined the waitlist — tap to review"
+	// AGORA-314: admin-only, and there is no actor: data carries the domain.
+	case "federation_request":
+		return "🌐 New federation request", data + " has started federating with this instance"
 	case "custom_domain_live":
 		return "Your custom handle is live", data + " is now your handle on Bluesky"
 	case "custom_domain_verified":
@@ -521,6 +524,13 @@ func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseUR
 	case "new_report":
 		return fmt.Sprintf("⚠️ New report on %s", instanceName),
 			fmt.Sprintf("A new report has been submitted on %s and needs your review.\n\nReview it: %s/admin", instanceName, baseURL)
+
+	// AGORA-314: emailed, unlike a follow, for the same reason new_report is:
+	// a low-frequency admin-relevant event where an admin who isn't logged in
+	// is exactly the person who should hear about it. data carries the domain.
+	case "federation_request":
+		return fmt.Sprintf("New federation request on %s", instanceName),
+			fmt.Sprintf("%s has started federating with %s.\n\nReview it: %s/admin?tab=federation", data, instanceName, baseURL)
 
 	// AGORA-287: custom domain handles (data carries the domain). Only the
 	// three state changes a user has to know about are emailed — a handle

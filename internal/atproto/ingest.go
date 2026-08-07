@@ -38,9 +38,31 @@ func displayNameOr(displayName, fallback string) string {
 // the same fallback creating a local post already uses.
 func parseBlueskyTime(createdAt string) time.Time {
 	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-		return t
+		return clampPublished(t)
 	}
 	return time.Now()
+}
+
+// maxPublishedSkew is how far ahead of now an ingested record's own timestamp
+// may sit before it is treated as wrong. internal/federation has its own copy
+// for the ActivityPub and Agora-to-Agora ingest paths; keep the two in step.
+const maxPublishedSkew = 5 * time.Minute
+
+// clampPublished bounds a remote-supplied publish time (AGORA-332).
+//
+// An app.bsky.feed.post's createdAt is written by whoever controls the repo, so
+// a record can claim any time it likes. Every feed orders by published_at, so
+// an unbounded future value pins that post above everything else indefinitely.
+//
+// Deliberately one-sided, matching federation.clampPublished. An old timestamp
+// is left exactly as sent, because backfill produces legitimately old ones and
+// an old post sorts harmlessly downward.
+func clampPublished(t time.Time) time.Time {
+	now := time.Now()
+	if t.After(now.Add(maxPublishedSkew)) {
+		return now
+	}
+	return t
 }
 
 // getOrCreateRemoteATUser mirrors federation's getOrCreateRemoteAPUser/

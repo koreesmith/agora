@@ -68,10 +68,11 @@ func (s *Service) storeHashtags(postID string, tags []string) {
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
-	BroadcastToFriendInstances(userID string, activity any)
-	// BroadcastPublicPost/BroadcastDeletePost drive standard ActivityPub
-	// delivery to a user's fediverse followers (AGORA-145) — distinct from
-	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
+	// BroadcastPublicPost/BroadcastDeletePost drive ActivityPub delivery to a
+	// user's followers (AGORA-145). Since AGORA-327 they are the only outbound
+	// content path: the legacy Agora-to-Agora broadcasts that used to fire
+	// alongside them are gone, so BroadcastToFriendInstances is no longer part
+	// of this interface.
 	BroadcastPublicPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
 	// BroadcastUpdatePost delivers a signed Update when a federated post is
@@ -1148,23 +1149,14 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Broadcast public posts to federated friend instances
+	// AGORA-145: deliver to ActivityPub followers, which since AGORA-327 is the
+	// only outbound path. The legacy Agora-to-Agora "post" broadcast that used
+	// to fire alongside this is gone: it carried strictly less (no polls,
+	// content warnings, multiple attachments, video, custom emoji or edits) and
+	// the two keyed ingested posts differently, so a recipient who was both a
+	// legacy friend and an ActivityPub follower received the same post twice as
+	// two rows the dedup index could not collapse. See ADR-002.
 	if req.Visibility == "public" && s.fed != nil {
-		var username string
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "post",
-			"actor": username,
-			"object": map[string]any{
-				"id":            id,
-				"content":       req.Content,
-				"image_url":     req.ImageURL,
-				"visibility":    "public",
-				"author_handle": username,
-				"created_at":    timeNow(),
-			},
-		})
-		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
 		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
@@ -1361,16 +1353,15 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 			// no-ops if the original post isn't remote.
 			go s.fed.DeliverUnannounce(authorID, id, *repostOfID)
 		} else {
-			var username string
-			s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-			go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-				"type":  "delete_post",
-				"actor": username,
-				"object": map[string]string{"id": id},
-			})
-			// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
-			// not the deleter (userID may be an admin/moderator), since the Delete
-			// must come from the same actor that federated the original post.
+			// AGORA-145: notify ActivityPub followers. Uses authorID, not the
+			// deleter (userID may be an admin/moderator), since the Delete must
+			// come from the same actor that federated the original post.
+			//
+			// AGORA-327: the legacy "delete_post" broadcast that used to fire
+			// alongside this is gone, for the same reason its "post"
+			// counterpart is. A delete has to reach everyone the Create did, so
+			// removing one without the other would have been the wrong order:
+			// both go together.
 			go s.fed.BroadcastDeletePost(authorID, id)
 		}
 	}

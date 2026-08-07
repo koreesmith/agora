@@ -1488,9 +1488,34 @@ func hashtagsFromAPTags(entries []apTagEntry) []string {
 // ingested" is the same fallback creating a local post already uses.
 func parseAPTime(published string) time.Time {
 	if t, err := time.Parse(time.RFC3339, published); err == nil {
-		return t
+		return clampPublished(t)
 	}
 	return time.Now()
+}
+
+// maxPublishedSkew is how far ahead of now an ingested post's origin timestamp
+// may sit before it is treated as wrong. internal/atproto has its own copy for
+// the AT Proto ingest path; keep the two in step.
+const maxPublishedSkew = 5 * time.Minute
+
+// clampPublished bounds a remote-supplied publish time (AGORA-332).
+//
+// Every feed orders by published_at, and until now it was whatever the sending
+// instance said it was. A peer that stamps a post a year ahead pins it above
+// everything else in the receiving instance's feeds indefinitely, and a peer
+// with a badly wrong clock does the same thing without meaning to.
+//
+// Deliberately one-sided. An old timestamp is left exactly as sent: a backfilled
+// archive and a genuinely old post being ingested for the first time both
+// produce one, and an old post sorts harmlessly downward, so clamping it would
+// corrupt real data to defend against something that is not an attack. Anyone
+// tidying this into a symmetric range check has broken backfill.
+func clampPublished(t time.Time) time.Time {
+	now := time.Now()
+	if t.After(now.Add(maxPublishedSkew)) {
+		return now
+	}
+	return t
 }
 
 // storeHashtags mirrors feed.Service's own helper of the same name —

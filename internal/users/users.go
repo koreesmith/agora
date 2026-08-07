@@ -22,7 +22,10 @@ import (
 )
 
 type fedSender interface {
-	BroadcastToFriendInstances(userID string, activity any)
+	// AGORA-327: the legacy profile_update broadcast is gone, so
+	// BroadcastActorUpdate is the only profile-change path. It sends a signed
+	// Update(Person) whose icon and image are absolute URLs, which the legacy
+	// payload's raw avatar_url never was (AGORA-331).
 	BroadcastActorUpdate(userID string)
 	// GetRemoteActorStats fetches a fediverse account's live follower/
 	// following/post counts and bio (AGORA-253) — Agora never tracks a
@@ -420,26 +423,15 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast profile update to federated friend instances
+	// AGORA-242: a signed Update(Person) is what actually reaches followers.
+	//
+	// AGORA-327/331: the legacy "profile_update" broadcast that used to fire
+	// alongside this is gone. It sent avatar_url straight from the database,
+	// where it is a relative /uploads/... path, so the receiving instance
+	// stored that verbatim and then requested it from its own domain, breaking
+	// the avatar on every remote copy. It also had no cover photo field at all.
+	// The actor document carries both, absolutized, and always has.
 	if s.fed != nil {
-		var username, displayName, avatarURL, bio string
-		s.db.QueryRow(`SELECT username, display_name, avatar_url, bio FROM users WHERE id = $1`, userID).
-			Scan(&username, &displayName, &avatarURL, &bio)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "profile_update",
-			"actor": username,
-			"object": map[string]string{
-				"handle":       username,
-				"display_name": displayName,
-				"avatar_url":   avatarURL,
-				"bio":          bio,
-			},
-		})
-		// AGORA-242: BroadcastToFriendInstances above only reaches other
-		// Agora instances — its payload is Agora's own internal shape, not a
-		// real ActivityPub activity. Standard fediverse followers (Mastodon
-		// etc.) need an actual signed Update(Person) or a display-name/bio
-		// edit never reaches them at all.
 		go s.fed.BroadcastActorUpdate(userID)
 	}
 
@@ -462,16 +454,9 @@ func (s *Service) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Exec(`UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2`, url, userID)
 	if s.fed != nil {
-		var username, displayName, avatarURL, bio string
-		s.db.QueryRow(`SELECT username, display_name, avatar_url, bio FROM users WHERE id = $1`, userID).
-			Scan(&username, &displayName, &avatarURL, &bio)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "profile_update",
-			"actor": username,
-			"object": map[string]string{"handle": username, "display_name": displayName, "avatar_url": avatarURL, "bio": bio},
-		})
-		// AGORA-242: same reasoning as UpdateProfile above — a real Update
-		// activity is the only thing standard fediverse followers act on.
+		// AGORA-242/327/331: same reasoning as UpdateProfile above. A signed
+		// Update(Person) is the only thing followers act on, and it is the only
+		// thing that carries the avatar as an absolute URL.
 		go s.fed.BroadcastActorUpdate(userID)
 	}
 	// AGORA-233: a photo-only change never touches display_name/bio, so

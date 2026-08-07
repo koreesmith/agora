@@ -429,11 +429,37 @@ func (s *Service) handleInboundProfileUpdate(a Activity) {
 	}
 	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
 
+	// AGORA-331: an instance still on an older build sends avatar_url straight
+	// from its own database, where uploads are stored as a relative
+	// /uploads/... path. Stored verbatim, the receiving frontend then requests
+	// it from this instance's domain and 404s, which is how a federated
+	// friend's avatar breaks the first time they edit their profile.
+	//
+	// AGORA-327 stopped this instance emitting that payload, but the receiver
+	// is the side that can actually repair it: it knows which domain the path
+	// belongs to, because the activity says so.
 	s.db.Exec(`
 		UPDATE users
 		SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
 		WHERE remote_user_id = $4 AND remote_instance = $5
-	`, obj.DisplayName, obj.AvatarURL, obj.Bio, obj.Handle, a.InstanceID)
+	`, obj.DisplayName, remoteAbsoluteURL(obj.AvatarURL, a.InstanceID), obj.Bio, obj.Handle, a.InstanceID)
+}
+
+// remoteAbsoluteURL resolves a possibly-relative media path against the remote
+// instance that sent it. Mirrors Service.absoluteURL, which does the same job
+// for this instance's own URLs, but takes the origin domain as an argument
+// because here it is somebody else's.
+//
+// Leaves an empty value empty rather than turning it into a bare domain: an
+// account with no avatar must stay that way, not acquire a broken one.
+func remoteAbsoluteURL(u, instance string) string {
+	if u == "" || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return u
+	}
+	if !isValidInstanceHost(instance) {
+		return u
+	}
+	return "https://" + instance + "/" + strings.TrimLeft(u, "/")
 }
 
 // ── Remote user lookup + sync ─────────────────────────────────────────────────
@@ -452,7 +478,10 @@ func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 
 	displayName := profile["display_name"]
 	if displayName == "" { displayName = handle + "@" + instance }
-	avatarURL  := profile["avatar_url"]
+	// AGORA-331: GetUser absolutizes its own avatar_url (AGORA-312), but an
+	// instance still on an older build does not, so guard here too rather than
+	// trusting the far end to have upgraded.
+	avatarURL  := remoteAbsoluteURL(profile["avatar_url"], instance)
 	bio        := profile["bio"]
 
 	// AGORA-317: profile_private has to be set explicitly. Its column default
@@ -524,10 +553,13 @@ func (s *Service) syncStaleRemoteUsers() {
 	for _, e := range stale {
 		profile := s.fetchRemoteProfile(e.handle, e.instance)
 		if len(profile) == 0 { continue }
+		// AGORA-331: same guard as getOrCreateRemoteUser and
+		// handleInboundProfileUpdate. This is also the path that repairs an
+		// already-corrupted stub on its own, since it refetches from GetUser.
 		s.db.Exec(`
 			UPDATE users SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
 			WHERE remote_user_id = $4 AND remote_instance = $5
-		`, profile["display_name"], profile["avatar_url"], profile["bio"], e.handle, e.instance)
+		`, profile["display_name"], remoteAbsoluteURL(profile["avatar_url"], e.instance), profile["bio"], e.handle, e.instance)
 	}
 }
 

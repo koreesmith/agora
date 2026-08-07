@@ -12,8 +12,11 @@ import (
 )
 
 // fedSender is the subset of federation.Service used here (avoids import cycle).
+//
+// AGORA-327 dropped BroadcastToFriendInstances, which this package declared but
+// never called. SendToUserInstance stays only until AGORA-329 moves friend
+// requests onto ActivityPub, at which point this interface goes too.
 type fedSender interface {
-	BroadcastToFriendInstances(userID string, activity any)
 	SendToUserInstance(remoteInstance, instanceURL string, activity any)
 }
 

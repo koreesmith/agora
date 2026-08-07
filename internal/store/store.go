@@ -1259,6 +1259,27 @@ var schema = []string{
 		WHERE is_remote = true AND profile_private = true
 		  AND remote_user_id != '' AND ap_actor_url = '' AND atproto_remote_did = ''`,
 
+	// AGORA-331: the legacy profile_update broadcast sent avatar_url straight
+	// from the origin's database, where an upload is a relative /uploads/...
+	// path (media.SaveUpload). The receiving instance stored that verbatim and
+	// its frontend then requested it from its own domain, so a federated
+	// friend's avatar broke the moment they next edited their profile. The
+	// broadcast is gone (AGORA-327) and both the inbound handler and the stub
+	// refresh now absolutize, but rows corrupted before that need repairing.
+	//
+	// Rebuilt from remote_instance, which is the domain the path belongs to.
+	// Scoped to legacy stubs (remote_user_id set), the only ones that path
+	// could reach: an ActivityPub or Bluesky stub always stored an absolute URL
+	// and must not be touched.
+	//
+	// Unguarded and idempotent by nature: once a value starts with http it no
+	// longer matches, and nothing writes a relative avatar to a remote stub any
+	// more, so the predicate cannot become true again.
+	`UPDATE users SET avatar_url = 'https://' || remote_instance || '/' || LTRIM(avatar_url, '/')
+		WHERE is_remote = true
+		  AND remote_user_id != '' AND remote_instance != ''
+		  AND avatar_url != '' AND avatar_url NOT LIKE 'http%'`,
+
 	// AGORA-321: how a peering started. Two unrelated events wrote
 	// federated_instances rows that were then indistinguishable: an admin
 	// deliberately adding a peer (AddInstance), and an unknown instance being

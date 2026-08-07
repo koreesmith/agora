@@ -130,28 +130,33 @@ The narrower claim this ADR does make: a federated friendship should mean the sa
 
 Delivered to the existing `/federation/inbox`, HTTP-Signature-signed as the requesting **user's** actor (not the instance actor: a friend request is from a person), queued through `enqueueAPDelivery` so it inherits backoff, blocking and the `ap_blocked_by` guard.
 
-Shape, using ActivityStreams `Offer` + `Relationship`, which is the closest thing the vocabulary has, with an Agora extension term for the relationship kind:
+**A `Follow` carrying an Agora extension property, not `Offer` + `Relationship`.**
+
+An earlier revision of this ADR proposed `Offer` wrapping a `Relationship` object, on the grounds that it is the closest thing the ActivityStreams vocabulary has. That was wrong, and the correction matters enough to record rather than quietly edit. The W3C's own Activity Streams primer explicitly steers away from `Offer` + `Relationship` over ActivityPub, on the grounds that `Follow` is far more widely supported, and the vocabulary describes how to *offer* a relationship without ever defining how one is accepted. Building the handshake on a shape the spec itself discourages, and which no implementation acts on, buys the appearance of standards alignment and none of the substance.
 
 ```json
 {
   "@context": ["https://www.w3.org/ns/activitystreams",
                {"agora": "https://agora.social/ns#"}],
-  "id": "https://a.example/federation/users/alice/friend-requests/<uuid>",
-  "type": "Offer",
+  "id": "https://a.example/federation/users/alice/follows/<uuid>",
+  "type": "Follow",
   "actor": "https://a.example/federation/users/alice",
-  "to": ["https://b.example/federation/users/bob"],
-  "object": {
-    "type": "Relationship",
-    "subject": "https://a.example/federation/users/alice",
-    "relationship": "agora:Friend",
-    "object": "https://b.example/federation/users/bob"
-  }
+  "object": "https://b.example/federation/users/bob",
+  "agora:friendRequest": true
 }
 ```
 
-Accept and reject reuse ActivityPub's own `Accept` and `Reject` wrapping the original `Offer`, exactly as they already wrap `Follow` (`handleInboundAcceptFollow`/`handleInboundRejectFollow` are the model). Unfriending is `Undo` of the `Offer`.
+Accept, reject and undo are then ActivityPub's own `Accept`, `Reject` and `Undo` of a `Follow`, which `handleInboundAcceptFollow`/`handleInboundRejectFollow` already implement and which every implementation in the network understands.
 
-The precise vocabulary is an implementation detail to settle in the ticket, not here. What this ADR fixes is that it rides the ActivityPub transport and not a second one. If `Offer`/`Relationship` proves awkward in practice, a fully namespaced `agora:FriendRequest` type is an acceptable substitute; the transport decision does not change.
+Three reasons this is the better shape:
+
+- **It rides the most widely implemented activity in the protocol** rather than one of the least.
+- **It collapses two exchanges into one.** Point 4 of the decision says an accepted friendship establishes a mutual follow. Under this shape the follow *is* the handshake rather than a second thing sent alongside it, so there is no window where a friendship exists but content is not yet flowing, and no way for the two to drift apart.
+- **It degrades to exactly the right thing.** A server that does not understand `agora:friendRequest` sees a plain `Follow` and treats it as one, which is the honest fallback: you followed them. Nothing is silently lost and nothing spurious is created.
+
+The receiving side must key the friendship on the extension property, never on the `Follow` alone, or every Mastodon follower would become a pending friend request.
+
+An `agora:` extension term in `@context` is ordinary JSON-LD, and unknown terms are ignored by consumers that do not recognise them. Whether the friendship marker is a boolean property (above) or a namespaced object is the remaining detail, and it is genuinely an implementation choice; the transport and the base activity type are not.
 
 ### Mutual follow on acceptance
 
@@ -307,7 +312,7 @@ Rejected as a stopping point, though it is exactly what migration step 1 produce
 
 ## Open questions
 
-- **Vocabulary.** `Offer` + `Relationship` versus a namespaced `agora:FriendRequest`. Settle during implementation; the transport decision stands either way.
+- **Marker shape.** Whether the friendship marker on the `Follow` is a boolean property or a namespaced object. Settled to a `Follow` carrying an `agora:` extension either way; only the term's shape is open.
 - **Should a friend request from an instance that is not a known peer be accepted?** Today anyone can deliver to the inbox and peering is not a precondition. Staying open matches the accepted position (open federation, ban bad actors after the fact), but it is worth stating deliberately rather than inheriting.
 - **Exact composer copy.** The decision to allow and label is settled above; the wording is not. It has to convey a degraded delivery without making the feature read as broken, and it has to survive being seen on every limited post rather than only the first. Worth testing on a real person rather than being written once and left.
 - **Editing and deleting a limited-audience post.** `Update` and `Delete` need the same audience derivation and the same fan-out. Straightforward once the audience is stored, but it must not be forgotten, since a delete that reaches fewer people than the original post is worse than no delete at all.

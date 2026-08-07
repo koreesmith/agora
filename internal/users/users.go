@@ -27,6 +27,9 @@ type fedSender interface {
 	// Update(Person) whose icon and image are absolute URLs, which the legacy
 	// payload's raw avatar_url never was (AGORA-331).
 	BroadcastActorUpdate(userID string)
+	// AGORA-334: whether a remote account is an Agora user who can receive a
+	// friend request, as opposed to a fediverse actor with no concept of one.
+	CanFriend(remoteUserID string) bool
 	// GetRemoteActorStats fetches a fediverse account's live follower/
 	// following/post counts and bio (AGORA-253) — Agora never tracks a
 	// remote account's own social graph locally, only its follow
@@ -125,10 +128,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		FriendCount    int     `json:"friend_count"`
 		PostNotify     bool    `json:"post_notifications_enabled"`
 		IsBlocked      bool    `json:"is_blocked"`
-		// AGORA-167: fediverse-specific follow state, distinct from friending —
-		// there's no ActivityPub equivalent of an Agora friend request, only
-		// following, so the frontend uses ap_actor_url to tell a genuine
-		// fediverse profile apart from a local (or legacy-protocol) remote one.
+		// AGORA-334: whether this account can be sent a friend request.
+		//
+		// The frontend used to infer this from ap_actor_url alone: anything
+		// with one was treated as a fediverse account and offered Follow with
+		// no way to friend it. That was right while no Agora user had an actor
+		// URL. Since AGORA-329 an Agora user on another instance has one too,
+		// and is exactly who friending is for, so the profile has to be told
+		// rather than left to guess from a field that no longer distinguishes
+		// the two cases.
+		CanFriend bool `json:"can_friend"`
+		// AGORA-167: fediverse-specific follow state, distinct from friending.
+		// There is no ActivityPub equivalent of an Agora friend request, only
+		// following, so a genuine fediverse account offers Follow alone.
 		FollowID     string `json:"follow_id,omitempty"`
 		Following    bool   `json:"following"`
 		FollowNotify bool   `json:"follow_notify"`
@@ -260,6 +272,17 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if viewerID == u.ID {
 		u.FriendStatus = "self"
+	}
+
+	// AGORA-334: a local account is always friendable; a remote one only if the
+	// far end is Agora, which federation.CanFriend decides. Asked rather than
+	// inferred from ap_actor_url, which stopped distinguishing an Agora user
+	// from a Mastodon one the moment AGORA-329 gave Agora users actor URLs.
+	if viewerID != "" && viewerID != u.ID {
+		u.CanFriend = !u.IsRemote
+		if u.IsRemote && s.fed != nil {
+			u.CanFriend = s.fed.CanFriend(u.ID)
+		}
 	}
 
 	// Friend count (public)

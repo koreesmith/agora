@@ -180,8 +180,18 @@ export default function ProfilePage() {
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
 
   const status = profile.friend_status
-  const isFediverse = !!profile.ap_actor_url
   const isBluesky = profile.remote_instance === 'bsky.app'
+  // AGORA-334: an Agora user on another instance has an ap_actor_url too since
+  // AGORA-329, so that field alone no longer tells a fediverse account apart
+  // from a peer's user. can_friend is the backend's answer to that question,
+  // and it is what decides whether friending is offered at all.
+  const canFriend = !!profile.can_friend
+  // "Fediverse" here means an account that can only be followed, never
+  // friended, which is what the follow-only UI below is for.
+  const isFediverse = !!profile.ap_actor_url && !canFriend
+  // A remote Agora user gets both: friending, matching the same-instance
+  // experience, and following, which is still meaningful on its own.
+  const isRemoteAgora = !!profile.ap_actor_url && canFriend
   const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
 
   // AGORA-306: the account gates follows behind manual approval and this
@@ -314,7 +324,42 @@ export default function ProfilePage() {
                   </button>
                 </div>
               )}
-              {me && !isSelf && !isFediverse && !isBluesky && !status && (
+              {/* AGORA-334: a remote Agora user gets the same Add friend
+                  affordance as somebody on this instance, plus Follow, which
+                  is still a meaningful thing to do on its own. Before this the
+                  ap_actor_url check swallowed them into the follow-only UI and
+                  there was no way to friend across instances from a profile at
+                  all. */}
+              {me && !isSelf && isRemoteAgora && !status && (
+                <div className="flex gap-2">
+                  <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
+                    <UserPlus size={16}/> Add friend
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (profile.following || profile.follow_pending) {
+                        if (confirm(`Unfollow ${profile.display_name}?`)) unfollowFed.mutate()
+                      } else followFed.mutate()
+                    }}
+                    disabled={followFed.isPending || unfollowFed.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1"
+                  >
+                    {profile.following ? <><UserCheck size={16}/> Following</>
+                      : profile.follow_pending ? <><Clock size={16}/> Requested</>
+                      : <><UserPlus size={16}/> Follow</>}
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(profile.is_blocked ? `Unblock ${profile.display_name}?` : `Block ${profile.display_name}? They won't be able to see your profile or contact you.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-agora-400"
+                    title={profile.is_blocked ? 'Unblock' : 'Block'}
+                  >
+                    {profile.is_blocked ? <ShieldOff size={15}/> : <Shield size={15}/>}
+                    {profile.is_blocked ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
+              )}
+              {me && !isSelf && !isFediverse && !isRemoteAgora && !isBluesky && !status && (
                 <div className="flex gap-2">
                   <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                     <UserPlus size={16}/> Add friend

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -19,6 +18,19 @@ type Service struct {
 	cfg      *config.Config
 	notifSvc notifSender
 	media    mediaStore
+	fed      fedResolver
+}
+
+// fedResolver is the subset of federation.Service used here, declared locally
+// and satisfied structurally so this package doesn't take a dependency on the
+// whole federation service (the same shape feed/users/friends use). Set after
+// construction via SetFed, since main builds the admin service first.
+//
+// AGORA-324: AddInstance used to resolve a remote instance itself with a bare
+// http.Client. Going through federation means it inherits the SSRF-safe dialer
+// and the key validation rather than keeping a second, weaker copy.
+type fedResolver interface {
+	FetchInstanceInfo(domain string) (normalizedDomain, name, publicKeyB64 string, err error)
 }
 
 type notifSender interface {
@@ -34,6 +46,8 @@ type mediaStore interface {
 func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender, media mediaStore) *Service {
 	return &Service{db: db, cfg: cfg, notifSvc: notifSvc, media: media}
 }
+
+func (s *Service) SetFed(f fedResolver) { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	// Settings
@@ -369,40 +383,35 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "domain required")
 		return
 	}
-	domain := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(req.Domain), "https://"), "http://")
-	domain = strings.Split(domain, "/")[0]
+	if s.fed == nil {
+		writeError(w, 503, "federation service unavailable")
+		return
+	}
 
-	// Fetch instance info to verify it's a real Agora instance
+	// AGORA-324: resolution, host validation and Ed25519 key checking all live
+	// in federation.FetchInstanceInfo, behind the SSRF-safe dialer. This used
+	// to be a bare http.Client here with no host validation at all, so a
+	// domain resolving to loopback or the cloud metadata endpoint was fetched
+	// and partly echoed back in the response.
+	domain, name, publicKey, err := s.fed.FetchInstanceInfo(req.Domain)
+	if err != nil {
+		writeError(w, 422, "could not reach instance — make sure it is an Agora instance with federation enabled ("+err.Error()+")")
+		return
+	}
 	instanceURL := "https://" + domain
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Get(instanceURL + "/.well-known/agora-instance")
-	if err != nil || resp.StatusCode != 200 {
-		writeError(w, 422, "could not reach instance — make sure it is an Agora instance with federation enabled")
-		return
-	}
-	defer resp.Body.Close()
-
-	var info struct {
-		Name      string `json:"name"`
-		PublicKey string `json:"public_key"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		writeError(w, 422, "invalid response from instance")
-		return
-	}
 
 	s.db.Exec(`
 		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
 		VALUES ($1, $2, $3, $4, 'active')
 		ON CONFLICT (domain) DO UPDATE
 		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW()
-	`, domain, info.Name, info.PublicKey, instanceURL)
+	`, domain, name, publicKey, instanceURL)
 
 	actorID := auth.UserIDFromCtx(r.Context())
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'add_instance', 'instance', $2, $3)`,
 		actorID, domain, instanceURL)
 
-	writeJSON(w, 201, map[string]string{"message": "instance added", "domain": domain, "name": info.Name})
+	writeJSON(w, 201, map[string]string{"message": "instance added", "domain": domain, "name": name})
 }
 
 func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {

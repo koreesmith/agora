@@ -80,6 +80,9 @@ func main() {
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
 	pagesSvc.SetFed(fedSvc)
+	// AGORA-324: the admin Add Instance flow resolves a remote instance through
+	// federation's SSRF-safe client rather than reaching out on its own.
+	adminSvc.SetFed(fedSvc)
 	userSvc.SetAtproto(atprotoSvc)
 	feedSvc.SetAtproto(atprotoSvc)
 	// AGORA-278: internal/domains owns the claim/verify/approve workflow and

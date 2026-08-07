@@ -252,6 +252,12 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		s.handleInboundFriendAccept(activity)
 	case "profile_update":
 		s.handleInboundProfileUpdate(activity)
+	default:
+		// AGORA-325: still a 202 below — an unknown type is expected traffic
+		// from a peer on a newer version, not a client error — but silently
+		// discarding it left no way to tell "they sent nothing" apart from
+		// "they sent something we don't understand".
+		log.Printf("federation: ignoring unknown activity type %q from %s", activity.Type, activity.InstanceID)
 	}
 
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
@@ -732,6 +738,11 @@ func (s *Service) SendActivity(instanceURL string, activity Activity) error {
 	return err
 }
 
+// maxDeliveryAttempts is how many times a queued legacy activity is retried
+// before it's abandoned. Named rather than inlined so the drain query and the
+// give-up log line below cannot disagree about where the ceiling is.
+const maxDeliveryAttempts = 10
+
 // drainQueue processes pending outbound activities, retrying with backoff.
 func (s *Service) drainQueue() {
 	_, privKey, err := s.getOrCreateKeyPair()
@@ -741,12 +752,12 @@ func (s *Service) drainQueue() {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, instance_url, payload
+		SELECT id, instance_url, payload, attempts
 		FROM federation_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
+		WHERE attempts < $1 AND next_attempt <= NOW()
 		ORDER BY next_attempt ASC
 		LIMIT 20
-	`)
+	`, maxDeliveryAttempts)
 	if err != nil { return }
 	defer rows.Close()
 
@@ -754,11 +765,12 @@ func (s *Service) drainQueue() {
 		id          string
 		instanceURL string
 		payload     []byte
+		attempts    int
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		rows.Scan(&j.id, &j.instanceURL, &j.payload)
+		rows.Scan(&j.id, &j.instanceURL, &j.payload, &j.attempts)
 		jobs = append(jobs, j)
 	}
 	rows.Close()
@@ -791,6 +803,24 @@ func (s *Service) drainQueue() {
 				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
 				WHERE id = $2
 			`, sendErr.Error(), j.id)
+
+			// AGORA-325: this used to record the error to last_error and
+			// nothing else, so a federation path that was failing every single
+			// delivery looked exactly like one with nothing to send. That is
+			// how AGORA-316 stayed hidden: the only way to see it was to query
+			// federation_queue by hand.
+			//
+			// Log the first failure and the final abandonment, and stay quiet
+			// in between — a peer that is down for a day would otherwise
+			// produce one line per activity per retry.
+			switch {
+			case j.attempts == 0:
+				log.Printf("federation: delivery of %q to %s failed (first attempt): %v",
+					activity.Type, j.instanceURL, sendErr)
+			case j.attempts >= maxDeliveryAttempts-1:
+				log.Printf("federation: giving up on %q to %s after %d attempts, last error: %v",
+					activity.Type, j.instanceURL, j.attempts+1, sendErr)
+			}
 		}
 	}
 }
@@ -883,6 +913,62 @@ func (s *Service) verifyActivity(raw []byte, a Activity) error {
 	return nil
 }
 
+// FetchInstanceInfo resolves and validates a remote Agora instance, returning
+// its normalized domain, display name, and base64 Ed25519 public key. It is
+// the only way any caller should reach a remote instance's info document.
+//
+// Returns bare strings rather than a struct so callers can declare a local
+// one-method interface and stay structurally satisfied without importing this
+// package, matching how feed/users/friends depend on this service.
+//
+// AGORA-324: the admin AddInstance handler used to do this itself with a bare
+// http.Client and no host validation, which meant an admin-supplied domain
+// resolving to loopback, a private range, or the cloud metadata endpoint was
+// fetched and its response partly reflected back. Every other outbound
+// federation request goes through fedHTTPClient, whose dialer resolves the
+// host, rejects non-public addresses and then dials a validated IP directly so
+// there is no window to rebind DNS in. AGORA-139 established that for the
+// lookup endpoints; this call site was simply missed.
+//
+// Exported so the admin package can reach it: keeping the SSRF-safe fetch and
+// the instance-info parsing in one function is the point, since two copies is
+// how the admin one drifted out of step in the first place.
+func (s *Service) FetchInstanceInfo(domain string) (string, string, string, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+	domain = strings.Split(domain, "/")[0]
+
+	if !isValidInstanceHost(domain) {
+		return "", "", "", fmt.Errorf("invalid instance domain")
+	}
+
+	resp, err := fedHTTPClient.Get("https://" + domain + "/.well-known/agora-instance")
+	if err != nil { return "", "", "", fmt.Errorf("could not reach instance: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", "", "", fmt.Errorf("instance returned %d", resp.StatusCode)
+	}
+
+	var info struct {
+		PublicKey string `json:"public_key"`
+		Name      string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", "", "", fmt.Errorf("invalid instance info")
+	}
+
+	// Validate the key at the boundary rather than storing whatever arrived.
+	// A malformed key used to be accepted happily and then fail every single
+	// signature verification afterwards, with nothing anywhere saying why.
+	decoded, err := base64.StdEncoding.DecodeString(info.PublicKey)
+	if err != nil { return "", "", "", fmt.Errorf("instance published a malformed public key") }
+	if len(decoded) != ed25519.PublicKeySize {
+		return "", "", "", fmt.Errorf("instance published a %d-byte public key, expected %d", len(decoded), ed25519.PublicKeySize)
+	}
+
+	return domain, info.Name, info.PublicKey, nil
+}
+
 func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 	if s.isInstanceBlocked(domain) {
 		return nil, fmt.Errorf("instance is blocked")
@@ -896,29 +982,16 @@ func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(decoded), nil
 	}
 
-	if !isValidInstanceHost(domain) {
-		return nil, fmt.Errorf("invalid instance domain")
-	}
-	resp, err := fedHTTPClient.Get("https://" + domain + "/.well-known/agora-instance")
-	if err != nil { return nil, fmt.Errorf("could not reach instance: %w", err) }
-	defer resp.Body.Close()
+	normalized, name, keyB64, err := s.FetchInstanceInfo(domain)
+	if err != nil { return nil, err }
 
-	var info struct {
-		PublicKey string `json:"public_key"`
-		Name      string `json:"name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("invalid instance info")
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(info.PublicKey)
-	if err != nil { return nil, fmt.Errorf("bad public key") }
+	decoded, _ := base64.StdEncoding.DecodeString(keyB64) // validated in FetchInstanceInfo
 
 	s.db.Exec(`
 		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
 		VALUES ($1, $2, $3, $4, 'active')
 		ON CONFLICT (domain) DO UPDATE SET public_key = $3, name = $2, last_seen_at = NOW()
-	`, domain, info.Name, info.PublicKey, "https://"+domain)
+	`, normalized, name, keyB64, "https://"+normalized)
 
 	return ed25519.PublicKey(decoded), nil
 }

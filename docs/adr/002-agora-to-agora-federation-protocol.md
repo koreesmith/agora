@@ -190,8 +190,34 @@ Consequences to accept deliberately:
 
 - **The origin server is a single point of failure for the conversation.** If Alice's instance is down, Bob and Carol stop seeing each other's replies even though both are up. Acceptable: it is Alice's post and Alice's audience.
 - **Reactions have the same shape.** A `Like` from Bob needs the same fan-out for Carol to see a count that matches Alice's.
-- **Enforcement is on the receiving server.** Once a limited post is delivered, the receiving instance decides who sees it. Agora-to-Agora that is fine, both ends run this code. It is inherent to federation rather than a defect of this choice: Mastodon's followers-only posts have exactly the same property. It does mean a limited-audience post is a statement of trust in the recipient's server, which is worth saying out loud in the UI rather than only in an ADR.
-- **Non-Agora list members degrade.** A Mastodon account in a friend list receives a limited post as a direct/mention-style post. Mastodon honours the addressing and will not make it public, but it has no "Close Friends" concept, and it will not participate in the origin-mediated fan-out. Whether non-Agora accounts should be addressable in a list used for posting at all is a **product question** this ADR does not settle; the safe default is to allow it and label it clearly, because silently dropping a list member is worse than delivering with degraded semantics.
+- **Enforcement is on the receiving server.** Once a limited post is delivered, the receiving instance decides who sees it. Agora-to-Agora that is fine, both ends run this code. It is inherent to federation rather than a defect of this choice: Mastodon's followers-only posts have exactly the same property.
+
+### Mixed audiences: deliver to everyone we can, and say what each member gets
+
+A friend list can already contain accounts from all three networks (AGORA-182 for fediverse, AGORA-257 for Bluesky), because lists are used for *reading* as well as posting. Removing a Mastodon friend from a list to protect a posting guarantee would break the feed of them, so list membership is not the lever. What each member receives at post time is.
+
+The three networks are not one "non-Agora" bucket. They differ in kind:
+
+| Network | Can it receive a limited post? | What the member actually gets |
+|---|---|---|
+| **Agora** | Yes, fully | A private post. Replies and reactions fan out to the rest of the audience. The guarantee holds. |
+| **Fediverse** | Yes, degraded | Arrives as a direct/private mention. No "Close Friends" concept exists there, and per Mastodon's own docs a recipient **can change their reply's visibility to public** and can pull new people in by mentioning them. |
+| **Bluesky** | **No** | Nothing to deliver to. AT Proto repos are public by design and there is no addressed-delivery or private-post mechanism. Private data is targeted for 2026 but has not shipped. |
+
+**Decision: allow and label.** Deliver to every member the protocol permits, and state in the composer what each one will actually experience, before the post is sent.
+
+```
+Audience: Close Friends · 5 members
+  3 on Agora        private post, replies stay in the group
+  1 on Mastodon     arrives as a direct message, they can reply publicly
+  1 on Bluesky      cannot receive private posts, will not see this
+```
+
+Rejected alternative: filtering non-deliverable members out silently. Its failure mode is invisible. The author believes they posted to five people, two received nothing, and nothing anywhere says so. A visible degraded delivery is better than an invisible non-delivery.
+
+**The strong guarantee is scoped to Agora, deliberately and explicitly.** The one-click widening a fediverse recipient can perform is a real weakening of a feature whose whole promise is "this is not public", and it is accepted here on the grounds that the author is told before sending. That makes the label load-bearing rather than decorative: it is the entire mitigation, and it is why the fediverse row says "they can reply publicly" rather than something reassuring. If the label is ever dropped or softened for being noisy, this decision has been reversed without anyone noticing.
+
+Bluesky is not a policy choice. There is no mechanism, so the row is informational only.
 
 ### What happens to each legacy activity type
 
@@ -274,7 +300,6 @@ Rejected as a stopping point, though it is exactly what migration step 1 produce
 
 - **Vocabulary.** `Offer` + `Relationship` versus a namespaced `agora:FriendRequest`. Settle during implementation; the transport decision stands either way.
 - **Should a friend request from an instance that is not a known peer be accepted?** Today anyone can deliver to the inbox and peering is not a precondition. Staying open matches the accepted position (open federation, ban bad actors after the fact), but it is worth stating deliberately rather than inheriting.
-- **Non-Agora accounts in a posting audience.** Product question, described under limited-audience posts above. Needs an answer before that work ships, because it determines whether the list picker filters or merely labels.
-- **What the UI tells a user about a limited post's reach.** Enforcement sits with the recipient's server. Users should understand that a Close Friends post is trusted to those servers, without the phrasing being so alarming that the feature reads as broken.
+- **Exact composer copy.** The decision to allow and label is settled above; the wording is not. It has to convey a degraded delivery without making the feature read as broken, and it has to survive being seen on every limited post rather than only the first. Worth testing on a real person rather than being written once and left.
 - **Editing and deleting a limited-audience post.** `Update` and `Delete` need the same audience derivation and the same fan-out. Straightforward once the audience is stored, but it must not be forgotten, since a delete that reaches fewer people than the original post is worse than no delete at all.
 - **`published_at` is unclamped** on both ingest paths, so a peer controls where its posts sort in the receiving feed. Pre-existing, not caused by this decision, still worth closing.

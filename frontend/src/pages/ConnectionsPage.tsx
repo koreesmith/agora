@@ -159,6 +159,9 @@ export default function ConnectionsPage() {
     },
   })
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: () => inv('requests') })
+  // AGORA-333: withdraw a request you sent. Until now a sent request could only
+  // be waited on, so a request to a wrong or unresponsive account was permanent.
+  const cancel   = useMutation({ mutationFn: (id: string) => friendsApi.cancelRequest(id), onSuccess: () => inv('requests') })
   const unfriend = useMutation({ mutationFn: (id: string) => friendsApi.unfriend(id),       onSuccess: () => inv('friends') })
   const createList = useMutation({
     mutationFn: (name: string) => friendsApi.createFriendList(name),
@@ -282,6 +285,13 @@ export default function ConnectionsPage() {
                   <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name || f.username}</Link>
                 </div>
                 <span className="text-xs text-agora-400">Pending</span>
+                <button
+                  onClick={() => cancel.mutate(f.id)}
+                  disabled={cancel.isPending}
+                  className="btn-secondary text-xs py-1 px-2"
+                >
+                  <UserX size={13} /> Cancel
+                </button>
               </div>
             ))}
           </>}

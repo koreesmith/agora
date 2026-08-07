@@ -1146,6 +1146,15 @@ func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, us
 	// its own lifecycle. A refollow after an unfollow, for instance, reports
 	// inserted = false but may still carry a genuine new request.
 	if friendRequest {
+		// Point an existing legacy stub for this person at the incoming actor
+		// URL before upserting, so upsertRemoteAPUser conflicts onto that row
+		// rather than creating a second one. Without it, a marked Follow
+		// arriving for someone this instance already knows through the legacy
+		// protocol produces a duplicate stub and a duplicate friendship, and
+		// the pending row the user is actually looking at never changes.
+		if existing := s.remoteUserIDForActor(followerActor); existing != "" {
+			s.adoptActorURLForLegacyStub(existing, followerActor)
+		}
 		if followerID, err := s.upsertRemoteAPUser(followerActor, profile); err == nil && followerID != u.ID {
 			s.recordInboundFriendRequest(u.ID, followerID)
 		}
@@ -1219,6 +1228,15 @@ func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.R
 			return
 		}
 		s.db.Exec(`DELETE FROM ap_followers WHERE followed_user_id = $1 AND follower_actor_url = $2`, userID, followerActor)
+
+		// AGORA-333: an Undo of a marked Follow is also a withdrawn friend
+		// request or an unfriending, so the pending row and the notification
+		// pointing at it have to go too. Leaving them would show the recipient
+		// a request they can accept into a friendship the other side has
+		// already abandoned.
+		if remoteUserID := s.remoteUserIDForActor(followerActor); remoteUserID != "" {
+			s.withdrawInboundFriendRequest(userID, remoteUserID)
+		}
 		return
 	}
 	if slug := pageSlugFromActorURL(objectURL, s.cfg.InstanceDomain); slug != "" {
@@ -1367,9 +1385,11 @@ func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json
 	// Both are true at once, which is the point of riding Follow: the follow is
 	// confirmed above and the friendship below, from one activity.
 	if acceptedFollowWasFriendRequest(objectRaw) {
-		var remoteUserID string
-		s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
-		if remoteUserID != "" {
+		// Resolved through remoteUserIDForActor rather than by ap_actor_url
+		// alone: the pending friendship this Accept answers may point at a
+		// legacy stub, which has no actor URL, in which case a direct lookup
+		// finds nothing and the friendship stays pending forever.
+		if remoteUserID := s.remoteUserIDForActor(verifiedActor); remoteUserID != "" {
 			s.handleInboundFriendAcceptAP(userID, remoteUserID)
 		}
 	}

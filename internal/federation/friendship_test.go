@@ -260,3 +260,71 @@ func TestFriendRequestsAcceptedSetting(t *testing.T) {
 		}
 	})
 }
+
+// TestAcceptResolvesALegacyStub covers the bug that shipped in AGORA-329 and was
+// caught on the live instances: a friend request went out fine, but the Accept
+// coming back could not be matched to anybody.
+//
+// The pending friendship pointed at a legacy stub, which has no ap_actor_url,
+// while the Accept was resolved by ap_actor_url alone. Nothing matched, the
+// friendship stayed pending forever, and the marked Follow that followed the
+// Accept created a second stub and a second pending friendship rather than
+// updating the first.
+func TestAcceptResolvesALegacyStub(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+	instance := fmt.Sprintf("legacyaccept-%d.example", unique)
+
+	id := s.getOrCreateRemoteUser("bob", instance)
+	if id == "" {
+		t.Fatal("no stub")
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+
+	actorURL := "https://" + instance + "/federation/users/bob"
+
+	t.Run("resolves by legacy identity when the stub has no actor URL", func(t *testing.T) {
+		if got := s.remoteUserIDForActor(actorURL); got != id {
+			t.Fatalf("remoteUserIDForActor = %q, want %q. An Accept from this actor matches nobody, so the request stays pending forever.", got, id)
+		}
+	})
+
+	t.Run("sending adopts the actor URL onto the stub", func(t *testing.T) {
+		if _, err := s.remoteAgoraActorURL(id); err != nil {
+			t.Fatalf("remoteAgoraActorURL: %v", err)
+		}
+		var stored string
+		db.QueryRow(`SELECT COALESCE(ap_actor_url,'') FROM users WHERE id = $1`, id).Scan(&stored)
+		if stored != actorURL {
+			t.Errorf("ap_actor_url = %q, want %q. Without this the two rows for one person never converge.", stored, actorURL)
+		}
+	})
+
+	t.Run("adoption does not steal an actor URL another row already claims", func(t *testing.T) {
+		otherName := fmt.Sprintf("claimed_%d", unique)
+		claimed := "https://" + instance + "/federation/users/" + otherName
+		var apID string
+		db.QueryRow(`
+			INSERT INTO users (username, email, password_hash, is_remote, remote_instance, ap_actor_url)
+			VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+		`, otherName, instance, claimed).Scan(&apID)
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, apID) })
+
+		legacyName := fmt.Sprintf("legacydup_%d", unique)
+		var legacyID string
+		db.QueryRow(`
+			INSERT INTO users (username, email, password_hash, is_remote, remote_instance, remote_user_id)
+			VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+		`, legacyName, instance, otherName).Scan(&legacyID)
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, legacyID) })
+
+		s.adoptActorURLForLegacyStub(legacyID, claimed)
+
+		var stored string
+		db.QueryRow(`SELECT COALESCE(ap_actor_url,'') FROM users WHERE id = $1`, legacyID).Scan(&stored)
+		if stored != "" {
+			t.Error("adopted an actor URL another row already claims, which the partial unique index forbids")
+		}
+	})
+}

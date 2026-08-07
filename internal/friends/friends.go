@@ -44,6 +44,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/friends",                     s.ListFriends)
 	r.Get("/friends/requests",            s.ListRequests)
 	r.Post("/friends/request/{userID}",   s.SendRequest)
+	r.Delete("/friends/request/{userID}", s.CancelRequest) // AGORA-333
 	r.Post("/friends/accept/{userID}",    s.Accept)
 	r.Post("/friends/decline/{userID}",   s.Decline)
 	r.Delete("/friends/{userID}",         s.Unfriend)
@@ -254,6 +255,44 @@ func (s *Service) Accept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request accepted"})
+}
+
+// CancelRequest withdraws a friend request the caller sent (AGORA-333).
+//
+// Deletes the row rather than marking it declined, which is what Decline does.
+// The two look similar and mean different things: a declined request is a
+// decision the addressee made and worth remembering, while a cancelled one
+// should leave no trace and let the sender try again immediately.
+func (s *Service) CancelRequest(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	addresseeID := chi.URLParam(r, "userID")
+
+	res, err := s.db.Exec(`
+		DELETE FROM friendships
+		WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'
+	`, userID, addresseeID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "no pending request to cancel")
+		return
+	}
+
+	// The addressee's notification now points at nothing they can act on.
+	s.db.Exec(`
+		DELETE FROM notifications
+		WHERE user_id = $1 AND actor_id = $2 AND type = 'friend_request'
+	`, addresseeID, userID)
+
+	// AGORA-329: withdraw the marked Follow on the remote side too, or the
+	// request stays pending in their list after it has gone from ours.
+	if s.fed != nil && s.isRemoteUser(addresseeID) {
+		go s.fed.SendFriendUndo(userID, addresseeID)
+	}
+
+	writeJSON(w, 200, map[string]string{"message": "friend request cancelled"})
 }
 
 func (s *Service) Decline(w http.ResponseWriter, r *http.Request) {

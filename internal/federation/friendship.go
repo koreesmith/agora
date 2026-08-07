@@ -64,7 +64,71 @@ func (s *Service) remoteAgoraActorURL(userID string) (string, error) {
 	if !isValidInstanceHost(remoteInstance) {
 		return "", fmt.Errorf("invalid remote instance")
 	}
-	return "https://" + remoteInstance + "/federation/users/" + remoteUserID, nil
+	derived := "https://" + remoteInstance + "/federation/users/" + remoteUserID
+
+	// Record the derived actor on the stub, which is what makes the reply
+	// resolvable when it comes back.
+	//
+	// Without this the exchange is one-way: the request goes out fine, because
+	// the actor URL can be derived on demand, but the Accept returns addressed
+	// from an actor URL that matches no row, so the friendship stays pending
+	// forever. The marked Follow that follows it then creates a *second* stub
+	// and a second pending friendship, because upsertRemoteAPUser conflicts on
+	// ap_actor_url and this row had none to conflict with.
+	//
+	// Writing it here collapses the two rows for this person into one at the
+	// first moment anything needs the actor URL, which is also the first moment
+	// it can be known for certain.
+	s.adoptActorURLForLegacyStub(userID, derived)
+	return derived, nil
+}
+
+// adoptActorURLForLegacyStub records an actor URL on a legacy stub that has
+// none, so ActivityPub lookups find the same row the legacy protocol created.
+//
+// Guarded by the partial unique index on ap_actor_url: if a separate stub for
+// the same person already claims it, this one keeps its empty value and the two
+// rows stay distinct. That is the pre-existing one-human-two-rows condition and
+// is not this function's to resolve; the callers that matter fall back to
+// legacy identity via remoteUserIDForActor.
+func (s *Service) adoptActorURLForLegacyStub(userID, actorURL string) {
+	var claimedBy string
+	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&claimedBy)
+	if claimedBy != "" && claimedBy != userID {
+		return
+	}
+	s.db.Exec(`UPDATE users SET ap_actor_url = $1 WHERE id = $2 AND COALESCE(ap_actor_url,'') = ''`, actorURL, userID)
+}
+
+// remoteUserIDForActor resolves an inbound actor URL to the local stub row for
+// that person, trying ActivityPub identity first and legacy identity second.
+//
+// The fallback matters because a friendship formed under the legacy protocol
+// points at a stub keyed on (remote_instance, remote_user_id) with no actor URL
+// at all. adoptActorURLForLegacyStub repairs that on the outbound path, but an
+// inbound activity can arrive for a stub this instance never sent anything to.
+func (s *Service) remoteUserIDForActor(actorURL string) string {
+	var id string
+	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&id)
+	if id != "" {
+		return id
+	}
+
+	// Derive the legacy identity an Agora actor URL encodes:
+	// https://{instance}/federation/users/{handle}
+	instance := domainFromURL(actorURL)
+	handle := ""
+	if i := strings.LastIndex(actorURL, "/"); i >= 0 && i+1 < len(actorURL) {
+		handle = actorURL[i+1:]
+	}
+	if instance == "" || handle == "" {
+		return ""
+	}
+	s.db.QueryRow(`
+		SELECT id FROM users
+		WHERE is_remote = true AND remote_instance = $1 AND remote_user_id = $2
+	`, instance, handle).Scan(&id)
+	return id
 }
 
 // CanFriend reports whether a remote user can be sent a friend request.
@@ -280,6 +344,32 @@ func (s *Service) recordInboundFriendRequest(localUserID, remoteUserID string) {
 	if s.notif != nil {
 		s.notif.Create(localUserID, remoteUserID, "friend_request", "", "")
 	}
+}
+
+// withdrawInboundFriendRequest removes a pending friendship the remote side has
+// withdrawn, along with the notification that pointed at it (AGORA-333).
+//
+// Only touches a pending row. An accepted friendship being undone is
+// unfriending, which is the same activity but a different local consequence,
+// and is handled by the caller's own delete of the follower record; a
+// friendship somebody already accepted should not silently vanish from their
+// list because the other side's server sent an Undo it might be retrying.
+func (s *Service) withdrawInboundFriendRequest(localUserID, remoteUserID string) {
+	res, err := s.db.Exec(`
+		DELETE FROM friendships
+		WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'
+	`, remoteUserID, localUserID)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return
+	}
+	// The notification is now pointing at nothing actionable.
+	s.db.Exec(`
+		DELETE FROM notifications
+		WHERE user_id = $1 AND actor_id = $2 AND type = 'friend_request'
+	`, localUserID, remoteUserID)
 }
 
 // handleInboundFriendAcceptAP records a remote side accepting a friend request

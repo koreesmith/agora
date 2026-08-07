@@ -109,6 +109,9 @@ export const friendsApi = {
   sendRequest:      (userID: string)             => api.post(`/friends/request/${userID}`),
   acceptRequest:    (userID: string)             => api.post(`/friends/accept/${userID}`),
   declineRequest:   (userID: string)             => api.post(`/friends/decline/${userID}`),
+  // AGORA-333: withdraw a request you sent. Distinct from declining one you
+  // received: cancelling deletes the row so it can be sent again.
+  cancelRequest:    (userID: string)             => api.delete(`/friends/request/${userID}`),
   unfriend:         (userID: string)             => api.delete(`/friends/${userID}`),
   listFriendLists:    ()                           => api.get('/friend-groups'),
   createFriendList:   (name: string)               => api.post('/friend-groups', { name }),

@@ -913,6 +913,31 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_at_following_user ON at_following(local_user_id)`,
 
+	// AGORA-313: the inbound counterpart to at_following, and the AT Proto
+	// counterpart to ap_followers. It exists because nothing tells us about a
+	// Bluesky follow: the follow is a record in the *follower's* own repo,
+	// never delivered here (see the AGORA-249 note in internal/atproto/
+	// follow.go), so the only way to notice one is to poll getFollowers and
+	// diff it against what we saw last time. That makes this table the memory
+	// the diff needs, not a cache we could rebuild on demand.
+	`CREATE TABLE IF NOT EXISTS at_followers (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		follower_did  TEXT        NOT NULL,
+		first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, follower_did)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_at_followers_user ON at_followers(local_user_id)`,
+
+	// AGORA-313: set once the first getFollowers walk for this account has
+	// been persisted. The first walk is a silent fill, since every follower it
+	// finds predates the feature and notifying for those would mean a
+	// notification per existing follower on the first boot after deploy. This
+	// is a per-user flag rather than an "is at_followers empty for them" test
+	// because those differ for an account with no followers at all: the empty
+	// test would swallow that account's genuine first follower forever.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_followers_seeded BOOLEAN NOT NULL DEFAULT false`,
+
 	// atproto_account/atproto_all custom-feed filter types (analogous to
 	// fediverse_account/fediverse_all, AGORA-146) were added to the single
 	// authoritative filter_type CHECK constraint above (search

@@ -247,6 +247,9 @@ func main() {
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
 	go atprotoSvc.StartBlueskyIngestion(context.Background())
+	// AGORA-313: a Bluesky follow is never delivered to us, so noticing one
+	// means asking the AppView who follows each local account.
+	go atprotoSvc.StartBlueskyFollowerPolling(context.Background())
 	// AGORA-289: re-checks verified custom domains so a removed DNS record or
 	// a lapsed registration takes the handle out of service on its own.
 	go domainsSvc.StartReverification(context.Background())

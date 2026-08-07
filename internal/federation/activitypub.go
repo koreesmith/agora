@@ -1072,6 +1072,24 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	}
 }
 
+// recordAPFollower upserts an inbound follower and reports whether this call
+// is the one that created the row. AGORA-313 needs that distinction: a Follow
+// arrives more than once (Mastodon retries on its own schedule, and a refollow
+// after an unfollow we processed lands here too), and only the first should be
+// worth a notification. xmax = 0 holds exactly on a row the statement inserted
+// rather than updated, which is the cheapest way to tell the two apart without
+// a separate existence probe racing the insert.
+func (s *Service) recordAPFollower(followedUserID, followerActor, followerInbox string) (bool, error) {
+	var inserted bool
+	err := s.db.QueryRow(`
+		INSERT INTO ap_followers (followed_user_id, follower_actor_url, follower_inbox_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (followed_user_id, follower_actor_url) DO UPDATE SET follower_inbox_url = $3
+		RETURNING (xmax = 0)
+	`, followedUserID, followerActor, followerInbox).Scan(&inserted)
+	return inserted, err
+}
+
 func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string) {
 	u, ok := s.apEligibleUser(username)
 	if !ok {
@@ -1084,11 +1102,10 @@ func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, us
 	}
 	followerInbox := profile.Inbox
 
-	s.db.Exec(`
-		INSERT INTO ap_followers (followed_user_id, follower_actor_url, follower_inbox_url)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (followed_user_id, follower_actor_url) DO UPDATE SET follower_inbox_url = $3
-	`, u.ID, followerActor, followerInbox)
+	inserted, err := s.recordAPFollower(u.ID, followerActor, followerInbox)
+	if err != nil {
+		return
+	}
 
 	followObj := map[string]any{
 		"type":   "Follow",
@@ -1106,6 +1123,20 @@ func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, us
 		"object":   followObj,
 	}
 	s.enqueueAPDelivery(u.ID, followerInbox, accept)
+
+	// The Accept goes out first: a notification is worth less than the
+	// handshake the remote instance is waiting on, so nothing about naming the
+	// follower should be able to hold it up.
+	if !inserted || s.notif == nil {
+		return
+	}
+	followerID, err := s.upsertRemoteAPUser(followerActor, profile)
+	if err != nil {
+		return
+	}
+	if followerID != u.ID {
+		s.notif.Create(u.ID, followerID, "fediverse_follow", "", "")
+	}
 }
 
 // handleInboundFollowPage mirrors handleInboundFollowUser (AGORA-115), except

@@ -34,6 +34,13 @@ const typeIcon: Record<string, React.ReactNode> = {
   page_member_invite:    <UserPlus size={16} className="text-agora-500" />,
   fediverse_post:        <Globe size={16} className="text-sky-500" />,
   atproto_post:          <Cloud size={16} className="text-sky-500" />,
+  // AGORA-313: UserPlus marks these as follows the way friend_request does,
+  // and the sky tint carries the "from another network" cue the two post
+  // types above already use. The pair share an icon deliberately: which
+  // network it came from is in the text, and friend_request/waitlist_join set
+  // the precedent that near-related types can look alike.
+  fediverse_follow:      <UserPlus size={16} className="text-sky-500" />,
+  atproto_follow:        <UserPlus size={16} className="text-sky-500" />,
 
   // Custom domain handles (AGORA-287) — see systemNotifText below for why
   // these are their own shape rather than another "<actor> did a thing".
@@ -83,12 +90,20 @@ const notifText: Record<string, string> = {
   page_member_invite:    'invited you to join a page as a team member',
   fediverse_post:        'posted something new on the fediverse',
   atproto_post:          'posted something new on Bluesky',
+  fediverse_follow:      'followed you from the fediverse',
+  atproto_follow:        'followed you on Bluesky',
 }
 
 function notifTarget(n: any): string | null {
   switch (n.type) {
     case 'friend_request':
     case 'friend_accepted':
+    // AGORA-313: a follow has no post to land on, so it routes to the
+    // follower. Remote stubs carry the synthetic handle@domain username
+    // upsertRemoteAPUser/getOrCreateRemoteATUser build, which /profile
+    // already resolves.
+    case 'fediverse_follow':
+    case 'atproto_follow':
       return n.actor_username ? `/profile/${n.actor_username}` : null
     case 'post_like':
     case 'comment_like':

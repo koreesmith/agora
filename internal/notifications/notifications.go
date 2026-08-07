@@ -399,6 +399,15 @@ func pushNotifContent(t, actorName, data string) (title, body string) {
 		return "New post", actorName + " just posted something new"
 	case "fediverse_post":
 		return "New post from the fediverse", actorName + " posted something new"
+	// AGORA-313: two types rather than one so the wording can name the network
+	// the follower came from, the same split fediverse_post/atproto_post make.
+	// Neither is emailed: a remote follow is unilateral and unbounded, and
+	// unlike friend_request there is nothing to accept, so notifEmailContent
+	// deliberately has no case for either.
+	case "fediverse_follow":
+		return "New follower", actorName + " followed you from the fediverse"
+	case "atproto_follow":
+		return "New follower", actorName + " followed you on Bluesky"
 	case "group_join_request":
 		return "Join request", actorName + " wants to join your group"
 	case "group_join_approved":

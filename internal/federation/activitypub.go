@@ -985,6 +985,11 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		Type       string          `json:"type"`
 		Object     json.RawMessage `json:"object"`
 		Instrument json.RawMessage `json:"instrument"`
+		// AGORA-329: the marker that distinguishes a friend request from an
+		// ordinary follow. Read from the compact JSON-LD form, since both ends
+		// of this exchange are Agora. Absent on every Follow from anywhere
+		// else, which is exactly the intended degradation.
+		FriendRequest bool `json:"agora:friendRequest"`
 	}
 	if err := json.Unmarshal(body, &a); err != nil {
 		writeError(w, 400, "invalid activity")
@@ -993,7 +998,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 
 	switch a.Type {
 	case "Follow":
-		s.handleInboundFollow(a.ID, verifiedActor, a.Object)
+		s.handleInboundFollow(a.ID, verifiedActor, a.Object, a.FriendRequest)
 	case "Undo":
 		var inner struct {
 			Type   string          `json:"type"`
@@ -1052,7 +1057,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	writeJSON(w, 202, map[string]string{"message": "accepted"})
 }
 
-func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw json.RawMessage) {
+func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw json.RawMessage, friendRequest bool) {
 	var objectURL string
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
@@ -1063,10 +1068,22 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 		return
 	}
 
+	// AGORA-329: a friend request is a Follow plus a marker, so it takes the
+	// same path and additionally creates the pending friendship. Gated on the
+	// friend_requests_from setting; a refused request degrades to the plain
+	// follow it already is rather than being dropped, since the follow itself
+	// was never the objectionable part.
+	if friendRequest && !s.friendRequestsAccepted(domain) {
+		log.Printf("federation: friend request from %s refused: friend_requests_from is peered_only and it is not a peer", domain)
+		friendRequest = false
+	}
+
 	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
-		s.handleInboundFollowUser(followID, followerActor, objectURL, username)
+		s.handleInboundFollowUser(followID, followerActor, objectURL, username, friendRequest)
 		return
 	}
+	// A page cannot have friends, so the marker is ignored here rather than
+	// being an error: it is a follow of a page, which is a real thing.
 	if slug := pageSlugFromActorURL(objectURL, s.cfg.InstanceDomain); slug != "" {
 		s.handleInboundFollowPage(followID, followerActor, objectURL, slug)
 	}
@@ -1090,7 +1107,7 @@ func (s *Service) recordAPFollower(followedUserID, followerActor, followerInbox 
 	return inserted, err
 }
 
-func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string) {
+func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string, friendRequest bool) {
 	u, ok := s.apEligibleUser(username)
 	if !ok {
 		return
@@ -1123,6 +1140,17 @@ func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, us
 		"object":   followObj,
 	}
 	s.enqueueAPDelivery(u.ID, followerInbox, accept)
+
+	// AGORA-329: a friend request needs the stub regardless of whether the
+	// follow itself was new, because the friendship is a separate record with
+	// its own lifecycle. A refollow after an unfollow, for instance, reports
+	// inserted = false but may still carry a genuine new request.
+	if friendRequest {
+		if followerID, err := s.upsertRemoteAPUser(followerActor, profile); err == nil && followerID != u.ID {
+			s.recordInboundFriendRequest(u.ID, followerID)
+		}
+		return
+	}
 
 	// The Accept goes out first: a notification is worth less than the
 	// handshake the remote instance is waiting on, so nothing about naming the
@@ -1333,6 +1361,28 @@ func (s *Service) handleInboundAcceptFollow(verifiedActor string, objectRaw json
 		return
 	}
 	s.db.Exec(`UPDATE ap_following SET accepted = true WHERE follower_user_id = $1 AND followed_actor_url = $2`, userID, verifiedActor)
+
+	// AGORA-329: an Accept whose inner Follow carries the friend-request marker
+	// is the far side accepting a friendship, not merely confirming a follow.
+	// Both are true at once, which is the point of riding Follow: the follow is
+	// confirmed above and the friendship below, from one activity.
+	if acceptedFollowWasFriendRequest(objectRaw) {
+		var remoteUserID string
+		s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
+		if remoteUserID != "" {
+			s.handleInboundFriendAcceptAP(userID, remoteUserID)
+		}
+	}
+}
+
+// acceptedFollowWasFriendRequest reports whether the Follow inside an Accept
+// carried the friend-request marker.
+func acceptedFollowWasFriendRequest(objectRaw json.RawMessage) bool {
+	var inner struct {
+		FriendRequest bool `json:"agora:friendRequest"`
+	}
+	json.Unmarshal(objectRaw, &inner)
+	return inner.FriendRequest
 }
 
 // handleInboundRejectFollow removes the pending ap_following row so the UI

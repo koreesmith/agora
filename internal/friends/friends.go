@@ -3,7 +3,6 @@ package friends
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
@@ -13,11 +12,19 @@ import (
 
 // fedSender is the subset of federation.Service used here (avoids import cycle).
 //
-// AGORA-327 dropped BroadcastToFriendInstances, which this package declared but
-// never called. SendToUserInstance stays only until AGORA-329 moves friend
-// requests onto ActivityPub, at which point this interface goes too.
+// AGORA-329: friend requests ride ActivityPub as a Follow carrying an
+// agora:friendRequest marker, so this package no longer builds activity
+// payloads itself. It names the two users and federation decides how to reach
+// them, which is what lets the actor URL be derived for a legacy stub that
+// predates the migration.
 type fedSender interface {
-	SendToUserInstance(remoteInstance, instanceURL string, activity any)
+	// CanFriend reports whether a remote account is an Agora user who can
+	// meaningfully receive a friend request, as opposed to a fediverse actor
+	// with no concept of one.
+	CanFriend(remoteUserID string) bool
+	SendFriendRequest(localUserID, addresseeUserID string)
+	SendFriendAccept(localUserID, requesterUserID string)
+	SendFriendUndo(localUserID, otherUserID string)
 }
 
 type Service struct {
@@ -153,18 +160,20 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Check addressee exists
 	var exists bool
-	var addresseeAPActorURL string
-	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1), COALESCE((SELECT ap_actor_url FROM users WHERE id = $1), '')`, addresseeID).
-		Scan(&exists, &addresseeAPActorURL)
+	var addresseeIsRemote bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1), COALESCE((SELECT is_remote FROM users WHERE id = $1), false)`, addresseeID).
+		Scan(&exists, &addresseeIsRemote)
 	if !exists {
 		writeError(w, 404, "user not found")
 		return
 	}
-	// AGORA-167: a genuine ActivityPub actor has no concept of friending —
-	// only following (federation.FollowFediverseAccount) — so a friend
-	// request here would insert a pending row that can never be accepted.
-	if addresseeAPActorURL != "" {
-		writeError(w, 400, "fediverse accounts can't be added as friends — follow them instead")
+	// AGORA-167/329: a genuine fediverse actor has no concept of friending,
+	// only following, so a request would sit pending forever. An Agora user on
+	// another instance is a different case and is exactly who this is for, so
+	// the question is not "does this account have an actor URL" but "is the far
+	// end Agora". federation.CanFriend answers it.
+	if addresseeIsRemote && s.fed != nil && !s.fed.CanFriend(addresseeID) {
+		writeError(w, 400, "this account can't be added as a friend, follow them instead")
 		return
 	}
 
@@ -205,24 +214,12 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	go s.notif.Create(addresseeID, requesterID, "friend_request", "", "")
 
-	// If addressee is on a remote instance, send the request over federation
-	if s.fed != nil {
-		var isRemote bool
-		var remoteInstance, remoteUserID, requesterUsername string
-		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, addresseeID).
-			Scan(&isRemote, &remoteInstance, &remoteUserID)
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, requesterID).Scan(&requesterUsername)
-		if isRemote && remoteInstance != "" {
-			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":      "friend_request",
-				"actor":     requesterUsername,
-				"timestamp": time.Now().Unix(),
-				"object": map[string]string{
-					"from_handle": requesterUsername,
-					"to_handle":   remoteUserID,
-				},
-			})
-		}
+	// AGORA-329: a remote addressee gets a Follow carrying the friend-request
+	// marker, over ActivityPub. The local pending row above already exists, so
+	// a delivery failure leaves the sender's own view intact and the delivery
+	// queue retries on its own schedule.
+	if s.fed != nil && addresseeIsRemote {
+		go s.fed.SendFriendRequest(requesterID, addresseeID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request sent"})
@@ -248,24 +245,12 @@ func (s *Service) Accept(w http.ResponseWriter, r *http.Request) {
 
 	go s.notif.Create(requesterID, userID, "friend_accepted", "", "")
 
-	// If requester is remote, send accept back to their instance
-	if s.fed != nil {
-		var isRemote bool
-		var remoteInstance, remoteUserID, accepterUsername string
-		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, requesterID).
-			Scan(&isRemote, &remoteInstance, &remoteUserID)
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&accepterUsername)
-		if isRemote && remoteInstance != "" {
-			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":      "friend_accept",
-				"actor":     accepterUsername,
-				"timestamp": time.Now().Unix(),
-				"object": map[string]string{
-					"from_handle": accepterUsername,
-					"to_handle":   remoteUserID,
-				},
-			})
-		}
+	// AGORA-329: sends an Accept of their Follow and a marked Follow back, which
+	// is what makes the relationship mutual and starts content flowing both
+	// ways. Under the legacy protocol acceptance carried no follow at all, so a
+	// friendship could exist with nothing to show for it.
+	if s.fed != nil && s.isRemoteUser(requesterID) {
+		go s.fed.SendFriendAccept(userID, requesterID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request accepted"})
@@ -280,6 +265,12 @@ func (s *Service) Decline(w http.ResponseWriter, r *http.Request) {
 		WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
 		  AND status = 'pending'
 	`, otherID, userID)
+
+	// AGORA-329: declining ends the friendship, not the follow. The requester's
+	// Follow was accepted when it arrived, as any Follow is, and what was
+	// declined is the friendship on top of it. Someone who wants them gone
+	// entirely blocks or removes the follower, which are separate actions with
+	// their own meaning.
 	writeJSON(w, 200, map[string]string{"message": "request declined"})
 }
 
@@ -292,7 +283,22 @@ func (s *Service) Unfriend(w http.ResponseWriter, r *http.Request) {
 		WHERE (requester_id = $1 AND addressee_id = $2)
 		   OR (requester_id = $2 AND addressee_id = $1)
 	`, userID, otherID)
+
+	// AGORA-329: unfriending undoes the marked Follow this side sent. The
+	// remote side's own follow is theirs to undo, the same way unfriending
+	// locally does not reach into what the other person can see.
+	if s.fed != nil && s.isRemoteUser(otherID) {
+		go s.fed.SendFriendUndo(userID, otherID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unfriended"})
+}
+
+// isRemoteUser reports whether a users row is a stub for somebody on another
+// instance, which is the only case where a friendship action has to federate.
+func (s *Service) isRemoteUser(userID string) bool {
+	var isRemote bool
+	s.db.QueryRow(`SELECT COALESCE(is_remote, false) FROM users WHERE id = $1`, userID).Scan(&isRemote)
+	return isRemote
 }
 
 // ── Friend Groups ─────────────────────────────────────────────────────────────

@@ -110,6 +110,8 @@ var adminEditableSettings = map[string]bool{
 	// AGORA-285: 'auto' or 'manual' — whether a DNS-verified custom domain
 	// claim goes live on its own or waits in the approval queue (AGORA-286).
 	"custom_domain_approval": true,
+	// AGORA-329: 'anyone' or 'peered_only', who may send a friend request.
+	"friend_requests_from": true,
 }
 
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {

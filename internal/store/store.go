@@ -226,7 +226,14 @@ var schema = []string{
 		-- into it — DNS verification already proves the user controls the
 		-- domain, so auto is a perfectly reasonable choice, just not one to
 		-- make on an admin's behalf.
-		('custom_domain_approval', 'manual')
+		('custom_domain_approval', 'manual'),
+		-- AGORA-329: 'anyone' or 'peered_only'. A friend request is the one
+		-- inbound activity that demands a human response, which makes it a spam
+		-- surface an ordinary follow is not. Defaults open, matching the
+		-- position everywhere else in the federation layer; the setting is the
+		-- lever for an admin receiving sprayed requests, so they do not need a
+		-- code change to respond.
+		('friend_requests_from', 'anyone')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────

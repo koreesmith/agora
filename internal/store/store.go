@@ -1238,4 +1238,24 @@ var schema = []string{
 	// spuriously locked; upsertRemoteAPUser corrects each row on its next
 	// actor fetch, which is why there's no backfill statement here.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS manually_approves_followers BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-317: the same defect AGORA-164 fixed for ActivityPub stubs (783),
+	// on the legacy Agora-to-Agora protocol's own stub path. profile_private
+	// defaults to TRUE, getOrCreateRemoteUser never set it, so every account
+	// cached from a federated Agora instance was created private — filtered
+	// out of PublicFeed and 403ing on its own permalink, which meant nothing
+	// ingested over that protocol was ever visible. getOrCreateRemoteUser now
+	// sets it explicitly; this repairs the rows created before that.
+	//
+	// Scoped on remote_user_id rather than remote_instance: all three remote
+	// sources populate remote_instance, but only the legacy path writes
+	// remote_user_id, so this cannot reach an ActivityPub stub (ap_actor_url)
+	// or a Bluesky one (atproto_remote_did), both of which already set
+	// profile_private themselves. Unguarded, like 783: once the insert above
+	// sets the column, no code path turns a remote stub private again, so the
+	// WHERE clause cannot become true a second time and there is nothing for
+	// a schema_backfills marker to protect.
+	`UPDATE users SET profile_private = false
+		WHERE is_remote = true AND profile_private = true
+		  AND remote_user_id != '' AND ap_actor_url = '' AND atproto_remote_did = ''`,
 }

@@ -270,11 +270,19 @@ func (s *Service) handleInboundPost(a Activity) {
 	if obj.Visibility != "public" { return }
 
 	authorID := s.getOrCreateRemoteUser(obj.AuthorID, a.InstanceID)
+	// AGORA-319: published_at is the origin publish time, created_at is when
+	// this instance stored the row (AGORA-270's split). The sender has always
+	// put its own RFC3339 timestamp in the payload and this handler has always
+	// parsed it, but it went nowhere — both columns fell back to NOW(), so
+	// ingested posts sorted by delivery order rather than by when they were
+	// written. parseAPTime is the AP ingest path's own helper; reusing it
+	// keeps one convention for a malformed value rather than inventing a
+	// second one here.
 	s.db.Exec(`
-		INSERT INTO posts (author_id, content, image_url, visibility, is_remote, remote_post_id, remote_instance)
-		VALUES ($1, $2, $3, 'public', true, $4, $5)
+		INSERT INTO posts (author_id, content, image_url, visibility, is_remote, remote_post_id, remote_instance, published_at)
+		VALUES ($1, $2, $3, 'public', true, $4, $5, $6)
 		ON CONFLICT DO NOTHING
-	`, authorID, obj.Content, obj.ImageURL, obj.ID, a.InstanceID)
+	`, authorID, obj.Content, obj.ImageURL, obj.ID, a.InstanceID, parseAPTime(obj.CreatedAt))
 }
 
 func (s *Service) handleInboundDelete(a Activity) {
@@ -293,13 +301,51 @@ func (s *Service) handleInboundFriendRequest(a Activity) {
 	remoteUserID := s.getOrCreateRemoteUser(obj.FromHandle, a.InstanceID)
 	var localUserID string
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
-	if localUserID == "" { return }
+	if localUserID == "" {
+		log.Printf("federation: friend_request from %s@%s dropped: no local user %q", obj.FromHandle, a.InstanceID, obj.ToHandle)
+		return
+	}
+	if remoteUserID == "" { return }
 
-	s.db.Exec(`
+	// AGORA-318: friends.SendRequest refuses a request between blocked parties
+	// (internal/friends/friends.go). This path writes the row directly and had
+	// no equivalent check, which was survivable only because it also sent no
+	// notification — a blocked account could reach someone who blocked them the
+	// moment one is added, so the guard lands with it.
+	if s.usersHaveBlock(remoteUserID, localUserID) { return }
+
+	// RETURNING id rather than a bare Exec: a friend request is not delivered
+	// once. The sending instance retries on its own schedule, so ON CONFLICT DO
+	// NOTHING is load-bearing, and only the delivery that actually creates the
+	// row may notify. Without this a peer's retries would each ring the bell.
+	var friendshipID string
+	err := s.db.QueryRow(`
 		INSERT INTO friendships (requester_id, addressee_id, status)
 		VALUES ($1, $2, 'pending')
 		ON CONFLICT DO NOTHING
-	`, remoteUserID, localUserID)
+		RETURNING id
+	`, remoteUserID, localUserID).Scan(&friendshipID)
+	if err != nil || friendshipID == "" { return }
+
+	// Same notification type a local friend request uses. The recipient has no
+	// reason to care which instance the sender is on, and the frontend already
+	// renders this type with its inline Accept/Decline controls.
+	if s.notif != nil {
+		s.notif.Create(localUserID, remoteUserID, "friend_request", "", "")
+	}
+}
+
+// usersHaveBlock reports whether either user has blocked the other, matching
+// the symmetric check friends.SendRequest performs before creating a
+// friendship.
+func (s *Service) usersHaveBlock(a, b string) bool {
+	var blocked bool
+	s.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM blocks
+		              WHERE (blocker_id = $1 AND blocked_id = $2)
+		                 OR (blocker_id = $2 AND blocked_id = $1))
+	`, a, b).Scan(&blocked)
+	return blocked
 }
 
 func (s *Service) handleInboundFriendAccept(a Activity) {
@@ -314,10 +360,20 @@ func (s *Service) handleInboundFriendAccept(a Activity) {
 	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
 	if localUserID == "" || remoteUserID == "" { return }
 
-	s.db.Exec(`
+	// AGORA-318: gated on the UPDATE actually matching a pending row, for the
+	// same reason the request handler checks its insert — a redelivered accept
+	// must not notify twice, and an accept for a friendship that was never
+	// pending must not notify at all.
+	res, err := s.db.Exec(`
 		UPDATE friendships SET status = 'accepted', updated_at = NOW()
 		WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'
 	`, localUserID, remoteUserID)
+	if err != nil { return }
+	if n, _ := res.RowsAffected(); n == 0 { return }
+
+	if s.notif != nil {
+		s.notif.Create(localUserID, remoteUserID, "friend_accepted", "", "")
+	}
 }
 
 // handleInboundProfileUpdate syncs a remote user's profile fields
@@ -356,12 +412,22 @@ func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
 	avatarURL  := profile["avatar_url"]
 	bio        := profile["bio"]
 
+	// AGORA-317: profile_private has to be set explicitly. Its column default
+	// is TRUE, which is the right default for someone signing up locally and
+	// the wrong one for a stub standing in for a remote account — a private
+	// author is filtered out of PublicFeed and 403s on their own permalink, so
+	// every post ingested from a federated instance landed invisible. This is
+	// the same defect AGORA-164 found and fixed on the ActivityPub side; that
+	// fix (and its backfill) is scoped to rows with an ap_actor_url, so it
+	// never reached these stubs. Set on the conflict branch too, so a stub
+	// created before this fix is repaired the next time it's touched rather
+	// than staying private forever.
 	s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
-		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at)
-		VALUES ($1, $2, '', $3, $4, $5, true, true, $6, $7, NOW())
+		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at, profile_private)
+		VALUES ($1, $2, '', $3, $4, $5, true, true, $6, $7, NOW(), false)
 		ON CONFLICT (username) DO UPDATE
-		  SET display_name = $3, avatar_url = $4, bio = $5, remote_synced_at = NOW()
+		  SET display_name = $3, avatar_url = $4, bio = $5, remote_synced_at = NOW(), profile_private = false
 		RETURNING id
 	`, handle+"@"+instance,
 		handle+"@"+instance,
@@ -704,10 +770,14 @@ func (s *Service) drainQueue() {
 			continue
 		}
 
-		// Sign payload
-		sig := ed25519.Sign(privKey, j.payload)
-		activity.Signature = base64.StdEncoding.EncodeToString(sig)
-		signed, _ := json.Marshal(activity)
+		signed, err := signActivity(privKey, j.payload)
+		if err != nil {
+			// Unsignable payload — malformed beyond what the Unmarshal above
+			// caught. Retrying can't help, so drop it rather than let it
+			// occupy the queue for ten attempts.
+			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
+			continue
+		}
 
 		sendErr := s.deliverActivity(j.instanceURL, signed)
 		if sendErr == nil {
@@ -739,6 +809,61 @@ func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
 
 // ── Signature verification ────────────────────────────────────────────────────
 
+// canonicalActivity returns the exact bytes an activity's Ed25519 signature
+// covers: the activity as a JSON object with the signature field itself
+// removed. Both the signing and the verifying side derive the signed bytes
+// through this one function, which is the whole point of it existing.
+//
+// AGORA-316: they used to derive those bytes independently and never agreed,
+// so no inbound legacy activity was ever accepted — every one 401'd, which is
+// why federated posts, friend requests and friend accepts were all silently
+// inert. drainQueue signed whatever it read back out of
+// federation_queue.payload, and that column is JSONB: Postgres stores JSONB
+// decomposed and re-emits object keys ordered by (length, then bytewise), not
+// in the order they were written. verifyActivity meanwhile rebuilt its own
+// copy by unmarshaling into a map and re-marshaling, which orders keys
+// alphabetically. Two byte strings that only coincide when every key in the
+// document happens to sort the same way under both rules.
+//
+// Round-tripping through map[string]any is what makes the two sides agree: it
+// collapses every difference that isn't semantic — key order, whitespace, and
+// the integer-versus-float distinction json.Unmarshal erases — so both ends
+// arrive at identical bytes regardless of what shape the document reached
+// them in. That also means the JSONB normalization above stops mattering
+// rather than needing to be avoided.
+func canonicalActivity(raw []byte) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("activity is not a JSON object: %w", err)
+	}
+	delete(m, "signature")
+	return json.Marshal(m)
+}
+
+// signActivity builds the wire body for an outbound activity: the canonical
+// form above, signed, with the signature added back as a field.
+//
+// The body is rebuilt from the canonical bytes rather than from the caller's
+// own, so the only possible difference between what is sent and what was
+// signed is the signature field. Marshaling the Activity struct here instead
+// (as this used to) silently dropped any field the struct doesn't declare,
+// which would put a document on the wire that no longer canonicalizes to the
+// thing that was signed.
+func signActivity(privKey ed25519.PrivateKey, raw []byte) ([]byte, error) {
+	canonical, err := canonicalActivity(raw)
+	if err != nil {
+		return nil, err
+	}
+	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(privKey, canonical))
+
+	var m map[string]any
+	if err := json.Unmarshal(canonical, &m); err != nil {
+		return nil, err
+	}
+	m["signature"] = sig
+	return json.Marshal(m)
+}
+
 func (s *Service) verifyActivity(raw []byte, a Activity) error {
 	if a.Signature == "" { return fmt.Errorf("no signature") }
 	if a.InstanceID == "" { return fmt.Errorf("no instance id") }
@@ -746,10 +871,8 @@ func (s *Service) verifyActivity(raw []byte, a Activity) error {
 	sig, err := base64.StdEncoding.DecodeString(a.Signature)
 	if err != nil { return fmt.Errorf("bad signature encoding") }
 
-	var m map[string]any
-	json.Unmarshal(raw, &m)
-	delete(m, "signature")
-	unsigned, _ := json.Marshal(m)
+	unsigned, err := canonicalActivity(raw)
+	if err != nil { return err }
 
 	pubKey, err := s.getRemotePublicKey(a.InstanceID)
 	if err != nil { return fmt.Errorf("could not get remote key: %w", err) }

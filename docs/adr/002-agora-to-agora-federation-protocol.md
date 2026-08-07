@@ -156,6 +156,14 @@ Three reasons this is the better shape:
 
 The receiving side must key the friendship on the extension property, never on the `Follow` alone, or every Mastodon follower would become a pending friend request.
 
+**Who may send one: an instance setting, `friend_requests_from`, defaulting to `anyone`.**
+
+A friend request is the one inbound activity that demands a human response. It creates a notification and a pending row a user has to act on, which makes it a spam and harassment surface in a way a follow or a post is not, and peering is not a precondition for reaching the inbox.
+
+Defaulting to `anyone` keeps the accepted position (open federation, ban bad actors after the fact) and stays consistent with every other inbound activity. The setting exists so that an admin who starts receiving sprayed requests has a lever short of blocking every source individually, and does not need a code change to use it. `peered_only` restricts acceptance to instances with a `federated_instances` row that is not blocked.
+
+Note the asymmetry this creates when set to `peered_only`: a local user's outbound request still leaves, but a remote user's request into this instance is refused, and the sender has no way to distinguish that from an unresponsive recipient. Whatever the refusal does, it should not look to the sender like success.
+
 An `agora:` extension term in `@context` is ordinary JSON-LD, and unknown terms are ignored by consumers that do not recognise them. Whether the friendship marker is a boolean property (above) or a namespaced object is the remaining detail, and it is genuinely an implementation choice; the transport and the base activity type are not.
 
 ### Mutual follow on acceptance
@@ -211,12 +219,22 @@ The three networks are not one "non-Agora" bucket. They differ in kind:
 
 **Decision: allow and label.** Deliver to every member the protocol permits, and state in the composer what each one will actually experience, before the post is sent.
 
+**The label is quiet unless something is lossy.** A four-line delivery report on every limited post would be read once and ignored forever, which would defeat the point of having it. So the composer shows a summary line, and that line names the shortfall whenever there is one:
+
 ```
-Audience: Close Friends · 5 members
-  3 on Agora        private post, replies stay in the group
-  1 on Mastodon     arrives as a direct message, they can reply publicly
-  1 on Bluesky      cannot receive private posts, will not see this
+All members on Agora:
+  Close Friends · 5 people
+
+Mixed audience:
+  Close Friends · 5 people · 2 will not get this privately   ⌄
+
+  expanded:
+    3 on Agora       private, replies stay in the group
+    1 on Mastodon    arrives as a direct message, they can reply publicly
+    1 on Bluesky     cannot receive private posts, will not see this
 ```
+
+The exception is never hidden behind the disclosure: the count of members who will not receive it privately is on the collapsed line. The expansion carries the detail, not the warning. A composer that is silent when everything works is what earns the attention it asks for when something does not.
 
 Rejected alternative: filtering non-deliverable members out silently. Its failure mode is invisible. The author believes they posted to five people, two received nothing, and nothing anywhere says so. A visible degraded delivery is better than an invisible non-delivery.
 
@@ -260,12 +278,16 @@ One wrinkle, created by this week's work: as of the build now on `origin/v4.0.0`
 
 Sequence:
 
-1. **Now:** stop outbound legacy `post`/`delete_post`/`profile_update`. Fixes the duplicate-ingestion bug and removes the redundancy. Nothing is lost, since the ActivityPub equivalent already fires on every one of these events. (AGORA-327)
-2. **Next:** implement friend requests over ActivityPub, with mutual follow on acceptance. Keep the legacy inbound handlers.
-3. **Then:** limited-audience posts: outbound addressing, inbound per-recipient audience storage, and origin-mediated reply and reaction fan-out. This is the deciding requirement and the largest single piece of work in the sequence.
-4. **Finally:** once both instances run the new build, delete the legacy transport, its handlers, its queue and the instance keypair.
+1. **Now (AGORA-327):** stop outbound legacy `post`/`delete_post`/`profile_update`. Fixes the duplicate-ingestion bug and removes the redundancy. Nothing is lost, since the ActivityPub equivalent already fires on every one of these events.
+2. **Next (AGORA-329):** friend requests over ActivityPub as a marked `Follow`, with mutual follow on acceptance. Keep the legacy inbound handlers. Adds the `friend_requests_from` setting.
+3. **Then (AGORA-328):** limited-audience posts: outbound addressing, inbound per-recipient audience storage, and origin-mediated reply and reaction fan-out. This is the deciding requirement and the largest single piece of work in the sequence.
+4. **Finally (AGORA-330):** once both instances run the step 2 build, delete the legacy transport, its handlers, its queue and the instance keypair.
 
 Step 1 is independent of everything after it and should not wait. Step 3 depends on step 2 only for the friendship edge that defines a list member's eligibility; the addressing work itself could start in parallel if useful.
+
+Step 4 has a real precondition rather than a nominal one: the overlap release exists so that the two instances can be upgraded at different times, and deleting the inbound handlers before both are on the step 2 build breaks federation between them for exactly as long as the lag lasts. There is no benefit to going early.
+
+Peer timeline exchange (AGORA-322) is independent of this sequence and can land whenever, since it is built entirely on the ActivityPub side.
 
 ---
 
@@ -313,7 +335,6 @@ Rejected as a stopping point, though it is exactly what migration step 1 produce
 ## Open questions
 
 - **Marker shape.** Whether the friendship marker on the `Follow` is a boolean property or a namespaced object. Settled to a `Follow` carrying an `agora:` extension either way; only the term's shape is open.
-- **Should a friend request from an instance that is not a known peer be accepted?** Today anyone can deliver to the inbox and peering is not a precondition. Staying open matches the accepted position (open federation, ban bad actors after the fact), but it is worth stating deliberately rather than inheriting.
-- **Exact composer copy.** The decision to allow and label is settled above; the wording is not. It has to convey a degraded delivery without making the feature read as broken, and it has to survive being seen on every limited post rather than only the first. Worth testing on a real person rather than being written once and left.
+- **Exact composer wording.** The register is settled above (quiet unless lossy, with the shortfall named on the collapsed line). The specific words are not, and should be written against a real screen rather than in a document. In particular "will not get this privately" is doing a lot of work in one phrase and may not survive contact with a real user.
 - **Editing and deleting a limited-audience post.** `Update` and `Delete` need the same audience derivation and the same fan-out. Straightforward once the audience is stored, but it must not be forgotten, since a delete that reaches fewer people than the original post is worse than no delete at all.
 - **`published_at` is unclamped** on both ingest paths, so a peer controls where its posts sort in the receiving feed. Pre-existing, not caused by this decision, still worth closing.

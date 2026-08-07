@@ -2878,6 +2878,7 @@ func (s *Service) APLookup(w http.ResponseWriter, r *http.Request) {
 	// perfectly valid handle.
 	profile, err := s.fetchActorProfileSigned(userID, actorURL)
 	if err != nil {
+		log.Printf("federation: actor fetch for %s failed: %v", actorURL, err)
 		writeError(w, 404, "could not resolve actor")
 		return
 	}
@@ -2921,6 +2922,7 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 
 	profile, err := s.fetchActorProfileSigned(userID, req.ActorURL)
 	if err != nil || profile.Inbox == "" {
+		log.Printf("federation: actor fetch for %s failed: %v", req.ActorURL, err)
 		writeError(w, 404, "could not resolve actor")
 		return
 	}

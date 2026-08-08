@@ -275,6 +275,28 @@ func (s *Service) deliverFriendActivity(localUserID, remoteUserID, activityType,
 		return
 	}
 
+	// AGORA-336: record the follow locally, not just on the wire.
+	//
+	// ADR-002 has an accepted friendship establish a mutual ActivityPub follow,
+	// because that is what makes content flow. AGORA-329 sent the Follow
+	// activity and stopped there, which produced a half-follow: the recipient
+	// recorded us in their ap_followers and delivered their posts to us, but we
+	// had no ap_following row, and ingestFollowedPost drops any post whose
+	// author nobody here has an accepted follow of. So the posts arrived and
+	// were thrown away.
+	//
+	// accepted=false to start; handleInboundAcceptFollow flips it when their
+	// Accept arrives, which is the same lifecycle FollowFediverseAccount uses
+	// and the reason its UPDATE previously matched zero rows for a friendship.
+	if _, err := s.db.Exec(`
+		INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		VALUES ($1, $2, $3, false)
+		ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE SET followed_inbox_url = $3
+	`, localUserID, actorURL, inbox); err != nil {
+		log.Printf("federation: %s: could not record the follow of %s locally: %v", what, actorURL, err)
+		return
+	}
+
 	// enqueueAPDelivery drops silently when the recipient has blocked this
 	// user (AGORA-170). That is correct behaviour and a confusing silence, so
 	// say which of the two happened.

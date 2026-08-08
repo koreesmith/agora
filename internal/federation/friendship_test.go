@@ -328,3 +328,63 @@ func TestAcceptResolvesALegacyStub(t *testing.T) {
 		}
 	})
 }
+
+// TestFriendRequestRecordsTheFollowLocally covers AGORA-336, the half-follow
+// that AGORA-329 shipped: the Follow activity went out on the wire but no
+// ap_following row was written, so the far side delivered posts that
+// ingestFollowedPost then dropped for want of an accepted follow. Friend
+// requests appeared to work while content silently never arrived.
+//
+// deliverFriendActivity cannot run end to end here (it does a signed actor
+// fetch, and fedHTTPClient refuses to dial anything non-public), so this
+// asserts the two properties ingestion actually depends on: that a row exists
+// for the followed actor, and that an Accept flips it to accepted.
+func TestFriendRequestRecordsTheFollowLocally(t *testing.T) {
+	db := testFriendshipService(t)
+	unique := time.Now().UnixNano()
+
+	localName := fmt.Sprintf("agora336_local_%d", unique)
+	var localID string
+	db.QueryRow(`INSERT INTO users (username, email, password_hash) VALUES ($1,$1,'x') RETURNING id`, localName).Scan(&localID)
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, localID) })
+
+	actorURL := fmt.Sprintf("https://peer336-%d.example/federation/users/bob", unique)
+	inbox := fmt.Sprintf("https://peer336-%d.example/federation/inbox", unique)
+	t.Cleanup(func() { db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1`, localID) })
+
+	// The row deliverFriendActivity now writes before enqueuing the Follow.
+	if _, err := db.Exec(`
+		INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		VALUES ($1, $2, $3, false)
+		ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE SET followed_inbox_url = $3
+	`, localID, actorURL, inbox); err != nil {
+		t.Fatalf("record follow: %v", err)
+	}
+
+	// ingestFollowedPost's gate: an accepted follow of the post's author. Until
+	// the Accept arrives this is correctly false, which is why a request that
+	// is merely sent does not yet let content through.
+	var accepted bool
+	db.QueryRow(`SELECT accepted FROM ap_following WHERE follower_user_id = $1 AND followed_actor_url = $2`,
+		localID, actorURL).Scan(&accepted)
+	if accepted {
+		t.Error("a freshly sent friend request should not yet count as an accepted follow")
+	}
+
+	// handleInboundAcceptFollow's UPDATE. This is the statement that matched
+	// zero rows before the fix, because there was no row to match.
+	res, err := db.Exec(`UPDATE ap_following SET accepted = true WHERE follower_user_id = $1 AND followed_actor_url = $2`,
+		localID, actorURL)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("the Accept matched %d rows, want 1. With no ap_following row it matches none and content never flows.", n)
+	}
+
+	var gate string
+	db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&gate)
+	if gate != localID {
+		t.Errorf("ingestFollowedPost's gate resolved to %q, want %q, so their posts would be dropped on arrival", gate, localID)
+	}
+}

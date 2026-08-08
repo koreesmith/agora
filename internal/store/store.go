@@ -1287,6 +1287,47 @@ var schema = []string{
 		  AND remote_user_id != '' AND remote_instance != ''
 		  AND avatar_url != '' AND avatar_url NOT LIKE 'http%'`,
 
+	// AGORA-336: an accepted friendship with a remote Agora user implies a
+	// follow of them (ADR-002), because that is what makes their posts flow.
+	// AGORA-329 sent the Follow activity but never wrote the local
+	// ap_following row, so the remote instance delivered posts that
+	// ingestFollowedPost then dropped for want of an accepted follow. The send
+	// path now records it; friendships accepted before that need repairing, or
+	// they stay permanently silent.
+	//
+	// accepted = true because the friendship itself is the evidence: both sides
+	// agreed, which is a stronger signal than the Accept this row would
+	// otherwise be waiting on and which is never coming a second time.
+	//
+	// The inbox is derived rather than fetched. Agora advertises a single
+	// shared /federation/inbox on every actor document, so for a peer known to
+	// be Agora (ap_actor_url set, which only the AP path writes) it is
+	// deterministic and needs no network round trip during a migration.
+	//
+	// Guarded: "friends but not following" goes true again the moment someone
+	// deliberately unfollows a friend, and re-adding it on the next restart
+	// would read as the instance overriding their choice.
+	`INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		SELECT l.id, r.ap_actor_url, 'https://' || r.remote_instance || '/federation/inbox', true
+		  FROM friendships f
+		  JOIN users l ON l.id = f.requester_id AND l.is_remote = false
+		  JOIN users r ON r.id = f.addressee_id AND r.is_remote = true
+		 WHERE f.status = 'accepted'
+		   AND COALESCE(r.ap_actor_url,'') != '' AND COALESCE(r.remote_instance,'') != ''
+		   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_336_friendship_following')
+		ON CONFLICT (follower_user_id, followed_actor_url) DO NOTHING`,
+	`INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		SELECT l.id, r.ap_actor_url, 'https://' || r.remote_instance || '/federation/inbox', true
+		  FROM friendships f
+		  JOIN users l ON l.id = f.addressee_id AND l.is_remote = false
+		  JOIN users r ON r.id = f.requester_id AND r.is_remote = true
+		 WHERE f.status = 'accepted'
+		   AND COALESCE(r.ap_actor_url,'') != '' AND COALESCE(r.remote_instance,'') != ''
+		   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_336_friendship_following')
+		ON CONFLICT (follower_user_id, followed_actor_url) DO NOTHING`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_336_friendship_following')
+		ON CONFLICT (name) DO NOTHING`,
+
 	// AGORA-321: how a peering started. Two unrelated events wrote
 	// federated_instances rows that were then indistinguishable: an admin
 	// deliberately adding a peer (AddInstance), and an unknown instance being

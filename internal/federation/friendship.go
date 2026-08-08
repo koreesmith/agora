@@ -336,17 +336,58 @@ func (s *Service) localActorFor(userID string) (string, bool) {
 	return s.actorURL(username), true
 }
 
-// remoteInboxFor resolves the inbox to deliver to, signing the lookup as the
-// local user so an authorized-fetch instance does not refuse it.
+// remoteInboxFor resolves the inbox to deliver an Agora-to-Agora activity to,
+// without a network call (AGORA-338).
+//
+// It used to sign and fetch the remote actor document. That put a live HTTP
+// request on the critical path of sending a friend request, and the callers
+// treated a failure as fatal: they returned without queuing anything, so a
+// remote instance that was briefly unreachable, restarting or slow lost the
+// request permanently. The local pending row stayed, nothing retried, and
+// nothing said so. That is why friend requests behaved intermittently.
+//
+// Nothing here needed the fetch. The target is known to be Agora (the callers
+// resolve it through remoteAgoraActorURL), and every Agora actor document
+// advertises the same shared /federation/inbox, so the address is derivable.
+// A previously stored inbox wins when there is one, since that came from a real
+// actor document and would survive Agora ever changing the convention.
+//
+// Being wrong is now cheap and visible: the activity is queued either way, and
+// a bad address fails in drainAPQueue, which retries with backoff and logs.
+// Being unreachable for a moment costs nothing at all.
 func (s *Service) remoteInboxFor(localUserID, actorURL string) (string, error) {
-	profile, err := s.fetchActorProfileSigned(localUserID, actorURL)
-	if err != nil {
-		return "", err
+	var stored string
+	s.db.QueryRow(`
+		SELECT COALESCE(followed_inbox_url, '') FROM ap_following
+		WHERE follower_user_id = $1 AND followed_actor_url = $2
+	`, localUserID, actorURL).Scan(&stored)
+	if stored != "" {
+		return stored, nil
 	}
-	if profile.Inbox == "" {
-		return "", fmt.Errorf("actor has no inbox")
+
+	// Also accept an inbox already learned for this actor by any local user,
+	// since it is a property of the actor rather than of the relationship.
+	s.db.QueryRow(`
+		SELECT COALESCE(followed_inbox_url, '') FROM ap_following
+		WHERE followed_actor_url = $1 AND COALESCE(followed_inbox_url,'') != '' LIMIT 1
+	`, actorURL).Scan(&stored)
+	if stored != "" {
+		return stored, nil
 	}
-	return profile.Inbox, nil
+
+	// The scheme check is load-bearing. domainFromURL only strips a scheme if
+	// one is there and otherwise hands back whatever it was given, so a bare
+	// string like "not-a-url" would sail through isValidInstanceHost (it has no
+	// forbidden characters) and be built into https://not-a-url/federation/inbox.
+	// Deriving an address from something that was never an actor URL is worse
+	// than refusing: it turns a clear failure into a delivery to nowhere.
+	if !strings.HasPrefix(actorURL, "https://") && !strings.HasPrefix(actorURL, "http://") {
+		return "", fmt.Errorf("cannot derive an inbox from %q, which is not an actor URL", actorURL)
+	}
+	if host := domainFromURL(actorURL); host != "" && isValidInstanceHost(host) {
+		return "https://" + host + "/federation/inbox", nil
+	}
+	return "", fmt.Errorf("cannot derive an inbox from actor %q", actorURL)
 }
 
 // recordInboundFriendRequest creates the pending friendship an inbound marked

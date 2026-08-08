@@ -388,3 +388,58 @@ func TestFriendRequestRecordsTheFollowLocally(t *testing.T) {
 		t.Errorf("ingestFollowedPost's gate resolved to %q, want %q, so their posts would be dropped on arrival", gate, localID)
 	}
 }
+
+// TestRemoteInboxForNeedsNoNetwork covers AGORA-338. Resolving the inbox used
+// to sign and fetch the remote actor document, and every caller treated a
+// failure as fatal: it returned without queuing anything, so a peer that was
+// briefly unreachable lost the friend request permanently, with a pending row
+// left behind and nothing to retry it. That is what made friend requests look
+// intermittent.
+//
+// fedHTTPClient refuses to dial anything non-public, so if this still made a
+// network call these cases would fail rather than resolve, which is exactly the
+// property being pinned.
+func TestRemoteInboxForNeedsNoNetwork(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var localID string
+	name := fmt.Sprintf("inbox338_%d", unique)
+	db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`, name).Scan(&localID)
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, localID) })
+	t.Cleanup(func() { db.Exec(`DELETE FROM ap_following WHERE follower_user_id = $1`, localID) })
+
+	domain := fmt.Sprintf("inboxpeer338-%d.example", unique)
+	actorURL := "https://" + domain + "/federation/users/bob"
+
+	t.Run("derived from the actor when nothing is stored", func(t *testing.T) {
+		got, err := s.remoteInboxFor(localID, actorURL)
+		if err != nil {
+			t.Fatalf("remoteInboxFor: %v, but an unreachable peer must not block sending", err)
+		}
+		if want := "https://" + domain + "/federation/inbox"; got != want {
+			t.Errorf("got %q, want the shared inbox %q", got, want)
+		}
+	})
+
+	t.Run("a stored inbox wins over the derived one", func(t *testing.T) {
+		stored := "https://" + domain + "/custom/inbox"
+		db.Exec(`
+			INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+			VALUES ($1,$2,$3,true)
+			ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE SET followed_inbox_url = $3
+		`, localID, actorURL, stored)
+
+		got, err := s.remoteInboxFor(localID, actorURL)
+		if err != nil || got != stored {
+			t.Errorf("got (%q, %v), want (%q, nil). A real actor document must win over the convention.", got, err, stored)
+		}
+	})
+
+	t.Run("an unusable actor URL is refused rather than guessed at", func(t *testing.T) {
+		if _, err := s.remoteInboxFor(localID, "not-a-url"); err == nil {
+			t.Error("derived an inbox from something that is not an actor URL")
+		}
+	})
+}

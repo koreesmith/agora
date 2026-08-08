@@ -4235,12 +4235,12 @@ func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
 // at enqueue time like the custom protocol's embedded-signature scheme.
 func (s *Service) drainAPQueue() {
 	rows, err := s.db.Query(`
-		SELECT id, actor_user_id, inbox_url, activity
+		SELECT id, actor_user_id, inbox_url, activity, attempts
 		FROM ap_delivery_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
+		WHERE attempts < $1 AND next_attempt <= NOW()
 		ORDER BY next_attempt ASC
 		LIMIT 20
-	`)
+	`, maxDeliveryAttempts)
 	if err != nil {
 		return
 	}
@@ -4249,11 +4249,12 @@ func (s *Service) drainAPQueue() {
 	type job struct {
 		id, userID, inboxURL string
 		activity             []byte
+		attempts             int
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		if rows.Scan(&j.id, &j.userID, &j.inboxURL, &j.activity) == nil {
+		if rows.Scan(&j.id, &j.userID, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
@@ -4263,14 +4264,31 @@ func (s *Service) drainAPQueue() {
 		sendErr := s.deliverAPActivity(j.userID, j.inboxURL, j.activity)
 		if sendErr == nil {
 			s.db.Exec(`DELETE FROM ap_delivery_queue WHERE id = $1`, j.id)
-		} else {
-			s.db.Exec(`
-				UPDATE ap_delivery_queue
-				SET attempts = attempts + 1,
-				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
+			continue
+		}
+		s.db.Exec(`
+			UPDATE ap_delivery_queue
+			SET attempts = attempts + 1,
+			    last_error = $1,
+			    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
+			WHERE id = $2
+		`, sendErr.Error(), j.id)
+
+		// AGORA-338: this queue recorded failures to last_error and logged
+		// nothing, so a delivery path failing every time looked exactly like
+		// one with nothing to send. AGORA-325 closed that on the legacy queue;
+		// this is the same gap on the queue that now carries everything,
+		// including friend requests and friends-only posts.
+		//
+		// First failure and final abandonment only. A peer down for a day would
+		// otherwise produce a line per activity per retry, and the noise is what
+		// makes a log stop being read.
+		switch {
+		case j.attempts == 0:
+			log.Printf("federation: ap delivery to %s failed (first attempt): %v", j.inboxURL, sendErr)
+		case j.attempts >= maxDeliveryAttempts-1:
+			log.Printf("federation: giving up on ap delivery to %s after %d attempts, last error: %v",
+				j.inboxURL, j.attempts+1, sendErr)
 		}
 	}
 }

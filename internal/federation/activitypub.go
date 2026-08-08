@@ -1734,8 +1734,24 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		To       []string `json:"to"`
 		CC       []string `json:"cc"`
 		Audience string   `json:"agora:audience"`
+		// AGORA-323: a direct message. Read here rather than in a second parse
+		// so the branch below can be taken before any post handling runs.
+		DirectMessage bool `json:"agora:directMessage"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
+		return
+	}
+
+	// AGORA-323: a Note addressed to one local actor with no inReplyTo is a
+	// direct message, not a post, and taking this branch first is what keeps it
+	// out of anybody's feed. Returns true for a message it refused as well as
+	// one it stored, since a refused message must not fall through and become a
+	// post either.
+	if s.handleInboundDirectMessage(verifiedActor, inboundNote{
+		ID: note.ID, Content: note.Content, Published: note.Published,
+		InReplyTo: note.InReplyTo, To: note.To, CC: note.CC,
+		DirectMessage: note.DirectMessage,
+	}) {
 		return
 	}
 	// attributedTo must match the cryptographically verified signer — an
@@ -1946,6 +1962,14 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
+	// AGORA-323: an edit to a direct message, matched on the sender's own
+	// object id and scoped to that sender, so one instance cannot edit
+	// another's messages. Tried before the post path because a message id
+	// resolves to no post and would otherwise be a silent no-op.
+	if s.handleInboundDirectMessageUpdate(verifiedActor, note.ID, note.Content) {
+		return
+	}
+
 	domain := domainFromURL(note.ID)
 	var postID string
 	// Scoped to the actor's own remote_post_id/remote_instance pair, joined
@@ -2017,6 +2041,12 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 			return
 		}
 		objectID = tombstone.ID
+	}
+
+	// AGORA-323: withdrawing a direct message, same ownership scoping as the
+	// edit above.
+	if s.handleInboundDirectMessageDelete(verifiedActor, objectID) {
+		return
 	}
 
 	domain := domainFromURL(objectID)

@@ -146,6 +146,18 @@ What is left is identification and peering, which were never part of the transpo
 
 **An inbound legacy activity** is no longer understood. It reaches `handleStandardInbox` and is refused as the unrecognised JSON it is, which is the intended outcome rather than a gap.
 
+## Direct messages (AGORA-323)
+
+Messages were local-only until AGORA-323: `internal/dm` had no `fedSender` at all, so a conversation with somebody on another instance was written here and never left. They now ride ActivityPub in the shape Mastodon already uses for a direct message: a `Create` carrying a `Note` addressed to exactly one actor, with no `Public` and no followers collection anywhere. A side effect of using the standard shape is that this works with Mastodon users too, not only with other Agora instances.
+
+- **Outbound** (`internal/federation/dm.go`): `SendDirectMessage`, `SendDirectMessageUpdate`, `SendDirectMessageDelete`, called from `internal/dm` after the local row exists so a delivery failure leaves the sender's own view intact and the queue retries. The object id is `<actor>/messages/<id>`, deliberately not under `/posts/` so `localPostIDFromURL` can never resolve a message as a federatable post target.
+- **Inbound**: `handleInboundCreate` tries `handleInboundDirectMessage` first, so a message never reaches the post path. A Note is a direct message when it carries `agora:directMessage`, or (for Mastodon, which has no such marker) when it is addressed to exactly one actor with no `inReplyTo` and no Public.
+- **Policy is the local policy.** `dm_privacy` (`everyone`/`friends`/`nobody`), the block check, and the `is_accepted` request state already decide who may message whom here, and an inbound federated message is checked against the same settings. A user's answer to "who can message me" therefore means the same thing whatever instance the sender is on; a separate federated policy would have produced two answers to one question.
+- **Dedup** is `messages.remote_message_id`, unique where non-empty. Peers retry on their own schedule and a conversation is the worst place to see a message twice.
+- **Live delivery**: federation stores the message and hands it back to `internal/dm` through `DeliverInboundMessage`, which owns the socket hub. Federation owns the wire and the storage; the hub stays where it is.
+
+**Deliberately not built.** Group conversations spanning instances: `conversation_participants` supports more than two people, but a conversation across three instances is a much larger problem, and `remoteRecipient` returns nothing unless the conversation is one-to-one. Read state, which is not something to report to another server. Any form of end-to-end encryption: an ActivityPub direct message is readable by the administrators of both instances, and the conversation UI says so rather than implying a privacy that does not exist.
+
 ## Background workers
 
 `StartBackgroundSync(ctx)` starts the delivery pollers: `drainAPQueue` (standard ActivityPub user deliveries), `drainPageAPQueue` (page deliveries) and `drainInstanceAPQueue` (relay traffic), plus `refreshInstances` (peer liveness) and `syncStaleRemoteUsers` (legacy stub profiles). Each delivery poller retries with backoff and gives up after `maxDeliveryAttempts` (10) failed attempts rather than retrying forever. The legacy protocol's own `drainQueue` went with it in AGORA-330.

@@ -83,6 +83,10 @@ func main() {
 	// AGORA-324: the admin Add Instance flow resolves a remote instance through
 	// federation's SSRF-safe client rather than reaching out on its own.
 	adminSvc.SetFed(fedSvc)
+	// AGORA-323: the DM service was the one federating service that never had a
+	// fedSender, which is why messages stopped at the instance boundary.
+	dmSvc.SetFed(fedSvc)
+	fedSvc.SetDM(dmSvc)
 	userSvc.SetAtproto(atprotoSvc)
 	feedSvc.SetAtproto(atprotoSvc)
 	// AGORA-278: internal/domains owns the claim/verify/approve workflow and

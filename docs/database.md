@@ -318,6 +318,7 @@ Key values include: `instance_name`, `instance_description`, `registration_mode`
 | `sender_id` | uuid FK→users | |
 | `content` | text | |
 | `image_url` | text | |
+| `remote_message_id` | text | AGORA-323: the sender's own object id for a message from another instance. Unique where non-empty, which is what makes redelivery idempotent. Empty for a local message. |
 | `edited_at` | timestamptz | |
 | `deleted_at` | timestamptz | Soft delete |
 | `created_at` | timestamptz | |

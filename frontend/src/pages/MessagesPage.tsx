@@ -5,7 +5,7 @@ import { dmApi, feedApi, friendsApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { formatDistanceToNow } from 'date-fns'
-import { Send, Image, X, Edit2, Trash2, Check, Search, MessageCircle, Plus, ArrowLeft } from 'lucide-react'
+import { Send, Image, X, Edit2, Trash2, Check, Search, MessageCircle, Plus, ArrowLeft, Info } from 'lucide-react'
 import { isGifUrl } from '../utils/gif'
 import { renderContent } from '../components/feed/CommentsSection'
 import { REACTIONS, reactionDisplay } from '../utils/reactions'
@@ -21,6 +21,8 @@ interface Participant {
   read_receipts: boolean
   last_active_at?: string
   is_online?: boolean
+  is_remote?: boolean
+  remote_instance?: string
 }
 
 interface Message {
@@ -485,6 +487,26 @@ function ThreadView({ convId, onBack }: { convId: string; onBack?: () => void })
           </p>
         </div>
       </div>
+
+      {/* AGORA-323: a conversation that crosses instances, said plainly once.
+          A federated direct message is not end-to-end encrypted and is readable
+          by the administrators of both servers, which is true of every
+          ActivityPub direct message including Mastodon's. Saying so is not
+          optional: whatever the product tells people about message privacy has
+          to be accurate for this case before it ships. Shown once at the top of
+          the conversation rather than per message, and worded as a fact about
+          where the message goes rather than as a warning. */}
+      {other.is_remote && (
+        <div className="mx-4 mt-3 px-3 py-2 flex items-start gap-2 text-xs text-agora-500 dark:text-agora-400 bg-agora-50 dark:bg-agora-800/40 rounded-xl">
+          <Info size={13} className="mt-0.5 flex-shrink-0" />
+          <p>
+            {other.display_name || other.username} is on
+            {' '}<span className="font-medium">{other.remote_instance || 'another server'}</span>, so these
+            messages travel between two servers. They are not end-to-end encrypted, and administrators of
+            either server can read them.
+          </p>
+        </div>
+      )}
 
       {/* Message request banner */}
       {conv && !conv.is_accepted && (

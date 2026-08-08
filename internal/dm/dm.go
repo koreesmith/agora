@@ -20,6 +20,57 @@ type Service struct {
 	db       *store.DB
 	hub      *Hub
 	upgrader websocket.Upgrader
+	fed      fedSender
+}
+
+// fedSender is the outbound half of AGORA-323. Messages were local-only: this
+// service was the one federating service with no fedSender at all, so a
+// conversation with somebody on another instance either could not be started
+// or was written here and never left.
+//
+// Scoped to one-to-one conversations. conversation_participants supports more
+// than two people, but a conversation spanning three instances is a much larger
+// problem and is deliberately out of scope.
+type fedSender interface {
+	SendDirectMessage(senderUserID, recipientUserID, messageID string)
+	SendDirectMessageUpdate(senderUserID, recipientUserID, messageID string)
+	SendDirectMessageDelete(senderUserID, recipientUserID, messageID string)
+	// CanFriend doubles as "is this somebody we can address at all", which for
+	// messaging means an Agora or fediverse actor rather than a Bluesky account
+	// with its own separate messaging model.
+	CanFriend(remoteUserID string) bool
+}
+
+func (s *Service) SetFed(f fedSender) { s.fed = f }
+
+// remoteRecipient returns the other participant when they are on another
+// instance and reachable, and empty otherwise. Every federated path here is
+// gated on it, so a purely local conversation costs one indexed lookup and
+// behaves exactly as it did.
+func (s *Service) remoteRecipient(convID, senderID string) string {
+	var id string
+	var isRemote bool
+	s.db.QueryRow(`
+		SELECT u.id, COALESCE(u.is_remote, false)
+		FROM conversation_participants cp
+		JOIN users u ON u.id = cp.user_id
+		WHERE cp.conversation_id = $1 AND cp.user_id != $2
+		LIMIT 2
+	`, convID, senderID).Scan(&id, &isRemote)
+	if !isRemote || id == "" || s.fed == nil {
+		return ""
+	}
+	// A group conversation is deliberately not federated: two other
+	// participants means this is not the one-to-one case this supports.
+	var others int
+	s.db.QueryRow(`SELECT COUNT(*) FROM conversation_participants WHERE conversation_id = $1 AND user_id != $2`, convID, senderID).Scan(&others)
+	if others != 1 {
+		return ""
+	}
+	if !s.fed.CanFriend(id) {
+		return ""
+	}
+	return id
 }
 
 // New wires up the DM service. allowedOrigins pins the WebSocket upgrade's
@@ -95,6 +146,10 @@ type Participant struct {
 	ReadReceipts  bool    `json:"read_receipts"`
 	LastActiveAt  *string `json:"last_active_at,omitempty"`
 	IsOnline      bool    `json:"is_online"`
+	// AGORA-323: where this person is, so the conversation can say what is
+	// true about a message that crosses instances.
+	IsRemote      bool    `json:"is_remote"`
+	Instance      string  `json:"remote_instance"`
 }
 
 type Conversation struct {
@@ -147,7 +202,8 @@ func (s *Service) loadParticipants(convID, viewerID string) []Participant {
 	rows, err := s.db.Query(`
 		SELECT cp.user_id, u.username, u.display_name, u.avatar_url, cp.last_read_at, cp.read_receipts,
 		       u.last_active_at,
-		       (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '5 minutes') AS is_online
+		       (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '5 minutes') AS is_online,
+		       COALESCE(u.is_remote, false), COALESCE(u.remote_instance, '')
 		FROM conversation_participants cp
 		JOIN users u ON u.id = cp.user_id
 		WHERE cp.conversation_id = $1
@@ -158,7 +214,7 @@ func (s *Service) loadParticipants(convID, viewerID string) []Participant {
 	for rows.Next() {
 		var p Participant
 		rows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.LastReadAt, &p.ReadReceipts,
-			&p.LastActiveAt, &p.IsOnline)
+			&p.LastActiveAt, &p.IsOnline, &p.IsRemote, &p.Instance)
 		if p.UserID != viewerID && !p.ReadReceipts {
 			p.LastReadAt = nil
 		}
@@ -254,8 +310,13 @@ func (s *Service) FriendSearch(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	q := "%" + strings.ToLower(r.URL.Query().Get("q")) + "%"
 
+	// AGORA-323: is_remote is returned so the picker can show where somebody
+	// is. Remote friends were never excluded from this search, but starting a
+	// conversation with one used to write a message that never left the
+	// instance, so surfacing them was worse than not.
 	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url
+		SELECT u.id, u.username, u.display_name, u.avatar_url,
+		       COALESCE(u.is_remote, false), COALESCE(u.remote_instance, '')
 		FROM users u
 		JOIN friendships f ON (
 			(f.requester_id = $1 AND f.addressee_id = u.id) OR
@@ -275,11 +336,13 @@ func (s *Service) FriendSearch(w http.ResponseWriter, r *http.Request) {
 		Username    string `json:"username"`
 		DisplayName string `json:"display_name"`
 		AvatarURL   string `json:"avatar_url"`
+		IsRemote    bool   `json:"is_remote"`
+		Instance    string `json:"remote_instance"`
 	}
 	var friends []Friend
 	for rows.Next() {
 		var f Friend
-		rows.Scan(&f.ID, &f.Username, &f.DisplayName, &f.AvatarURL)
+		rows.Scan(&f.ID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.IsRemote, &f.Instance)
 		friends = append(friends, f)
 	}
 	if friends == nil { friends = []Friend{} }
@@ -361,6 +424,9 @@ func (s *Service) StartConversation(w http.ResponseWriter, r *http.Request) {
 		s.db.Exec(`UPDATE conversations SET updated_at=NOW() WHERE id=$1`, convID)
 		m := s.loadMessage(msgID)
 		s.hub.broadcast(recipientID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
+		if rid := s.remoteRecipient(convID, userID); rid != "" {
+			go s.fed.SendDirectMessage(userID, rid, msgID)
+		}
 	}
 
 	writeJSON(w, 201, map[string]string{"id": convID})
@@ -449,6 +515,12 @@ func (s *Service) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	m := s.loadMessage(msgID)
 	s.broadcastToConv(convID, userID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
+	// AGORA-323: delivered after the local row exists, like every other
+	// outbound federation path, so a delivery failure leaves the sender's own
+	// view intact and the queue retries.
+	if rid := s.remoteRecipient(convID, userID); rid != "" {
+		go s.fed.SendDirectMessage(userID, rid, msgID)
+	}
 	writeJSON(w, 201, m)
 }
 
@@ -467,6 +539,9 @@ func (s *Service) EditMessage(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`UPDATE messages SET content=$1, edited_at=NOW() WHERE id=$2`, req.Content, msgID)
 	m := s.loadMessage(msgID)
 	s.broadcastToConv(convID, userID, WSEvent{Type: "message_edited", ConvID: convID, Data: m})
+	if rid := s.remoteRecipient(convID, userID); rid != "" {
+		go s.fed.SendDirectMessageUpdate(userID, rid, msgID)
+	}
 	writeJSON(w, 200, m)
 }
 
@@ -481,6 +556,12 @@ func (s *Service) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	s.db.Exec(`UPDATE messages SET deleted_at=NOW(), content='', image_url='' WHERE id=$1`, msgID)
 	s.broadcastToConv(convID, userID, WSEvent{Type: "message_deleted", ConvID: convID, Data: map[string]string{"id": msgID}})
+	// A delete that reaches fewer people than the message did is worse than no
+	// delete, which is why this is not optional (AGORA-343 made the same call
+	// for limited posts).
+	if rid := s.remoteRecipient(convID, userID); rid != "" {
+		go s.fed.SendDirectMessageDelete(userID, rid, msgID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "deleted"})
 }
 
@@ -673,4 +754,18 @@ func (s *Service) WebSocket(w http.ResponseWriter, r *http.Request) {
 				Data: map[string]string{"user_id": userID, "at": time.Now().UTC().Format(time.RFC3339)}})
 		}
 	}
+}
+
+// DeliverInboundMessage pushes a message stored by the federation layer to an
+// open client, so a message from another instance arrives the same way a local
+// one does rather than waiting for the next load (AGORA-323).
+//
+// The federation layer owns the wire and the storage; the socket hub lives here
+// and stays here, so it hands the message back rather than reaching across.
+func (s *Service) DeliverInboundMessage(convID, recipientID, messageID string) {
+	m := s.loadMessage(messageID)
+	if m == nil {
+		return
+	}
+	s.hub.broadcast(recipientID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
 }

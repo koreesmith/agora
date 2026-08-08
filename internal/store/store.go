@@ -1531,4 +1531,16 @@ var schema = []string{
 	 $do$`,
 	`INSERT INTO schema_backfills (name) VALUES ('agora_346_identity_merge')
 		ON CONFLICT (name) DO NOTHING`,
+
+	// ── AGORA-323: direct messages across instances ────────────────────────
+	//
+	// A federated message needs an identity of its own. remote_message_id is
+	// the sender's own object id, which is what an edit, a delete or a
+	// redelivery arrives quoting, and the only thing that can tie those back to
+	// the row here. Unique so a redelivered message is dropped rather than
+	// duplicated: peers retry, and a conversation is the worst place to see a
+	// message twice.
+	`ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_message_id TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_remote_id
+		ON messages(remote_message_id) WHERE remote_message_id != ''`,
 }

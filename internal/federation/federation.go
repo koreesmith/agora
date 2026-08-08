@@ -23,6 +23,8 @@ type Service struct {
 	db    *store.DB
 	cfg   *config.Config
 	notif *notifications.Service
+	// AGORA-323: set via SetDM. Optional, see dmNotifier.
+	dm dmNotifier
 }
 
 func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {

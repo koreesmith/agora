@@ -251,14 +251,22 @@ func (s *Service) SendFriendUndo(localUserID, otherUserID string) {
 }
 
 // deliverFriendActivity is the shared send path for a marked Follow.
+//
+// Every exit is logged, including the successful one. A friend request that
+// goes nowhere is otherwise indistinguishable from one that was never
+// attempted, which is exactly the position AGORA-325 found the legacy queue in:
+// the failure was real, silent, and only visible by querying a table by hand.
 func (s *Service) deliverFriendActivity(localUserID, remoteUserID, activityType, what string) {
 	actorURL, err := s.remoteAgoraActorURL(remoteUserID)
 	if err != nil {
-		log.Printf("federation: %s: cannot resolve actor for %s: %v", what, remoteUserID, err)
+		log.Printf("federation: %s: cannot resolve actor for user %s: %v", what, remoteUserID, err)
 		return
 	}
 	local, ok := s.localActorFor(localUserID)
 	if !ok {
+		// Previously a bare return. A local user who cannot be resolved to an
+		// actor is a real fault (a missing or remote row), not a no-op.
+		log.Printf("federation: %s: no local actor for user %s, cannot address %s", what, localUserID, actorURL)
 		return
 	}
 	inbox, err := s.remoteInboxFor(localUserID, actorURL)
@@ -267,6 +275,10 @@ func (s *Service) deliverFriendActivity(localUserID, remoteUserID, activityType,
 		return
 	}
 
+	// enqueueAPDelivery drops silently when the recipient has blocked this
+	// user (AGORA-170). That is correct behaviour and a confusing silence, so
+	// say which of the two happened.
+	before := s.pendingDeliveryCount(localUserID, inbox)
 	s.enqueueAPDelivery(localUserID, inbox, map[string]any{
 		"@context":          agoraContext,
 		"id":                local + fmt.Sprintf("/follows/%d", time.Now().UnixNano()),
@@ -275,6 +287,21 @@ func (s *Service) deliverFriendActivity(localUserID, remoteUserID, activityType,
 		"object":            actorURL,
 		friendRequestMarker: true,
 	})
+	if s.pendingDeliveryCount(localUserID, inbox) == before {
+		log.Printf("federation: %s: %s -> %s was not queued (recipient has blocked this account, or the queue insert failed)", what, local, actorURL)
+		return
+	}
+	log.Printf("federation: %s queued: %s -> %s via %s", what, local, actorURL, inbox)
+}
+
+// pendingDeliveryCount is a diagnostic helper for the logging above: it says
+// whether an enqueue actually produced a row, without changing
+// enqueueAPDelivery's signature, which a dozen other call sites depend on.
+func (s *Service) pendingDeliveryCount(userID, inboxURL string) int {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM ap_delivery_queue WHERE actor_user_id = $1 AND inbox_url = $2`,
+		userID, inboxURL).Scan(&n)
+	return n
 }
 
 // localActorFor resolves a local user's own actor URL.

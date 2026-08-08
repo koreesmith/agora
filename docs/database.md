@@ -390,6 +390,8 @@ Who a limited-audience post from another Agora instance was addressed to (AGORA-
 | `public_key` | text | Blanked and no longer written by AGORA-330. Held the peer's key for the removed transport; the column is retained so an upgrade need not rewrite the table. |
 | `name` | text | Instance display name |
 | `direction` | varchar(10) | `outbound` (an admin added them), `inbound` (they contacted us first), `mutual`, or `unknown` for rows predating AGORA-321 |
+| `timeline_exchange` | boolean | AGORA-322: our subscription to their public timeline. Default false. |
+| `carries_our_timeline` | boolean | AGORA-322: their subscription to ours, which they decide and we only report. Default false. |
 | `is_blocked` | boolean | Blocks this peer. See `instance_bans` below for the unified fediverse block, which also covers ActivityPub |
 | `last_seen_at` | timestamptz | |
 | `created_at` | timestamptz | |

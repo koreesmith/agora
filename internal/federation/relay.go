@@ -56,16 +56,32 @@ func RegisterAdminRoutes(r chi.Router, s *Service) {
 // fail. The instance actor's own delivery queue (instance_ap_delivery_queue)
 // is reserved for the instance actor's own authored traffic — the
 // Follow/Undo(Follow) subscription handshake (AGORA-220), not post content.
+// enabledRelayInboxes lists every inbox a local public post should reach beyond
+// its author's own followers.
+//
+// AGORA-322 folded peer timeline subscribers in here rather than adding a
+// second loop at each of the three call sites (Create, Update and Delete). The
+// two are the same thing from a delivery point of view, and separating them was
+// the shape most likely to end with a peer receiving posts but not their edits.
 func (s *Service) enabledRelayInboxes() []string {
+	inboxes := s.peerTimelineInboxes()
+
 	rows, err := s.db.Query(`SELECT inbox_url FROM relays WHERE status = 'enabled'`)
 	if err != nil {
-		return nil
+		return inboxes
 	}
 	defer rows.Close()
-	var inboxes []string
+	seen := map[string]bool{}
+	for _, i := range inboxes {
+		seen[i] = true
+	}
 	for rows.Next() {
 		var inbox string
-		if rows.Scan(&inbox) == nil {
+		// Deduplicated: an instance can be both a peer and a relay this
+		// instance subscribes to, and delivering twice is a duplicate the
+		// receiving end has to absorb.
+		if rows.Scan(&inbox) == nil && inbox != "" && !seen[inbox] {
+			seen[inbox] = true
 			inboxes = append(inboxes, inbox)
 		}
 	}

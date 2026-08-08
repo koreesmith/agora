@@ -31,6 +31,10 @@ type Service struct {
 // and the key validation rather than keeping a second, weaker copy.
 type fedResolver interface {
 	FetchInstanceInfo(domain string) (normalizedDomain, name, publicKeyB64 string, err error)
+	// AGORA-322: turning a peer's timeline exchange on or off. The federation
+	// side owns it because turning it on sends a Follow and turning it off
+	// sends an Undo, neither of which belongs in an admin handler.
+	SetTimelineExchange(domain string, on bool) error
 }
 
 type notifSender interface {
@@ -77,6 +81,8 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
 	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
 	r.Delete("/admin/federation/instances/{id}",       s.DisconnectInstance)
+	// AGORA-322: per-peer timeline exchange.
+	r.Put("/admin/federation/instances/{id}/timeline", s.SetInstanceTimelineExchange)
 
 	// Instance rules
 	r.Get("/admin/rules",             s.ListRules)
@@ -431,7 +437,8 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, domain, name, instance_url, status, direction, last_seen_at, created_at
+		SELECT id, domain, name, instance_url, status, direction, last_seen_at, created_at,
+		       COALESCE(timeline_exchange, false), COALESCE(carries_our_timeline, false)
 		FROM federated_instances
 		ORDER BY last_seen_at DESC
 	`)
@@ -453,22 +460,79 @@ func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 		Direction  string `json:"direction"`
 		LastSeenAt string `json:"last_seen_at"`
 		CreatedAt  string `json:"created_at"`
+		// AGORA-322, two independent directions. TimelineExchange is our
+		// subscription to them; CarriesOurTimeline is theirs to us, which they
+		// decide and we only report.
+		TimelineExchange   bool `json:"timeline_exchange"`
+		CarriesOurTimeline bool `json:"carries_our_timeline"`
 	}
 	var instances []Instance
 	for rows.Next() {
 		var inst Instance
 		rows.Scan(&inst.ID, &inst.Domain, &inst.Name, &inst.InstanceURL,
-			&inst.Status, &inst.Direction, &inst.LastSeenAt, &inst.CreatedAt)
+			&inst.Status, &inst.Direction, &inst.LastSeenAt, &inst.CreatedAt,
+			&inst.TimelineExchange, &inst.CarriesOurTimeline)
 		instances = append(instances, inst)
 	}
 	if instances == nil { instances = []Instance{} }
 	writeJSON(w, 200, map[string]any{"instances": instances})
 }
 
+// SetInstanceTimelineExchange turns a peer's timeline exchange on or off
+// (AGORA-322). Default off for every peer, including existing ones: turning it
+// on changes what every local user sees in Explore.
+func (s *Service) SetInstanceTimelineExchange(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actorID := auth.UserIDFromCtx(r.Context())
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+
+	var domain, status string
+	if err := s.db.QueryRow(`SELECT domain, status FROM federated_instances WHERE id = $1`, id).
+		Scan(&domain, &status); err != nil {
+		writeError(w, 404, "instance not found")
+		return
+	}
+	if status == "blocked" && req.Enabled {
+		writeError(w, 409, "this instance is blocked. Unblock it first if you want to carry its posts")
+		return
+	}
+	if s.fed == nil {
+		writeError(w, 503, "federation is not available")
+		return
+	}
+	if err := s.fed.SetTimelineExchange(domain, req.Enabled); err != nil {
+		writeError(w, 422, err.Error())
+		return
+	}
+
+	action := "disable_timeline_exchange"
+	if req.Enabled {
+		action = "enable_timeline_exchange"
+	}
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, $2, 'instance', $3)`,
+		actorID, action, domain)
+
+	writeJSON(w, 200, map[string]any{"domain": domain, "timeline_exchange": req.Enabled})
+}
+
 func (s *Service) BlockInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	actorID := auth.UserIDFromCtx(r.Context())
-	res, err := s.db.Exec(`UPDATE federated_instances SET status = 'blocked' WHERE id = $1`, id)
+	// AGORA-322: blocking stops the exchange in both directions. A blocked
+	// instance neither receives our timeline nor has its posts ingested, and
+	// leaving the flags set would have made an unblock silently resume both.
+	res, err := s.db.Exec(`
+		UPDATE federated_instances
+		   SET status = 'blocked', timeline_exchange = false, carries_our_timeline = false
+		 WHERE id = $1
+	`, id)
 	if err != nil {
 		writeError(w, 400, "invalid instance id")
 		return
@@ -522,6 +586,14 @@ func (s *Service) DisconnectInstance(w http.ResponseWriter, r *http.Request) {
 	if status == "blocked" {
 		writeError(w, 409, "this instance is blocked. Unblock it first if you also want to stop refusing its traffic, or leave it blocked to keep refusing it")
 		return
+	}
+
+	// AGORA-322: disconnecting stops the exchange too, and the Undo has to go
+	// out before the row is deleted, since the row is where the domain lives.
+	// Best effort: the peering is being removed either way, and a peer that
+	// never hears the Undo simply stops being delivered to.
+	if s.fed != nil {
+		s.fed.SetTimelineExchange(domain, false)
 	}
 
 	if _, err := s.db.Exec(`DELETE FROM federated_instances WHERE id = $1`, id); err != nil {

@@ -1543,4 +1543,22 @@ var schema = []string{
 	`ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_message_id TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_remote_id
 		ON messages(remote_message_id) WHERE remote_message_id != ''`,
+
+	// ── AGORA-322: peer timeline exchange ──────────────────────────────────
+	//
+	// Two independent directions, which is why they are two columns rather than
+	// one status. An admin here turning a peer's timeline on says nothing about
+	// whether that peer wants ours, and conflating them would have made one
+	// instance's decision silently change the other's outbound volume.
+	//
+	// On federated_instances rather than a table of their own, so peering stays
+	// in one place: direction (AGORA-321), disconnect (AGORA-320) and blocking
+	// already live here, and disconnecting a peer should stop the exchange
+	// without a second row having to be found and cleaned up.
+	//
+	// Both default false, including for peers that already exist. Turning this
+	// on changes what every local user sees in Explore, so it is not something
+	// an upgrade should decide on an admin's behalf.
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS timeline_exchange BOOLEAN NOT NULL DEFAULT false`,
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS carries_our_timeline BOOLEAN NOT NULL DEFAULT false`,
 }

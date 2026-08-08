@@ -1029,7 +1029,11 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		// check would (correctly, for every other sender) reject that
 		// outright, so relay-sourced Creates get their own ingestion path
 		// instead of weakening that check for everyone.
-		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+		// AGORA-322: a peer whose timeline we subscribe to is a relay source
+		// for ingest purposes. Same reasoning AGORA-222 applied to relays: the
+		// normal attributedTo == verifiedActor check would reject content
+		// forwarded on another author's behalf, which is exactly what this is.
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" || s.isTimelineExchangePeer(verifiedActor) {
 			s.ingestRelayForwardedCreate(a.Object)
 		} else {
 			s.handleInboundCreate(verifiedActor, a.Object, body)
@@ -1046,7 +1050,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		// against one of Agora's *own* posts (resolveFederatableTarget),
 		// which a relay-forwarded Announce (pointing at some other
 		// instance's post entirely) can never satisfy.
-		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
+		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" || s.isTimelineExchangePeer(verifiedActor) {
 			s.ingestRelayForwardedAnnounce(a.Object)
 		} else {
 			s.handleInboundAnnounce(a.ID, verifiedActor, a.Object)
@@ -1095,6 +1099,15 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 	// refused this one.
 	if friendRequest {
 		go s.registerInboundPeer(domain)
+	}
+
+	// AGORA-322: a Follow of this instance's own actor is a peer asking to
+	// carry our public posts, not a follow of anybody in particular. Checked
+	// before the user and page branches, since the instance actor URL is not a
+	// username and would otherwise fall through to nothing.
+	if objectURL == s.instanceActorURL() {
+		s.handleInboundFollowInstance(followID, followerActor)
+		return
 	}
 
 	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
@@ -1240,6 +1253,12 @@ func (s *Service) handleInboundUndoFollow(followerActor string, objectRaw json.R
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
 	}
+	// AGORA-322: a peer unsubscribing from this instance's timeline.
+	if objectURL == s.instanceActorURL() {
+		s.handleInboundUndoFollowInstance(followerActor)
+		return
+	}
+
 	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
 		var userID string
 		s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, username).Scan(&userID)

@@ -146,6 +146,25 @@ What is left is identification and peering, which were never part of the transpo
 
 **An inbound legacy activity** is no longer understood. It reaches `handleStandardInbox` and is refused as the unrecognised JSON it is, which is the intended outcome rather than a gap.
 
+## Peer timeline exchange (AGORA-322)
+
+An admin can turn a peer's public timeline on, and those posts then appear locally without any local user following anyone there. This is the cold-start problem: a new instance has a sparse Explore tab, and the only bulk alternative is a public relay, which brings the whole fediverse firehose. It also gives peering an observable purpose, since before this an admin added an instance and nothing happened.
+
+**It lands in Explore, never the home feed.** The home feed is friends and follows, and nothing an admin does should put content there. Explore already carries remote posts from any account this instance knows about.
+
+**The two directions are independent**, which is why they are two columns on `federated_instances` rather than one status:
+
+- `timeline_exchange`: our subscription to them. Turning it on sends a `Follow` from the instance actor (the relay handshake's shape, since that is what this is) and makes their signer a relay source for ingest, so `handleInboundCreate` takes the AGORA-222 path that does not require a local follower.
+- `carries_our_timeline`: their subscription to us, which they decide and we only report. Set when `handleInboundFollowInstance` accepts a `Follow` of `/federation/instance`.
+
+Conflating them would let one instance's admin silently change another's outbound delivery volume.
+
+Accepted from any instance that is not blocked: public posts are public and already readable through a user's outbox, so `isInstanceBlocked` remains the enforcement point. What a subscription adds is outbound volume, which is why an inbound one goes through `registerInboundPeer` and shows up in the Federation tab with the usual admin notification rather than in a separate, invisible subscriber list.
+
+Delivery folds into `enabledRelayInboxes`, which all three of Create, Update and Delete already call, rather than adding a second loop at each site: separating them was the shape most likely to end with a peer receiving posts but not their edits. Deduplicated, since a host can be both a peer and a relay. Blocking or disconnecting a peer clears both flags, so an unblock does not silently resume the exchange.
+
+Both default off, including for peers that already exist: turning this on changes what every local user sees in Explore.
+
 ## Direct messages (AGORA-323)
 
 Messages were local-only until AGORA-323: `internal/dm` had no `fedSender` at all, so a conversation with somebody on another instance was written here and never left. They now ride ActivityPub in the shape Mastodon already uses for a direct message: a `Create` carrying a `Note` addressed to exactly one actor, with no `Public` and no followers collection anywhere. A side effect of using the standard shape is that this works with Mastodon users too, not only with other Agora instances.

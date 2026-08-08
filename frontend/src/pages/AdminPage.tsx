@@ -939,12 +939,13 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock, onDisconnect }:
           This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
           instance, use the Fediverse tab's Instance Bans instead.
         </p>
-        {/* AGORA-322 tracks making peering carry public posts on its own. Until
-            it lands, say what connecting actually does rather than letting an
-            admin infer that timelines will start flowing. */}
+        {/* AGORA-322: peering can now carry a timeline, but only when an admin
+            turns it on for that peer. Connecting alone still does not, and
+            saying so is what keeps the toggle meaningful. */}
         <p className="text-xs text-agora-400">
           Connecting lets your users find and friend accounts on that instance, and posts flow between accounts
-          once a friend request is accepted. It does not by itself pull in that instance's public timeline.
+          once a friend request is accepted. It does not by itself pull in that instance's public timeline; each
+          peer has its own toggle for that, off by default.
         </p>
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
@@ -1013,6 +1014,12 @@ function InstanceRow({ inst, confirmingId, setConfirmingId, onBlock, onUnblock, 
 }) {
   const blocked   = inst.status === 'blocked'
   const confirming = confirmingId === inst.id
+  const qc = useQueryClient()
+
+  const setTimeline = useMutation({
+    mutationFn: (enabled: boolean) => adminApi.setInstanceTimeline(inst.id, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-fed'] }),
+  })
 
   return (
     <div className={`card p-3 ${blocked ? 'opacity-60' : ''}`}>
@@ -1035,6 +1042,20 @@ function InstanceRow({ inst, confirmingId, setConfirmingId, onBlock, onUnblock, 
           </p>
         </div>
         <div className="flex items-center gap-3 flex-shrink-0">
+          {/* AGORA-322: our subscription to them. Their subscription to us is
+              theirs to decide and is only reported, below. */}
+          {!blocked && (
+            <button
+              onClick={() => setTimeline.mutate(!inst.timeline_exchange)}
+              disabled={setTimeline.isPending}
+              title={inst.timeline_exchange
+                ? "Stop bringing this instance's public posts into Explore"
+                : "Bring this instance's public posts into Explore"}
+              className={`text-xs hover:underline ${inst.timeline_exchange ? 'text-agora-700 dark:text-agora-200 font-medium' : 'text-agora-500'}`}
+            >
+              {inst.timeline_exchange ? 'Carrying timeline' : 'Carry timeline'}
+            </button>
+          )}
           {!blocked
             ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline">Block</button>
             : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline">Unblock</button>}
@@ -1047,6 +1068,20 @@ function InstanceRow({ inst, confirmingId, setConfirmingId, onBlock, onUnblock, 
           )}
         </div>
       </div>
+
+      {/* Said once, under the row, rather than as two more badges beside the
+          status: these are the only two lines here that describe an ongoing
+          flow of content rather than a state. */}
+      {!blocked && (inst.timeline_exchange || inst.carries_our_timeline) && (
+        <div className="mt-2 pt-2 border-t border-agora-100 dark:border-agora-700/50 space-y-0.5 text-xs text-agora-400">
+          {inst.timeline_exchange && (
+            <p>Public posts from {inst.domain} appear in your Explore tab. They never enter anyone's home feed.</p>
+          )}
+          {inst.carries_our_timeline && (
+            <p>{inst.domain} carries this instance's public posts. They asked for this, and can stop at any time.</p>
+          )}
+        </div>
+      )}
 
       {confirming && (
         <div className="mt-3 pt-3 border-t border-agora-200 dark:border-agora-700 space-y-2">

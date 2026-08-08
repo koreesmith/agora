@@ -244,6 +244,8 @@ export const adminApi = {
   // AGORA-320: forget a peer, as distinct from blocking it. See the backend
   // handler for what is kept and what is removed.
   disconnectInstance: (id: string)             => api.delete(`/admin/federation/instances/${id}`),
+  // AGORA-322: per-peer timeline exchange, off by default.
+  setInstanceTimeline: (id: string, enabled: boolean) => api.put(`/admin/federation/instances/${id}/timeline`, { enabled }),
   resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
   // Instance rules
   listRules:   ()                               => api.get('/admin/rules'),

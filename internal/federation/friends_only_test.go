@@ -268,3 +268,64 @@ func TestIsThreadOwnerForwarding(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveFederatableTargetForSeparatesSignerFromActor covers AGORA-341's
+// split between who signed an interaction and whose relationship authorises it.
+// They are the same for a direct Like and differ for a forwarded one, and
+// conflating them either records the thread owner as having reacted to their
+// own post or refuses a legitimate forward.
+func TestResolveFederatableTargetForSeparatesSignerFromActor(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano() % 1_000_000
+
+	var authorID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("a341%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("insert author: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+	t.Cleanup(func() { db.Exec(`DELETE FROM friendships WHERE requester_id = $1 OR addressee_id = $1`, authorID) })
+
+	var postID string
+	if err := db.QueryRow(`
+		INSERT INTO posts (author_id, content, visibility) VALUES ($1,'hi','friends') RETURNING id
+	`, authorID).Scan(&postID); err != nil {
+		t.Fatalf("insert post: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, postID) })
+	// localPostIDFromURL only resolves the actor-scoped form the actor document
+	// itself emits: <instance>/federation/users/<name>/posts/<id>.
+	postURL := fmt.Sprintf("https://local.example/federation/users/a341%d/posts/%s", unique, postID)
+
+	domain := fmt.Sprintf("p341-%d.example", unique)
+	friendActor := "https://" + domain + "/federation/users/bob"
+	var friendID string
+	db.QueryRow(`INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+	             VALUES ($1,$1,'x',true,$2,$3) RETURNING id`,
+		fmt.Sprintf("f341%d", unique), domain, friendActor).Scan(&friendID)
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, friendID) })
+	db.Exec(`INSERT INTO friendships (requester_id,addressee_id,status) VALUES ($1,$2,'accepted')`, authorID, friendID)
+
+	strangerActor := "https://" + domain + "/federation/users/mallory"
+
+	t.Run("a friend's own reaction is authorised", func(t *testing.T) {
+		if _, _, ok := s.resolveFederatableTargetFor(friendActor, friendActor, postURL); !ok {
+			t.Error("refused an accepted friend reacting to a friends-only post")
+		}
+	})
+
+	t.Run("a stranger's own reaction is refused", func(t *testing.T) {
+		if _, _, ok := s.resolveFederatableTargetFor(strangerActor, strangerActor, postURL); ok {
+			t.Error("allowed a stranger to react to a friends-only post")
+		}
+	})
+
+	t.Run("a forward is authorised without any relationship to the liker", func(t *testing.T) {
+		// authorizeAs empty means the caller already verified thread ownership.
+		// The liker being unknown to us is expected and must not matter.
+		if _, _, ok := s.resolveFederatableTargetFor(strangerActor, "", postURL); !ok {
+			t.Error("refused a forwarded reaction, so counts stay inconsistent across the thread")
+		}
+	})
+}

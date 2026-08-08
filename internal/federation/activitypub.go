@@ -990,6 +990,11 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		// of this exchange are Agora. Absent on every Follow from anywhere
 		// else, which is exactly the intended degradation.
 		FriendRequest bool `json:"agora:friendRequest"`
+		// AGORA-341: the activity's own actor, needed to tell a Like sent by
+		// its liker apart from one forwarded by a thread owner on their behalf.
+		// verifiedActor is who signed; this is who acted, and for a forward
+		// they differ.
+		Actor string `json:"actor"`
 	}
 	if err := json.Unmarshal(body, &a); err != nil {
 		writeError(w, 400, "invalid activity")
@@ -1032,7 +1037,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 	case "Delete":
 		s.handleInboundAPDelete(verifiedActor, a.Object)
 	case "Like":
-		s.handleInboundLike(verifiedActor, a.Object)
+		s.handleInboundLike(verifiedActor, a.Actor, a.Object, body)
 	case "Announce":
 		// AGORA-222: mirrors the relay check on Create above —
 		// handleInboundAnnounce only ever resolves an Announce's object
@@ -2289,6 +2294,18 @@ func HTMLToPlainText(s string) string {
 // Announce, which (unlike Create) only ever target a post directly, never a
 // remote-comment reply chain, so this is simpler than resolveReplyTarget.
 func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (postID, postAuthorID string, ok bool) {
+	return s.resolveFederatableTargetFor(verifiedActor, verifiedActor, objectURL)
+}
+
+// resolveFederatableTargetFor separates the signer from the party whose
+// relationship to the author is being checked (AGORA-341).
+//
+// They are the same for every direct interaction, which is what
+// resolveFederatableTarget passes. They differ for a forwarded one, where the
+// signer is the thread's owner and authorizeAs is empty, because ownership has
+// already been verified and no relationship to the liker is required or
+// meaningful.
+func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, objectURL string) (postID, postAuthorID string, ok bool) {
 	if s.isInstanceBlocked(domainFromURL(verifiedActor)) {
 		return "", "", false
 	}
@@ -2316,13 +2333,18 @@ func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (pos
 	// Friends-only opens to the author's accepted friends and nobody else,
 	// which is the same rule that decided who could see the post. Everything
 	// with no federated audience yet ('group', 'private') stays closed.
-	switch visibility {
-	case "public":
+	switch {
+	case authorizeAs == "":
+		// Forwarded: authorised by thread ownership, verified by the caller.
+		if visibility != "friends" {
+			return "", "", false
+		}
+	case visibility == "public":
 		if profilePrivate {
 			return "", "", false
 		}
-	case "friends":
-		if !s.isAcceptedFriendByActor(postAuthorID, verifiedActor) {
+	case visibility == "friends":
+		if !s.isAcceptedFriendByActor(postAuthorID, authorizeAs) {
 			return "", "", false
 		}
 	default:
@@ -2331,16 +2353,38 @@ func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (pos
 	return postID, postAuthorID, true
 }
 
-func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMessage) {
+func (s *Service) handleInboundLike(verifiedActor, activityActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var objectURL string
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
 	}
-	postID, postAuthorID, ok := s.resolveFederatableTarget(verifiedActor, objectURL)
+
+	// AGORA-341: reactions fan out the same way replies do (AGORA-340), and so
+	// need the same distinction between who signed and who acted. Without it a
+	// forwarded Like would be recorded as the thread owner reacting to their
+	// own post, and Carol's reaction count would still disagree with Alice's,
+	// just for a different reason.
+	liker := activityActor
+	if liker == "" {
+		liker = verifiedActor
+	}
+	forwarded := liker != verifiedActor
+	if forwarded && !s.isThreadOwnerForwarding(verifiedActor, objectURL) {
+		return
+	}
+
+	// A forwarded Like is authorised by thread ownership, already checked, so
+	// it is the signer's own right to speak for this thread that is verified
+	// rather than the liker's relationship to us.
+	authorizeAs := verifiedActor
+	if forwarded {
+		authorizeAs = ""
+	}
+	postID, postAuthorID, ok := s.resolveFederatableTargetFor(verifiedActor, authorizeAs, objectURL)
 	if !ok {
 		return
 	}
-	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	remoteUserID, err := s.getOrCreateRemoteAPUser(liker, postAuthorID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -2362,6 +2406,15 @@ func (s *Service) handleInboundLike(verifiedActor string, objectRaw json.RawMess
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
 	if n, _ := res.RowsAffected(); n == 0 {
 		return // already liked — redelivery, don't re-notify
+	}
+
+	// AGORA-341: forward to the rest of the audience, so a reaction count means
+	// the same thing on every instance in the thread. Gated on this being a
+	// genuinely new reaction, since the redelivery return above is what keeps a
+	// retried Like from being fanned out repeatedly. Never re-forwards a
+	// forward, for the same reason replies do not.
+	if !forwarded && len(rawActivity) > 0 {
+		go s.FanOutThreadReply(postID, liker, rawActivity)
 	}
 
 	if s.notif != nil && postAuthorID != remoteUserID {

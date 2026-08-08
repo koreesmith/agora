@@ -1083,6 +1083,18 @@ func (s *Service) handleInboundFollow(followID, followerActor string, objectRaw 
 		friendRequest = false
 	}
 
+	// AGORA-330: an inbound friend request is an Agora instance introducing
+	// itself, and is now what registers a first contact. That used to fall out
+	// of fetching the sender's legacy signing key, which no longer happens.
+	//
+	// Deliberately after the gate above, and conditioned on the request having
+	// survived it: registering a refused sender would enrol them as a peer and
+	// let the next request through, quietly undoing the setting that just
+	// refused this one.
+	if friendRequest {
+		go s.registerInboundPeer(domain)
+	}
+
 	if username := usernameFromActorURL(objectURL, s.cfg.InstanceDomain); username != "" {
 		s.handleInboundFollowUser(followID, followerActor, objectURL, username, friendRequest)
 		return
@@ -1792,6 +1804,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		if postID != "" && note.Audience == "list" {
 			n := s.recordPostAudience(postID, append(append([]string{}, note.To...), note.CC...))
 			log.Printf("federation: list post %s addressed to %d local user(s)", note.ID, n)
+		}
+
+		// AGORA-330: an audience marker is Agora vocabulary, so a post carrying
+		// one is the other first-contact signal, alongside a friend request.
+		// Nothing is gated on it; it is what puts the sender in the Federation
+		// tab so an admin can see who is talking to them.
+		if note.Audience != "" {
+			go s.registerInboundPeer(domainFromURL(verifiedActor))
 		}
 		return
 	}
@@ -4400,6 +4420,12 @@ func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
 // process. Shares enqueueAPDelivery's ap_blocked_by guard rather than
 // duplicating it, since that is the one central check every outbound path
 // depends on.
+// maxDeliveryAttempts caps retries before an activity is abandoned. Shared by
+// the drain query's own filter and its abandonment log so the two cannot drift.
+// Defined here since AGORA-330: it used to live with the legacy queue, which was
+// the last thing that needed it besides this one.
+const maxDeliveryAttempts = 10
+
 func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) {
 	var blocked bool
 	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_inbox_url = $2 AND blocker_inbox_url != '')`,

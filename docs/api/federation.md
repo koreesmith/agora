@@ -1,6 +1,6 @@
 # Federation API
 
-Two protocols share this surface: **standard ActivityPub** (talks to Mastodon and the rest of the real fediverse) and a **legacy custom Agora-to-Agora protocol** (older, only talks to other Agora instances, not extended further). Public endpoints don't require auth — signature verification (HTTP Signatures for ActivityPub, Ed25519 for the legacy protocol) substitutes for it. For the third protocol Agora speaks — native AT Protocol/Bluesky — see [AT Protocol API](atproto.md).
+This surface speaks **standard ActivityPub**, to Mastodon and the rest of the fediverse and, since AGORA-330, to other Agora instances too. Public endpoints don't require auth: HTTP Signature verification substitutes for it. For the third protocol Agora speaks (native AT Protocol/Bluesky), see [AT Protocol API](atproto.md).
 
 ---
 
@@ -59,7 +59,7 @@ NodeInfo discovery document (AGORA-171).
 
 ### `GET /federation/users/{handle}`
 
-Content-negotiated. `Accept: application/activity+json` (or `application/ld+json`) returns the ActivityPub actor document; anything else returns the legacy flat-JSON profile.
+Content-negotiated. `Accept: application/activity+json` (or `application/ld+json`) returns the ActivityPub actor document; anything else returns Agora's own flat-JSON profile.
 
 **Actor document (200):**
 ```json
@@ -90,7 +90,7 @@ A `Collection` of the user's followers (count + first page of actor URLs).
 
 ### `GET /federation/pages/{slug}`, `.../outbox`, `.../followers`
 
-Same three shapes, for a page's own actor — always ActivityPub JSON, no legacy fallback.
+Same three shapes, for a page's own actor. Always ActivityPub JSON, with no flat-JSON alternative.
 
 ---
 
@@ -122,9 +122,7 @@ Receives activities from remote instances — **shared by both protocols**, rout
 ```
 Handled types: `Follow`, `Undo(Follow|Like|Announce|Block)`, `Create`, `Update`, `Delete`, `Like`, `Announce`, `Block`, `Accept(Follow)`, `Reject(Follow)`.
 
-**Legacy custom-protocol body**, see below.
-
-**Response 202** on acceptance (both protocols always report success once past signature verification — a not-applicable activity is a silent no-op, not an error, since remote redelivery/unknown-type activities are expected traffic, not client mistakes). **Response 401** if signature invalid. **Response 403** if the sending instance is blocked. **Response 404** if the relevant protocol isn't enabled instance-wide.
+**Response 202** on acceptance (always reports success once past signature verification: a not-applicable activity is a silent no-op, not an error, since remote redelivery/unknown-type activities are expected traffic, not client mistakes). **Response 401** if signature invalid. **Response 403** if the sending instance is blocked. **Response 404** if ActivityPub isn't enabled instance-wide.
 
 ---
 
@@ -132,7 +130,7 @@ Handled types: `Follow`, `Undo(Follow|Like|Announce|Block)`, `Create`, `Update`,
 
 ### `GET /federation/lookup?handle=user@instance.com`
 
-Resolves a remote handle via the legacy protocol's own instance-info exchange (distinct from `ap-lookup` below).
+Resolves `user@instance` to a local row for another Agora instance's user, creating or refreshing the cached copy. Since AGORA-330 it resolves through WebFinger and the actor document, the same route as `ap-lookup`, so a handle reached this way and a handle reached over ActivityPub are one identity rather than two rows for one person.
 
 ### `GET /federation/ap-lookup?handle=user@instance.com`
 
@@ -182,15 +180,17 @@ Flips per-account notification opt-in (AGORA-166) — independent of the account
 
 ### `GET /federation/search?q=...`
 
-Searches local public users — used by remote instances resolving who to friend under the legacy protocol.
+Searches local public users. Used by other Agora instances resolving who to friend.
 
 ---
 
-## Legacy Agora-to-Agora protocol
+## Agora-to-Agora peering
+
+Agora instances recognise each other and federate as peers over ActivityPub. The custom Ed25519-signed protocol that used to live here (activity types `post`, `delete_post`, `friend_request`, `friend_accept`, `profile_update`, with the signature carried in the body's own `signature` field) was removed in AGORA-330. An activity in that shape now reaches the ActivityPub handler and is refused as unrecognised JSON. See [ADR-002](../adr/002-agora-to-agora-federation-protocol.md) for what replaced it.
 
 ### `GET /.well-known/agora-instance`
 
-Public instance metadata, Ed25519 public key. Used by remote *Agora* instances to discover this one before verifying its signed activities.
+Public instance metadata. Only Agora serves this, so answering it is how one instance recognises another as Agora, and it is where the peering UI reads an instance's name and rules.
 
 **Response 200:**
 ```json
@@ -198,48 +198,11 @@ Public instance metadata, Ed25519 public key. Used by remote *Agora* instances t
   "domain": "agora.example.com",
   "name": "My Agora Instance",
   "description": "string",
-  "public_key": "base64-encoded Ed25519 public key",
-  "api_version": "1",
+  "api_version": "2",
   "user_count": 42,
   "software": "agora",
   "rules": ["Be kind", "No spam"]
 }
 ```
 
-### Legacy `POST /federation/inbox` body
-
-```json
-{
-  "type": "post|delete_post|friend_request|friend_accept|profile_update",
-  "actor": "username@remote.instance",
-  "instance": "remote.instance",
-  "public_key": "base64",
-  "timestamp": "ISO8601",
-  "data": { ... }
-}
-```
-**Signature:** carried in the body's own `signature` field (base64 Ed25519), not in a header. The `X-Agora-Signature` header previously documented here has never existed in the code.
-
-The signed bytes are the request body re-serialized from a JSON object with the `signature` field removed, which makes the signature independent of key order and whitespace (see `canonicalActivity`, AGORA-316). Signing the raw body as received would not interoperate: the sender's own queue table normalizes the document before it is ever sent.
-
-### Legacy activity data payloads
-
-**`post`**
-```json
-{ "id": "remote-post-id", "content": "string", "image_url": "string", "created_at": "timestamp" }
-```
-
-**`delete_post`**
-```json
-{ "post_id": "remote-post-id" }
-```
-
-**`friend_request`** / **`friend_accept`**
-```json
-{ "from_handle": "user@remote.instance", "to_username": "local_username" }
-```
-
-**`profile_update`**
-```json
-{ "display_name": "string", "bio": "string", "avatar_url": "string" }
-```
+`public_key` is gone as of `api_version` 2: it published the instance-wide Ed25519 key the removed transport signed with, and nothing signs with one now. Agora-to-Agora activities are authenticated by the same per-actor HTTP Signatures as the rest of the fediverse. An instance still on `api_version` 1 will publish the field; it is ignored.

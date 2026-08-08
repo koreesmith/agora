@@ -1,6 +1,6 @@
 # ADR-002: Agora-to-Agora Federation Protocol
 
-**Status:** Proposed
+**Status:** Accepted, and implemented as of AGORA-330
 **Ticket:** AGORA-326
 **Date:** 2026-08-07
 **Supersedes:** the implicit "two protocols side by side" arrangement that has existed since AGORA-145
@@ -288,6 +288,13 @@ Step 1 is independent of everything after it and should not wait. Step 3 depends
 Step 4 has a real precondition rather than a nominal one: the overlap release exists so that the two instances can be upgraded at different times, and deleting the inbound handlers before both are on the step 2 build breaks federation between them for exactly as long as the lag lasts. There is no benefit to going early.
 
 Peer timeline exchange (AGORA-322) is independent of this sequence and can land whenever, since it is built entirely on the ActivityPub side.
+
+**All four steps have landed.** Step 3 grew into AGORA-337 (friends-only posts), AGORA-339 (interaction), AGORA-340 and AGORA-341 (reply and reaction fan-out) and AGORA-342 (friend-list audiences), which is the deciding requirement this ADR was written to satisfy. Step 4 removed the transport, its inbox branch and handlers, its queue table and the instance-wide keypair.
+
+Two things came out of step 4 that the sequence above did not anticipate:
+
+- **First-contact registration had to be rehomed.** It was a side effect of fetching a peer's legacy signing key, so deleting the transport would have silently taken the Federation tab's inbound direction, the admin notification, and the `peered_only` check with it. It is now `registerInboundPeer`, called from the ActivityPub activities that carry Agora vocabulary.
+- **Cross-instance handle lookup was the last source of duplicate identities.** `LookupUser` created a stub keyed on `(remote_user_id, remote_instance)` with no actor URL, so looking somebody up and then meeting them over ActivityPub produced two rows for one person. It now resolves through WebFinger and the actor document. Rows created the old way still exist, still hold real friendships, and are bridged rather than migrated.
 
 ---
 

@@ -1,12 +1,8 @@
 package federation
 
 import (
-	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
-
-	"github.com/agora-social/agora/internal/store"
 )
 
 // AGORA-331: a locally uploaded avatar is stored as a relative /uploads/...
@@ -17,7 +13,10 @@ import (
 //
 // AGORA-327 removed the broadcast, but the receiver is the side that can
 // actually repair it, because it knows which domain the path belongs to. That
-// guard is what these tests cover: an instance still on an older build will
+// guard is what this test covers. AGORA-330 removed the handler that a second
+// test here drove, along with the rest of the legacy transport; the helper it
+// was really about is still exercised below, and syncStaleRemoteUsers is now
+// the path that repairs an already-corrupted stub. An instance on an older build will
 // keep sending relative paths for as long as it takes them to upgrade.
 //
 // This is the second time this defect class has shipped (AGORA-312 fixed it on
@@ -56,48 +55,6 @@ func TestRemoteAbsoluteURL(t *testing.T) {
 			t.Errorf("got %q, want the input unchanged rather than a malformed URL", got)
 		}
 	})
-}
-
-// TestInboundProfileUpdateAbsolutizesAvatar drives the real handler, since the
-// bug was not in the helper (which did not exist) but in the handler storing
-// what it was given.
-//
-// Requires the local agora-postgres-test instance (localhost:15433); skips if
-// it isn't reachable rather than failing the suite.
-func TestInboundProfileUpdateAbsolutizesAvatar(t *testing.T) {
-	db, err := store.Open("postgres://agora:agora@localhost:15433/agora_test?sslmode=disable")
-	if err != nil {
-		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := db.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	s := &Service{db: db}
-	instance := fmt.Sprintf("agora331-%d.example", time.Now().UnixNano())
-
-	id := s.getOrCreateRemoteUser("alice", instance)
-	if id == "" {
-		t.Fatal("could not create the remote stub")
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
-
-	obj, _ := json.Marshal(map[string]string{
-		"handle":       "alice",
-		"display_name": "Alice",
-		"avatar_url":   "/uploads/avatar/new.jpg",
-		"bio":          "hi",
-	})
-	s.handleInboundProfileUpdate(Activity{Type: "profile_update", InstanceID: instance, Object: obj})
-
-	var avatar string
-	db.QueryRow(`SELECT avatar_url FROM users WHERE id = $1`, id).Scan(&avatar)
-
-	want := "https://" + instance + "/uploads/avatar/new.jpg"
-	if avatar != want {
-		t.Errorf("avatar_url = %q, want %q.\nA relative path stored here is requested from THIS instance's domain and 404s.", avatar, want)
-	}
 }
 
 // TestPublishedAtClampIsOneSided covers AGORA-332. The asymmetry is the whole

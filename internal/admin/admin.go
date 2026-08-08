@@ -391,12 +391,16 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// AGORA-324: resolution, host validation and Ed25519 key checking all live
-	// in federation.FetchInstanceInfo, behind the SSRF-safe dialer. This used
+	// AGORA-324: resolution and host validation live in
+	// federation.FetchInstanceInfo, behind the SSRF-safe dialer. This used
 	// to be a bare http.Client here with no host validation at all, so a
 	// domain resolving to loopback or the cloud metadata endpoint was fetched
 	// and partly echoed back in the response.
-	domain, name, publicKey, err := s.fed.FetchInstanceInfo(req.Domain)
+	//
+	// AGORA-330: the third return was the peer's Ed25519 key and is now always
+	// empty, since neither side signs with one. Discarded here rather than
+	// changing the signature, which several callers share.
+	domain, name, _, err := s.fed.FetchInstanceInfo(req.Domain)
 	if err != nil {
 		writeError(w, 422, "could not reach instance. Make sure it is an Agora instance with federation enabled ("+err.Error()+")")
 		return
@@ -406,14 +410,17 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 	// AGORA-321: adding from here is an outbound peering. If they had already
 	// contacted us the row exists as 'inbound', and adding them makes it
 	// mutual rather than overwriting how it started.
+	// AGORA-330: public_key is no longer written. It held the peer's
+	// instance-wide Ed25519 key for the legacy transport, which is gone; the
+	// column stays only so an upgrade does not have to rewrite the table.
 	s.db.Exec(`
-		INSERT INTO federated_instances (domain, name, public_key, instance_url, status, direction)
-		VALUES ($1, $2, $3, $4, 'active', 'outbound')
+		INSERT INTO federated_instances (domain, name, instance_url, status, direction)
+		VALUES ($1, $2, $3, 'active', 'outbound')
 		ON CONFLICT (domain) DO UPDATE
-		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW(),
+		  SET name = $2, instance_url = $3, status = 'active', last_seen_at = NOW(),
 		      direction = CASE WHEN federated_instances.direction = 'inbound' THEN 'mutual'
 		                       ELSE 'outbound' END
-	`, domain, name, publicKey, instanceURL)
+	`, domain, name, instanceURL)
 
 	actorID := auth.UserIDFromCtx(r.Context())
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'add_instance', 'instance', $2, $3)`,
@@ -501,9 +508,7 @@ func (s *Service) UnblockInstance(w http.ResponseWriter, r *http.Request) {
 // Remote accounts cached from that instance and their posts are deliberately
 // kept: a local user may be friends with them, and deleting would destroy
 // those friendships and their content as a side effect of an admin tidying up
-// a peer list. Re-peering then simply works. The delivery queue is cleared,
-// since those rows would otherwise retry against a peer that no longer exists
-// until they exhaust their attempts.
+// a peer list. Re-peering then simply works.
 func (s *Service) DisconnectInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	actorID := auth.UserIDFromCtx(r.Context())
@@ -523,7 +528,6 @@ func (s *Service) DisconnectInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "could not disconnect instance")
 		return
 	}
-	s.db.Exec(`DELETE FROM federation_queue WHERE instance_url = $1`, "https://"+domain)
 
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'disconnect_instance', 'instance', $2)`,
 		actorID, domain)

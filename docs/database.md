@@ -33,11 +33,11 @@ Migrations run automatically at startup via `store.Migrate()` in `internal/store
 | `is_remote` | boolean | User from federated instance (fediverse or Bluesky) |
 | `remote_instance` | text | Domain of remote instance — literal `bsky.app` for a Bluesky account stub |
 | `remote_user_id` | text | ID on remote instance |
-| `public_key` | text | Ed25519 public key (base64) — legacy Agora-to-Agora protocol only |
-| `private_key` | text | Ed25519 private key (admin user only) — legacy Agora-to-Agora protocol only |
+| `public_key` | text | Unused since AGORA-330. Held an Ed25519 key for the removed Agora-to-Agora transport. |
+| `private_key` | text | Unused since AGORA-330, as above. |
 | `ap_actor_url` | text | This user's own ActivityPub actor URL, or (for a remote stub) the followed/interacted-with actor's URL |
 | `ap_inbox_url` | text | Corresponding inbox URL |
-| `federation_public_key` / `federation_private_key` | text | Per-actor RSA keypair (PEM), used for standard ActivityPub HTTP Signatures — distinct from the instance-wide Ed25519 `public_key`/`private_key` above. Lazily generated on first use. |
+| `federation_public_key` / `federation_private_key` | text | Per-actor RSA keypair (PEM), used for standard ActivityPub HTTP Signatures. Load-bearing, and not to be confused with the disused `public_key`/`private_key` above. Lazily generated on first use. |
 | `activitypub_enabled` | boolean | Per-account opt-out for standard ActivityPub (default `true`) |
 | `fediverse_notifications_enabled` | boolean | Global kill switch for notifications about *followed* fediverse accounts' new posts (default `true`) — independent of `activitypub_enabled`, which governs whether your own posts federate |
 | `emojis` | jsonb | Resolved Mastodon custom-emoji shortcode → image URL map for this user's `display_name`/`bio` (default `{}`) |
@@ -369,18 +369,16 @@ Key values include: `instance_name`, `instance_description`, `registration_mode`
 
 ---
 
-### `federation_queue`
+### `post_audience`
+
+Who a limited-audience post from another Agora instance was addressed to (AGORA-342). The post itself is stored with `visibility = 'private'`, so it is hidden by every feed filter by default and becomes visible only through a row here. A friends-only post needs no rows: both ends can derive that audience from the friendship. A friend-list post cannot, since the author's list does not exist on this instance, and ADR-002 deliberately keeps its membership off the wire.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | uuid PK | |
-| `target_instance` | text | Domain to deliver to |
-| `activity` | jsonb | Activity payload |
-| `attempts` | int | Delivery attempt count |
-| `last_attempt_at` | timestamptz | |
-| `created_at` | timestamptz | |
+| `post_id` | uuid FK→posts | Part of PK, `ON DELETE CASCADE` |
+| `user_id` | uuid FK→users | Part of PK, `ON DELETE CASCADE` |
 
-Retried up to 10 times with backoff. Abandoned after 10 failures.
+---
 
 ### `federated_instances`
 
@@ -388,9 +386,10 @@ Retried up to 10 times with backoff. Abandoned after 10 failures.
 |--------|------|-------------|
 | `id` | uuid PK | |
 | `domain` | text UNIQUE | |
-| `public_key` | text | Ed25519 public key (base64) |
+| `public_key` | text | Blanked and no longer written by AGORA-330. Held the peer's key for the removed transport; the column is retained so an upgrade need not rewrite the table. |
 | `name` | text | Instance display name |
-| `is_blocked` | boolean | Legacy Agora-to-Agora protocol block — see `instance_bans` below for the unified fediverse block, which also covers ActivityPub |
+| `direction` | varchar(10) | `outbound` (an admin added them), `inbound` (they contacted us first), `mutual`, or `unknown` for rows predating AGORA-321 |
+| `is_blocked` | boolean | Blocks this peer. See `instance_bans` below for the unified fediverse block, which also covers ActivityPub |
 | `last_seen_at` | timestamptz | |
 | `created_at` | timestamptz | |
 
@@ -416,7 +415,7 @@ Local users following a **remote** fediverse actor — the reverse of `ap_follow
 
 ### `ap_delivery_queue` / `page_ap_delivery_queue` / `instance_ap_delivery_queue`
 
-Outbound ActivityPub delivery queues — separate from the legacy `federation_queue` because HTTP Signatures must be computed at *send* time (a fresh `Date` header per attempt), not once at enqueue. Same shape for all three, differing only in owner column: `actor_user_id` FK→users / `actor_page_id` FK→pages / none (there's only ever one instance actor). Columns: `id`, owner FK, `inbox_url`, `activity` jsonb, `attempts` int, `last_error`, `next_attempt`, `created_at`.
+Outbound ActivityPub delivery queues. HTTP Signatures must be computed at *send* time (a fresh `Date` header per attempt), not once at enqueue, which is why the activity is stored unsigned and the drain signs it. (Agora once had a second queue, `federation_queue`, for the custom Agora-to-Agora transport; AGORA-330 dropped both it and the transport.) Same shape for all three, differing only in owner column: `actor_user_id` FK→users / `actor_page_id` FK→pages / none (there's only ever one instance actor). Columns: `id`, owner FK, `inbox_url`, `activity` jsonb, `attempts` int, `last_error`, `next_attempt`, `created_at`.
 
 ### `ap_blocked_by`
 

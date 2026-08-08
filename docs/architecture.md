@@ -163,21 +163,25 @@ See [Federation API](api/federation.md), [AT Protocol API](api/atproto.md), and 
 
 ## Federation Flow
 
-The legacy Agora-to-Agora protocol, unchanged since before ActivityPub support — see [Federation Service → Legacy protocol](backend/federation.md#legacy-agora-to-agora-protocol) for how a shared `POST /federation/inbox` routes between this and standard ActivityPub:
+Agora speaks one protocol outward: ActivityPub, with Agora vocabulary only where the standard has no equivalent. That includes talking to other Agora instances, which until AGORA-330 used a custom Ed25519-signed protocol of their own. See [ADR-002](adr/002-agora-to-agora-federation-protocol.md) for the decision and [Federation Service](backend/federation.md) for the shape.
 
 ```
 Outbound:
   Service (feed/friends/users)
-      └── fedSvc.BroadcastToFriendInstances(userID, activity)
-              └── signs activity with Ed25519 private key
-              └── POST to remote /federation/inbox
-              └── on failure: queues in federation_queue for retry (up to 10 attempts)
+      └── fedSvc.BroadcastPublicPost / BroadcastFriendsPost / BroadcastListPost
+      └── fedSvc.SendFriendRequest / SendFriendAccept / SendFriendUndo
+              └── addresses the recipients directly (no Public for a limited audience)
+              └── enqueueAPDelivery → ap_delivery_queue
+              └── drainAPQueue signs per-actor (RSA, HTTP Signatures) at send time
+                  and retries with backoff, up to maxDeliveryAttempts
 
 Inbound:
   POST /federation/inbox
-      └── fedSvc.verifyActivity()  →  fetch remote public key from /.well-known/agora-instance
-      └── validate Ed25519 signature
-      └── route by activity.Type: post | delete_post | friend_request | friend_accept | profile_update
+      └── handleStandardInbox → HTTP Signature verification against the actor's key
+      └── route by activity type: Create | Update | Delete | Follow | Accept | Undo | Like | Announce
+      └── Agora extensions read off the same activities:
+            agora:friendRequest  → a Follow that is also a friend request
+            agora:audience       → friends-only or friend-list, enforced on receipt
 ```
 
 Standard ActivityPub (Mastodon and the rest of the fediverse) uses per-actor RSA keys and HTTP Signatures instead, and AT Proto (Bluesky) uses a completely different model — a per-user signed repo, not activity delivery at all. See [Federation Service](backend/federation.md) and [AT Protocol Service](backend/atproto.md) for both.

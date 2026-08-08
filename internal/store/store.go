@@ -354,18 +354,6 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_rules_position ON instance_rules(position ASC)`,
 
-	// Outbound federation queue — retry table for failed/pending sends
-	`CREATE TABLE IF NOT EXISTS federation_queue (
-		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
-		instance_url  TEXT        NOT NULL,
-		payload       JSONB       NOT NULL,
-		attempts      INT         NOT NULL DEFAULT 0,
-		last_error    TEXT        NOT NULL DEFAULT '',
-		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_fed_queue_next ON federation_queue(next_attempt ASC) WHERE attempts < 10`,
-
 	// Track when remote user profiles were last synced
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
 
@@ -1381,4 +1369,31 @@ var schema = []string{
 		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_321_instance_direction')`,
 	`INSERT INTO schema_backfills (name) VALUES ('agora_321_instance_direction')
 		ON CONFLICT (name) DO NOTHING`,
+
+	// ── AGORA-330: the legacy Agora-to-Agora transport is gone ──────────────
+	//
+	// Nothing signs, verifies, queues or dispatches one of its activities any
+	// more, so the storage it needed goes with it rather than sitting around as
+	// a thing a future reader has to work out the status of.
+	//
+	// The instance-wide Ed25519 keypair goes first and deliberately. A signing
+	// key that nothing signs with is worse than dead weight: it is a credential
+	// with no owner, and AGORA-143 already had to specially exclude it from the
+	// admin settings API to keep it from being read back over HTTP. Deleting it
+	// is the point of this step, not tidying afterwards.
+	//
+	// Note this is instance_settings, not the users/pages columns of the same
+	// name. Those hold the per-actor RSA keys that ActivityPub's HTTP Signatures
+	// sign with, which are load-bearing and stay.
+	`DELETE FROM instance_settings WHERE key IN ('federation_public_key', 'federation_private_key')`,
+
+	// Anything still queued here was undeliverable regardless: the receiving end
+	// of this protocol no longer exists on either instance.
+	`DROP TABLE IF EXISTS federation_queue`,
+
+	// federated_instances.public_key held the peer's key for the same protocol
+	// and is no longer written. The column stays, blanked: dropping a column
+	// from a live table earns nothing here, and an empty value says "not used"
+	// as clearly as a missing column would.
+	`UPDATE federated_instances SET public_key = '' WHERE public_key != ''`,
 }

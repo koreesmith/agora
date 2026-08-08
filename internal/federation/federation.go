@@ -1,11 +1,7 @@
 package federation
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
@@ -84,12 +81,6 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pubKey, _, err := s.getOrCreateKeyPair()
-	if err != nil {
-		writeError(w, 500, "key error")
-		return
-	}
-
 	var name, description string
 	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_name'`).Scan(&name)
 	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_description'`).Scan(&description)
@@ -114,8 +105,11 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 		"domain":      domainFromURL(s.cfg.InstanceDomain),
 		"name":        name,
 		"description": description,
-		"public_key":  base64.StdEncoding.EncodeToString(pubKey),
-		"api_version": "1",
+		// AGORA-330: no public_key. It existed only for the legacy transport's
+		// Ed25519 signature, and an instance-wide signing key that nothing signs
+		// with is a liability rather than a leftover. Agora-to-Agora traffic is
+		// ActivityPub now, authenticated by per-actor HTTP Signatures.
+		"api_version": "2",
 		"user_count":  userCount,
 		"software":    "agora",
 		"rules":       rules,
@@ -169,21 +163,16 @@ func (s *Service) NodeInfo(w http.ResponseWriter, r *http.Request) {
 
 // ── Inbox (receives activities from remote instances) ─────────────────────────
 
-type Activity struct {
-	Type       string          `json:"type"`
-	Actor      string          `json:"actor"`
-	Object     json.RawMessage `json:"object"`
-	InstanceID string          `json:"instance_id"`
-	Timestamp  int64           `json:"timestamp"`
-	Signature  string          `json:"signature"`
-}
-
+// Inbox is the shared inbox. Since AGORA-330 it speaks one protocol.
+//
+// It used to read the body, probe it, and branch: an activity with a @context
+// went to ActivityPub, anything else was treated as a legacy Agora-to-Agora
+// activity and verified against an instance-wide Ed25519 key. That second path
+// and everything under it is gone, so a legacy activity now falls to
+// handleStandardInbox, which refuses it as the unrecognised JSON it is. That is
+// the intended outcome: a clean rejection rather than a partial understanding.
 func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
-	// AGORA-156: the two protocols sharing this endpoint are gated
-	// independently — federation_enabled for the old custom Agora-to-Agora
-	// activities, activitypub_enabled for standard ActivityPub — so read the
-	// body and figure out which one this is before gating on either.
-	if !s.federationEnabled() && !s.activityPubEnabled() {
+	if !s.activityPubEnabled() {
 		writeError(w, 404, "federation not enabled")
 		return
 	}
@@ -194,159 +183,14 @@ func (s *Service) Inbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Standard ActivityPub activities (from Mastodon etc.) are verified via
-	// HTTP Signatures, not the custom protocol's embedded-JSON-field Ed25519
-	// signature below — detect and branch before the custom verification path
-	// ever runs, since a standard activity has no "signature"/"instance_id"
-	// fields and would otherwise always fail it.
-	var probe struct {
-		Context json.RawMessage `json:"@context"`
-		Type    string          `json:"type"`
-	}
-	json.Unmarshal(body, &probe)
-	if len(probe.Context) > 0 || probe.Type == "Follow" || probe.Type == "Undo" {
-		if !s.activityPubEnabled() {
-			writeError(w, 404, "federation not enabled")
-			return
-		}
-		s.handleStandardInbox(w, r, body)
-		return
-	}
-
-	if !s.federationEnabled() {
-		writeError(w, 404, "federation not enabled")
-		return
-	}
-
-	var activity Activity
-	if err := json.Unmarshal(body, &activity); err != nil {
-		writeError(w, 400, "invalid activity")
-		return
-	}
-
-	if err := s.verifyActivity(body, activity); err != nil {
-		log.Printf("federation: signature verification failed from %s: %v", activity.InstanceID, err)
-		writeError(w, 401, "invalid signature")
-		return
-	}
-
-	if s.isInstanceBlocked(activity.InstanceID) {
-		writeError(w, 403, "instance is blocked")
-		return
-	}
-
-	s.db.Exec(`UPDATE federated_instances SET last_seen_at = NOW() WHERE domain = $1`, activity.InstanceID)
-
-	payload, _ := json.Marshal(activity)
-	s.db.Exec(`INSERT INTO audit_log (action, target_type, target_id, details) VALUES ('federation_inbox', 'activity', $1, $2)`,
-		activity.Type, string(payload))
-
-	switch activity.Type {
-	case "post":
-		s.handleInboundPost(activity)
-	case "delete_post":
-		s.handleInboundDelete(activity)
-	case "friend_request":
-		s.handleInboundFriendRequest(activity)
-	case "friend_accept":
-		s.handleInboundFriendAccept(activity)
-	case "profile_update":
-		s.handleInboundProfileUpdate(activity)
-	default:
-		// AGORA-325: still a 202 below, since an unknown type is expected traffic
-		// from a peer on a newer version, not a client error. Silently
-		// discarding it left no way to tell "they sent nothing" apart from
-		// "they sent something we don't understand".
-		log.Printf("federation: ignoring unknown activity type %q from %s", activity.Type, activity.InstanceID)
-	}
-
-	writeJSON(w, 202, map[string]string{"message": "accepted"})
+	s.handleStandardInbox(w, r, body)
 }
 
-func (s *Service) handleInboundPost(a Activity) {
-	var obj struct {
-		ID         string `json:"id"`
-		Content    string `json:"content"`
-		ImageURL   string `json:"image_url"`
-		Visibility string `json:"visibility"`
-		AuthorID   string `json:"author_handle"`
-		CreatedAt  string `json:"created_at"`
-	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
-	if obj.Visibility != "public" { return }
+// ── Peering (AGORA-314/321) ───────────────────────────────────────────────────
 
-	authorID := s.getOrCreateRemoteUser(obj.AuthorID, a.InstanceID)
-	// AGORA-319: published_at is the origin publish time, created_at is when
-	// this instance stored the row (AGORA-270's split). The sender has always
-	// put its own RFC3339 timestamp in the payload and this handler has always
-	// parsed it, but it went nowhere: both columns fell back to NOW(), so
-	// ingested posts sorted by delivery order rather than by when they were
-	// written. parseAPTime is the AP ingest path's own helper; reusing it
-	// keeps one convention for a malformed value rather than inventing a
-	// second one here.
-	s.db.Exec(`
-		INSERT INTO posts (author_id, content, image_url, visibility, is_remote, remote_post_id, remote_instance, published_at)
-		VALUES ($1, $2, $3, 'public', true, $4, $5, $6)
-		ON CONFLICT DO NOTHING
-	`, authorID, obj.Content, obj.ImageURL, obj.ID, a.InstanceID, parseAPTime(obj.CreatedAt))
-}
-
-func (s *Service) handleInboundDelete(a Activity) {
-	var obj struct{ ID string `json:"id"` }
-	json.Unmarshal(a.Object, &obj)
-	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE remote_post_id = $1 AND remote_instance = $2`, obj.ID, a.InstanceID)
-}
-
-func (s *Service) handleInboundFriendRequest(a Activity) {
-	var obj struct {
-		FromHandle string `json:"from_handle"`
-		ToHandle   string `json:"to_handle"`
-	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
-
-	remoteUserID := s.getOrCreateRemoteUser(obj.FromHandle, a.InstanceID)
-	var localUserID string
-	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
-	if localUserID == "" {
-		log.Printf("federation: friend_request from %s@%s dropped: no local user %q", obj.FromHandle, a.InstanceID, obj.ToHandle)
-		return
-	}
-	if remoteUserID == "" { return }
-
-	// AGORA-318: friends.SendRequest refuses a request between blocked parties
-	// (internal/friends/friends.go). This path writes the row directly and had
-	// no equivalent check, which was survivable only because it also sent no
-	// notification. A blocked account could reach someone who blocked them the
-	// moment one is added, so the guard lands with it.
-	if s.usersHaveBlock(remoteUserID, localUserID) { return }
-
-	// RETURNING id rather than a bare Exec: a friend request is not delivered
-	// once. The sending instance retries on its own schedule, so ON CONFLICT DO
-	// NOTHING is load-bearing, and only the delivery that actually creates the
-	// row may notify. Without this a peer's retries would each ring the bell.
-	var friendshipID string
-	err := s.db.QueryRow(`
-		INSERT INTO friendships (requester_id, addressee_id, status)
-		VALUES ($1, $2, 'pending')
-		ON CONFLICT DO NOTHING
-		RETURNING id
-	`, remoteUserID, localUserID).Scan(&friendshipID)
-	if err != nil || friendshipID == "" { return }
-
-	// Same notification type a local friend request uses. The recipient has no
-	// reason to care which instance the sender is on, and the frontend already
-	// renders this type with its inline Accept/Decline controls.
-	if s.notif != nil {
-		s.notif.Create(localUserID, remoteUserID, "friend_request", "", "")
-	}
-}
-
-// notifyAdminsOfFederationRequest tells every admin that a server they've
-// never seen has started federating with this instance (AGORA-314).
-//
-// Until now the only trace was an audit_log row nobody has reason to read and
-// a new entry in the Federation tab nobody is prompted to look at, so an
-// instance could start exchanging posts and friend requests with no one
+// notifyAdminsOfFederationRequest tells this instance's admins that another
+// Agora instance has made contact, so an instance could not start exchanging
+// posts and friend requests with no one
 // noticing. This does not gate anything: the accepted position is to stay open
 // and ban bad actors after the fact, and this makes the event visible so an
 // admin can make that call.
@@ -391,60 +235,6 @@ func (s *Service) usersHaveBlock(a, b string) bool {
 	return blocked
 }
 
-func (s *Service) handleInboundFriendAccept(a Activity) {
-	var obj struct {
-		FromHandle string `json:"from_handle"`
-		ToHandle   string `json:"to_handle"`
-	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
-
-	remoteUserID := s.getOrCreateRemoteUser(obj.FromHandle, a.InstanceID)
-	var localUserID string
-	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = false`, obj.ToHandle).Scan(&localUserID)
-	if localUserID == "" || remoteUserID == "" { return }
-
-	// AGORA-318: gated on the UPDATE actually matching a pending row, for the
-	// same reason the request handler checks its insert: a redelivered accept
-	// must not notify twice, and an accept for a friendship that was never
-	// pending must not notify at all.
-	res, err := s.db.Exec(`
-		UPDATE friendships SET status = 'accepted', updated_at = NOW()
-		WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'
-	`, localUserID, remoteUserID)
-	if err != nil { return }
-	if n, _ := res.RowsAffected(); n == 0 { return }
-
-	if s.notif != nil {
-		s.notif.Create(localUserID, remoteUserID, "friend_accepted", "", "")
-	}
-}
-
-// handleInboundProfileUpdate syncs a remote user's profile fields
-func (s *Service) handleInboundProfileUpdate(a Activity) {
-	var obj struct {
-		Handle      string `json:"handle"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
-		Bio         string `json:"bio"`
-	}
-	if err := json.Unmarshal(a.Object, &obj); err != nil { return }
-
-	// AGORA-331: an instance still on an older build sends avatar_url straight
-	// from its own database, where uploads are stored as a relative
-	// /uploads/... path. Stored verbatim, the receiving frontend then requests
-	// it from this instance's domain and 404s, which is how a federated
-	// friend's avatar breaks the first time they edit their profile.
-	//
-	// AGORA-327 stopped this instance emitting that payload, but the receiver
-	// is the side that can actually repair it: it knows which domain the path
-	// belongs to, because the activity says so.
-	s.db.Exec(`
-		UPDATE users
-		SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
-		WHERE remote_user_id = $4 AND remote_instance = $5
-	`, obj.DisplayName, remoteAbsoluteURL(obj.AvatarURL, a.InstanceID), obj.Bio, obj.Handle, a.InstanceID)
-}
-
 // remoteAbsoluteURL resolves a possibly-relative media path against the remote
 // instance that sent it. Mirrors Service.absoluteURL, which does the same job
 // for this instance's own URLs, but takes the origin domain as an argument
@@ -463,51 +253,6 @@ func remoteAbsoluteURL(u, instance string) string {
 }
 
 // ── Remote user lookup + sync ─────────────────────────────────────────────────
-
-// getOrCreateRemoteUser returns the local UUID for a remote handle, fetching
-// their profile from the remote instance if they don't exist yet.
-func (s *Service) getOrCreateRemoteUser(handle, instance string) string {
-	var id string
-	s.db.QueryRow(`SELECT id FROM users WHERE remote_user_id = $1 AND remote_instance = $2`, handle, instance).Scan(&id)
-	if id != "" {
-		return id
-	}
-
-	// Fetch profile from the remote instance
-	profile := s.fetchRemoteProfile(handle, instance)
-
-	displayName := profile["display_name"]
-	if displayName == "" { displayName = handle + "@" + instance }
-	// AGORA-331: GetUser absolutizes its own avatar_url (AGORA-312), but an
-	// instance still on an older build does not, so guard here too rather than
-	// trusting the far end to have upgraded.
-	avatarURL  := remoteAbsoluteURL(profile["avatar_url"], instance)
-	bio        := profile["bio"]
-
-	// AGORA-317: profile_private has to be set explicitly. Its column default
-	// is TRUE, which is the right default for someone signing up locally and
-	// the wrong one for a stub standing in for a remote account. A private
-	// author is filtered out of PublicFeed and 403s on their own permalink, so
-	// every post ingested from a federated instance landed invisible. This is
-	// the same defect AGORA-164 found and fixed on the ActivityPub side; that
-	// fix (and its backfill) is scoped to rows with an ap_actor_url, so it
-	// never reached these stubs. Set on the conflict branch too, so a stub
-	// created before this fix is repaired the next time it's touched rather
-	// than staying private forever.
-	s.db.QueryRow(`
-		INSERT INTO users (username, email, password_hash, display_name, avatar_url, bio,
-		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at, profile_private)
-		VALUES ($1, $2, '', $3, $4, $5, true, true, $6, $7, NOW(), false)
-		ON CONFLICT (username) DO UPDATE
-		  SET display_name = $3, avatar_url = $4, bio = $5, remote_synced_at = NOW(), profile_private = false
-		RETURNING id
-	`, handle+"@"+instance,
-		handle+"@"+instance,
-		displayName, avatarURL, bio,
-		handle, instance,
-	).Scan(&id)
-	return id
-}
 
 // fetchRemoteProfile GETs /federation/users/{handle} on the remote instance.
 // Returns an empty map on any error (caller must handle gracefully).
@@ -531,10 +276,17 @@ func (s *Service) fetchRemoteProfile(handle, instance string) map[string]string 
 
 // syncStaleRemoteUsers re-fetches profiles for remote users not synced in 24h.
 func (s *Service) syncStaleRemoteUsers() {
+	// AGORA-330: scoped to legacy stubs. fetchRemoteProfile reads Agora's own
+	// /federation/users endpoint keyed on remote_user_id, which an ActivityPub
+	// row does not have, so those rows could never sync here and only consumed
+	// the batch limit that the rows which can sync were competing for. They are
+	// refreshed by their own actor fetch instead.
 	rows, err := s.db.Query(`
 		SELECT remote_user_id, remote_instance
 		FROM users
 		WHERE is_remote = true
+		  AND COALESCE(remote_user_id, '') != ''
+		  AND COALESCE(remote_instance, '') != ''
 		  AND (remote_synced_at IS NULL OR remote_synced_at < NOW() - INTERVAL '24 hours')
 		LIMIT 50
 	`)
@@ -691,19 +443,29 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if already cached locally
-	var localID string
-	s.db.QueryRow(`SELECT id FROM users WHERE remote_user_id = $1 AND remote_instance = $2`, username, instance).Scan(&localID)
-
-	// Fetch fresh profile from remote
-	profile := s.fetchRemoteProfile(username, instance)
-	if len(profile) == 0 && localID == "" {
-		writeError(w, 404, "user not found on remote instance — check the handle and try again")
+	// AGORA-330: resolved through ActivityPub, not through the legacy protocol's
+	// own profile endpoint.
+	//
+	// This used to call getOrCreateRemoteUser, which keyed a stub on
+	// (remote_user_id, remote_instance) and gave it no actor URL. Every other
+	// path already keyed the same person on ap_actor_url, so looking somebody up
+	// here and then meeting them over ActivityPub produced two rows for one
+	// human, with the friendship on one and the posts on the other. That is the
+	// duplication ADR-002 set out to end, and this was its last source.
+	//
+	// WebFinger then the actor document is the same route APLookup takes, so a
+	// handle resolves to one identity however it was reached.
+	actorURL, err := resolveActorURLViaWebFinger(username, instance)
+	if err != nil {
+		writeError(w, 404, "user not found on remote instance, check the handle and try again")
 		return
 	}
-
-	// Create or update local stub
-	localID = s.getOrCreateRemoteUser(username, instance)
+	localID, err := s.getOrCreateRemoteAPUser(actorURL, auth.UserIDFromCtx(r.Context()))
+	if err != nil || localID == "" {
+		log.Printf("federation: lookup of %s@%s resolved to %s but the actor fetch failed: %v", username, instance, actorURL, err)
+		writeError(w, 404, "user not found on remote instance, check the handle and try again")
+		return
+	}
 
 	type Result struct {
 		ID          string `json:"id"`
@@ -721,287 +483,6 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"user": u, "local": false})
 }
 
-// ── Outbound helpers (called by other services) ───────────────────────────────
-
-// SendToUserInstance enqueues an activity to be delivered to a specific remote instance.
-// activity can be any JSON-serialisable value; the federation service will sign it.
-func (s *Service) SendToUserInstance(remoteInstance, instanceURL string, activity any) {
-	if !s.federationEnabled() { return }
-
-	payload, err := json.Marshal(activity)
-	if err != nil { return }
-
-	// Ensure the activity has our instance_id and timestamp set
-	var m map[string]any
-	json.Unmarshal(payload, &m)
-	if m["instance_id"] == nil { m["instance_id"] = domainFromURL(s.cfg.InstanceDomain) }
-	if m["timestamp"] == nil { m["timestamp"] = time.Now().Unix() }
-	payload, _ = json.Marshal(m)
-
-	s.db.Exec(`
-		INSERT INTO federation_queue (instance_url, payload, next_attempt)
-		VALUES ($1, $2, NOW())
-	`, instanceURL, string(payload))
-}
-
-// BroadcastToFriendInstances sends an activity to all remote instances where
-// the given user has at least one accepted friend.
-func (s *Service) BroadcastToFriendInstances(userID string, activity any) {
-	if !s.federationEnabled() { return }
-
-	payload, err := json.Marshal(activity)
-	if err != nil { return }
-
-	var m map[string]any
-	json.Unmarshal(payload, &m)
-	if m["instance_id"] == nil { m["instance_id"] = domainFromURL(s.cfg.InstanceDomain) }
-	if m["timestamp"] == nil { m["timestamp"] = time.Now().Unix() }
-	payload, _ = json.Marshal(m)
-
-	// Find distinct remote instances of accepted friends
-	rows, err := s.db.Query(`
-		SELECT DISTINCT u.remote_instance
-		FROM friendships f
-		JOIN users u ON u.id = CASE
-			WHEN f.requester_id = $1 THEN f.addressee_id
-			ELSE f.requester_id
-		END
-		WHERE (f.requester_id = $1 OR f.addressee_id = $1)
-		  AND f.status = 'accepted'
-		  AND u.is_remote = true
-		  AND u.remote_instance != ''
-	`, userID)
-	if err != nil { return }
-	defer rows.Close()
-
-	var instances []string
-	for rows.Next() {
-		var inst string
-		rows.Scan(&inst)
-		instances = append(instances, inst)
-	}
-	rows.Close()
-
-	for _, inst := range instances {
-		instanceURL := "https://" + inst
-		s.db.Exec(`
-			INSERT INTO federation_queue (instance_url, payload, next_attempt)
-			VALUES ($1, $2, NOW())
-		`, instanceURL, string(payload))
-	}
-}
-
-// ── Outbound queue ────────────────────────────────────────────────────────────
-
-// SendActivity enqueues an outbound activity for reliable delivery.
-// The background worker will sign and deliver it, retrying on failure.
-func (s *Service) SendActivity(instanceURL string, activity Activity) error {
-	payload, err := json.Marshal(activity)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`
-		INSERT INTO federation_queue (instance_url, payload, next_attempt)
-		VALUES ($1, $2, NOW())
-	`, instanceURL, string(payload))
-	return err
-}
-
-// maxDeliveryAttempts is how many times a queued legacy activity is retried
-// before it's abandoned. Named rather than inlined so the drain query and the
-// give-up log line below cannot disagree about where the ceiling is.
-const maxDeliveryAttempts = 10
-
-// drainQueue processes pending outbound activities, retrying with backoff.
-func (s *Service) drainQueue() {
-	_, privKey, err := s.getOrCreateKeyPair()
-	if err != nil {
-		log.Printf("federation: drainQueue: could not get key pair: %v", err)
-		return
-	}
-
-	rows, err := s.db.Query(`
-		SELECT id, instance_url, payload, attempts
-		FROM federation_queue
-		WHERE attempts < $1 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`, maxDeliveryAttempts)
-	if err != nil { return }
-	defer rows.Close()
-
-	type job struct {
-		id          string
-		instanceURL string
-		payload     []byte
-		attempts    int
-	}
-	var jobs []job
-	for rows.Next() {
-		var j job
-		rows.Scan(&j.id, &j.instanceURL, &j.payload, &j.attempts)
-		jobs = append(jobs, j)
-	}
-	rows.Close()
-
-	for _, j := range jobs {
-		var activity Activity
-		if err := json.Unmarshal(j.payload, &activity); err != nil {
-			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
-			continue
-		}
-
-		signed, err := signActivity(privKey, j.payload)
-		if err != nil {
-			// Unsignable payload, malformed beyond what the Unmarshal above
-			// caught. Retrying can't help, so drop it rather than let it
-			// occupy the queue for ten attempts.
-			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
-			continue
-		}
-
-		sendErr := s.deliverActivity(j.instanceURL, signed)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM federation_queue WHERE id = $1`, j.id)
-		} else {
-			// Exponential backoff: 2^attempts minutes, capped at 24h
-			s.db.Exec(`
-				UPDATE federation_queue
-				SET attempts = attempts + 1,
-				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
-
-			// AGORA-325: this used to record the error to last_error and
-			// nothing else, so a federation path that was failing every single
-			// delivery looked exactly like one with nothing to send. That is
-			// how AGORA-316 stayed hidden: the only way to see it was to query
-			// federation_queue by hand.
-			//
-			// Log the first failure and the final abandonment, and stay quiet
-			// in between. A peer that is down for a day would otherwise
-			// produce one line per activity per retry.
-			switch {
-			case j.attempts == 0:
-				log.Printf("federation: delivery of %q to %s failed (first attempt): %v",
-					activity.Type, j.instanceURL, sendErr)
-			case j.attempts >= maxDeliveryAttempts-1:
-				log.Printf("federation: giving up on %q to %s after %d attempts, last error: %v",
-					activity.Type, j.instanceURL, j.attempts+1, sendErr)
-			}
-		}
-	}
-}
-
-func (s *Service) deliverActivity(instanceURL string, signed []byte) error {
-	resp, err := fedHTTPClient.Post(instanceURL+"/federation/inbox", "application/json", bytes.NewReader(signed))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("remote returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// ── Signature verification ────────────────────────────────────────────────────
-
-// canonicalActivity returns the exact bytes an activity's Ed25519 signature
-// covers: the activity as a JSON object with the signature field itself
-// removed. Both the signing and the verifying side derive the signed bytes
-// through this one function, which is the whole point of it existing.
-//
-// AGORA-316: they used to derive those bytes independently and never agreed,
-// so no inbound legacy activity was ever accepted: every one 401'd, which is
-// why federated posts, friend requests and friend accepts were all silently
-// inert. drainQueue signed whatever it read back out of
-// federation_queue.payload, and that column is JSONB: Postgres stores JSONB
-// decomposed and re-emits object keys ordered by (length, then bytewise), not
-// in the order they were written. verifyActivity meanwhile rebuilt its own
-// copy by unmarshaling into a map and re-marshaling, which orders keys
-// alphabetically. Two byte strings that only coincide when every key in the
-// document happens to sort the same way under both rules.
-//
-// Round-tripping through map[string]any is what makes the two sides agree: it
-// collapses every difference that isn't semantic (key order, whitespace, and
-// the integer-versus-float distinction json.Unmarshal erases), so both ends
-// arrive at identical bytes regardless of what shape the document reached
-// them in. That also means the JSONB normalization above stops mattering
-// rather than needing to be avoided.
-func canonicalActivity(raw []byte) ([]byte, error) {
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("activity is not a JSON object: %w", err)
-	}
-	delete(m, "signature")
-	return json.Marshal(m)
-}
-
-// signActivity builds the wire body for an outbound activity: the canonical
-// form above, signed, with the signature added back as a field.
-//
-// The body is rebuilt from the canonical bytes rather than from the caller's
-// own, so the only possible difference between what is sent and what was
-// signed is the signature field. Marshaling the Activity struct here instead
-// (as this used to) silently dropped any field the struct doesn't declare,
-// which would put a document on the wire that no longer canonicalizes to the
-// thing that was signed.
-func signActivity(privKey ed25519.PrivateKey, raw []byte) ([]byte, error) {
-	canonical, err := canonicalActivity(raw)
-	if err != nil {
-		return nil, err
-	}
-	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(privKey, canonical))
-
-	var m map[string]any
-	if err := json.Unmarshal(canonical, &m); err != nil {
-		return nil, err
-	}
-	m["signature"] = sig
-	return json.Marshal(m)
-}
-
-func (s *Service) verifyActivity(raw []byte, a Activity) error {
-	if a.Signature == "" { return fmt.Errorf("no signature") }
-	if a.InstanceID == "" { return fmt.Errorf("no instance id") }
-
-	sig, err := base64.StdEncoding.DecodeString(a.Signature)
-	if err != nil { return fmt.Errorf("bad signature encoding") }
-
-	unsigned, err := canonicalActivity(raw)
-	if err != nil { return err }
-
-	pubKey, err := s.getRemotePublicKey(a.InstanceID)
-	if err != nil { return fmt.Errorf("could not get remote key: %w", err) }
-
-	if !ed25519.Verify(pubKey, unsigned, sig) {
-		return fmt.Errorf("signature invalid")
-	}
-	return nil
-}
-
-// FetchInstanceInfo resolves and validates a remote Agora instance, returning
-// its normalized domain, display name, and base64 Ed25519 public key. It is
-// the only way any caller should reach a remote instance's info document.
-//
-// Returns bare strings rather than a struct so callers can declare a local
-// one-method interface and stay structurally satisfied without importing this
-// package, matching how feed/users/friends depend on this service.
-//
-// AGORA-324: the admin AddInstance handler used to do this itself with a bare
-// http.Client and no host validation, which meant an admin-supplied domain
-// resolving to loopback, a private range, or the cloud metadata endpoint was
-// fetched and its response partly reflected back. Every other outbound
-// federation request goes through fedHTTPClient, whose dialer resolves the
-// host, rejects non-public addresses and then dials a validated IP directly so
-// there is no window to rebind DNS in. AGORA-139 established that for the
-// lookup endpoints; this call site was simply missed.
-//
-// Exported so the admin package can reach it: keeping the SSRF-safe fetch and
-// the instance-info parsing in one function is the point, since two copies is
-// how the admin one drifted out of step in the first place.
 func (s *Service) FetchInstanceInfo(domain string) (string, string, string, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
@@ -1019,100 +500,91 @@ func (s *Service) FetchInstanceInfo(domain string) (string, string, string, erro
 	}
 
 	var info struct {
-		PublicKey string `json:"public_key"`
-		Name      string `json:"name"`
+		Name     string `json:"name"`
+		Software string `json:"software"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return "", "", "", fmt.Errorf("invalid instance info")
 	}
 
-	// Validate the key at the boundary rather than storing whatever arrived.
-	// A malformed key used to be accepted happily and then fail every single
-	// signature verification afterwards, with nothing anywhere saying why.
-	decoded, err := base64.StdEncoding.DecodeString(info.PublicKey)
-	if err != nil { return "", "", "", fmt.Errorf("instance published a malformed public key") }
-	if len(decoded) != ed25519.PublicKeySize {
-		return "", "", "", fmt.Errorf("instance published a %d-byte public key, expected %d", len(decoded), ed25519.PublicKeySize)
+	// AGORA-330: the public key this used to demand and validate went with the
+	// legacy transport. An instance on this build publishes none, so continuing
+	// to require one would refuse to peer with exactly the instances worth
+	// peering with. The third return stays for the callers' signature and is
+	// always empty; peering no longer turns on a key.
+	//
+	// Answering this endpoint at all is the identification: only Agora serves
+	// it. The software field is checked anyway, since a proxy or a parked domain
+	// returning some other 200 JSON should not become a peer.
+	if info.Software != "" && !strings.EqualFold(info.Software, "agora") {
+		return "", "", "", fmt.Errorf("%s is not an Agora instance", domain)
 	}
 
-	return domain, info.Name, info.PublicKey, nil
+	return domain, info.Name, "", nil
 }
 
-func (s *Service) getRemotePublicKey(domain string) (ed25519.PublicKey, error) {
-	if s.isInstanceBlocked(domain) {
-		return nil, fmt.Errorf("instance is blocked")
+// ── Inbound peering (AGORA-314/321, rehomed by AGORA-330) ─────────────────────
+
+// registerInboundPeer records another Agora instance that has made contact, and
+// notifies this instance's admins the first time it does.
+//
+// This used to happen inside getRemotePublicKey, as a side effect of fetching a
+// peer's signing key to verify a legacy activity. Deleting that transport would
+// have quietly taken first-contact registration with it, and with it the
+// Federation tab's inbound direction, the admin notification, and the peered
+// check that CanFriend and friend_requests_from both read. So it moves here and
+// becomes deliberate rather than incidental.
+//
+// Called from the Agora-marked ActivityPub activities: a friend request or a
+// limited-audience post. Those are precisely the traffic where a peering
+// relationship means something, and gating on them keeps every Mastodon server
+// that ever delivers to us out of a tab that means "Agora instances we federate
+// with". An existing row short-circuits before any network call, so the probe
+// below happens at most once per new peer.
+func (s *Service) registerInboundPeer(domain string) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" || domain == domainFromURL(s.cfg.InstanceDomain) || s.isInstanceBlocked(domain) {
+		return
 	}
 
-	var keyB64 string
-	s.db.QueryRow(`SELECT public_key FROM federated_instances WHERE domain = $1`, domain).Scan(&keyB64)
-	if keyB64 != "" {
-		decoded, err := base64.StdEncoding.DecodeString(keyB64)
-		if err != nil { return nil, err }
-		return ed25519.PublicKey(decoded), nil
+	var exists bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM federated_instances WHERE LOWER(domain) = $1)`, domain).Scan(&exists)
+	if exists {
+		s.db.Exec(`UPDATE federated_instances SET last_seen_at = NOW() WHERE LOWER(domain) = $1`, domain)
+		return
 	}
 
-	normalized, name, keyB64, err := s.FetchInstanceInfo(domain)
-	if err != nil { return nil, err }
+	normalized, name, _, err := s.FetchInstanceInfo(domain)
+	if err != nil {
+		// Not reachable, or not Agora. Either way it does not belong in the
+		// peer list, and the activity itself is unaffected: HTTP Signatures
+		// already authenticated it, and peering is not an authorisation gate.
+		return
+	}
 
-	decoded, _ := base64.StdEncoding.DecodeString(keyB64) // validated in FetchInstanceInfo
-
-	// AGORA-321/314: a row created here is an instance contacting us that we
-	// had no record of, which is a materially different event from an admin
-	// adding a peer. RETURNING (xmax = 0) is what tells them apart: true only
-	// on a genuine insert, false when the upsert took its update branch, so a
-	// burst of activities from the same new instance produces one notification
-	// rather than one per activity.
+	// RETURNING (xmax = 0) is what tells a genuine insert from the update
+	// branch, so a burst of activities from the same new instance produces one
+	// notification rather than one per activity.
 	//
 	// An existing 'outbound' peering becomes 'mutual' once they contact us.
 	// 'unknown' deliberately stays 'unknown': inbound traffic proves they are
 	// talking to us, not that they initiated the peering, and guessing would
-	// turn every pre-existing row with a trimmed audit log into a false "they
-	// connected to you".
+	// turn every pre-existing row into a false "they connected to you".
 	var firstContact bool
 	s.db.QueryRow(`
-		INSERT INTO federated_instances (domain, name, public_key, instance_url, status, direction)
-		VALUES ($1, $2, $3, $4, 'active', 'inbound')
+		INSERT INTO federated_instances (domain, name, instance_url, status, direction)
+		VALUES ($1, $2, $3, 'active', 'inbound')
 		ON CONFLICT (domain) DO UPDATE
-		  SET public_key   = $3,
-		      name         = $2,
+		  SET name         = $2,
 		      last_seen_at = NOW(),
 		      direction    = CASE WHEN federated_instances.direction = 'outbound' THEN 'mutual'
 		                          ELSE federated_instances.direction END
 		RETURNING (xmax = 0)
-	`, normalized, name, keyB64, "https://"+normalized).Scan(&firstContact)
+	`, normalized, name, "https://"+normalized).Scan(&firstContact)
 
 	if firstContact {
 		go s.notifyAdminsOfFederationRequest(normalized)
 	}
-
-	return ed25519.PublicKey(decoded), nil
-}
-
-// ── Key pair management ───────────────────────────────────────────────────────
-
-func (s *Service) getOrCreateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, error) {
-	var pubB64, privB64 string
-	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'federation_public_key'`).Scan(&pubB64)
-	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'federation_private_key'`).Scan(&privB64)
-
-	if pubB64 != "" && privB64 != "" {
-		pub, err1 := base64.StdEncoding.DecodeString(pubB64)
-		priv, err2 := base64.StdEncoding.DecodeString(privB64)
-		if err1 == nil && err2 == nil {
-			return ed25519.PublicKey(pub), ed25519.PrivateKey(priv), nil
-		}
-	}
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil { return nil, nil, err }
-
-	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_public_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`,
-		base64.StdEncoding.EncodeToString(pub))
-	s.db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_private_key', $1) ON CONFLICT (key) DO UPDATE SET value = $1`,
-		base64.StdEncoding.EncodeToString(priv))
-
-	log.Println("federation: generated new Ed25519 keypair")
-	return pub, priv, nil
 }
 
 // ── Background sync ───────────────────────────────────────────────────────────
@@ -1126,22 +598,21 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	// lifetime, even after an admin turned federation back on — outbound
 	// activities would sit queued forever until the next restart. Instead the
 	// loop always runs, and each tick re-checks the current value.
-	queueTicker  := time.NewTicker(30 * time.Second)  // drain outbound queue
+	//
+	// AGORA-330: the legacy queue's own ticker went with the transport. What is
+	// left on federationEnabled is the Agora-native surface that outlived it:
+	// the peer liveness refresh and the remote-profile sync.
 	apQueueTicker := time.NewTicker(20 * time.Second) // drain standard-AP delivery queue
 	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
 	profileTicker := time.NewTicker(6 * time.Hour)    // sync stale remote profiles
 
-	defer queueTicker.Stop()
 	defer apQueueTicker.Stop()
 	defer syncTicker.Stop()
 	defer profileTicker.Stop()
 
-	// Run immediately on start. drainAPQueue (standard ActivityPub) is gated
-	// by activityPubEnabled (AGORA-156); everything else is the old custom
-	// protocol and stays on federationEnabled.
-	if s.federationEnabled() {
-		go s.drainQueue()
-	}
+	// Run immediately on start. The delivery queues are gated by
+	// activityPubEnabled (AGORA-156); peering upkeep stays on
+	// federationEnabled, which is still the Agora-native surface's toggle.
 	if s.activityPubEnabled() {
 		go s.drainAPQueue()
 		go s.drainPageAPQueue()
@@ -1152,10 +623,6 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-queueTicker.C:
-			if s.federationEnabled() {
-				go s.drainQueue()
-			}
 		case <-apQueueTicker.C:
 			if s.activityPubEnabled() {
 				go s.drainAPQueue()

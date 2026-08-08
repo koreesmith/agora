@@ -26,6 +26,31 @@ func testFriendshipService(t *testing.T) *store.DB {
 	return db
 }
 
+// seedLegacyStub inserts a remote-user row of the shape the legacy
+// Agora-to-Agora protocol created: keyed on (remote_user_id, remote_instance)
+// with no ap_actor_url.
+//
+// Written out here since AGORA-330, which deleted getOrCreateRemoteUser along
+// with the rest of that transport. These rows are still real, and the tests
+// below are precisely about them continuing to work, so the seed has to
+// outlive the code that used to produce it.
+func seedLegacyStub(t *testing.T, db *store.DB, handle, instance string) string {
+	t.Helper()
+	var id string
+	err := db.QueryRow(`
+		INSERT INTO users (username, email, password_hash, display_name,
+		                   email_verified, is_remote, remote_user_id, remote_instance,
+		                   remote_synced_at, profile_private)
+		VALUES ($1, $1, '', $2, true, true, $3, $4, NOW(), false)
+		RETURNING id
+	`, handle+"@"+instance, handle, handle, instance).Scan(&id)
+	if err != nil {
+		t.Fatalf("seeding a legacy stub for %s@%s failed: %v", handle, instance, err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+	return id
+}
+
 // TestRemoteAgoraActorURL covers the bridge that lets a friendship formed
 // before this migration still be acted on. A legacy stub has no ap_actor_url,
 // but an Agora actor URL is deterministic, so it can be derived from the
@@ -36,11 +61,7 @@ func TestRemoteAgoraActorURL(t *testing.T) {
 	unique := time.Now().UnixNano()
 
 	t.Run("derived from a legacy stub", func(t *testing.T) {
-		id := s.getOrCreateRemoteUser("alice", fmt.Sprintf("peer329-%d.example", unique))
-		if id == "" {
-			t.Fatal("no stub")
-		}
-		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+		id := seedLegacyStub(t, db, "alice", fmt.Sprintf("peer329-%d.example", unique))
 
 		got, err := s.remoteAgoraActorURL(id)
 		if err != nil {
@@ -276,11 +297,7 @@ func TestAcceptResolvesALegacyStub(t *testing.T) {
 	unique := time.Now().UnixNano()
 	instance := fmt.Sprintf("legacyaccept-%d.example", unique)
 
-	id := s.getOrCreateRemoteUser("bob", instance)
-	if id == "" {
-		t.Fatal("no stub")
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+	id := seedLegacyStub(t, db, "bob", instance)
 
 	actorURL := "https://" + instance + "/federation/users/bob"
 

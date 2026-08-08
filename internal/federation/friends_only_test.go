@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -517,4 +518,273 @@ func TestIsAddressedListMember(t *testing.T) {
 	if s.isAddressedListMember(postID, "") {
 		t.Error("an empty actor was admitted")
 	}
+}
+
+// ── AGORA-343: edits and deletes of a limited post ────────────────────────────
+
+// TestAddressLimitedRewritesBothLevels pins the part that decides whether an
+// edit of a limited post stays limited on arrival.
+//
+// The activity and its object both have to be rewritten. A receiver decides
+// what a post is from the object's own to/cc (friendsOnlyVisibility does
+// exactly that), so an activity addressed privately around an object still
+// claiming Public would be stored public by the very people it was limited to.
+func TestAddressLimitedRewritesBothLevels(t *testing.T) {
+	const public = "https://www.w3.org/ns/activitystreams#Public"
+
+	activity := map[string]any{
+		"type": "Update",
+		"to":   []string{public},
+		"object": map[string]any{
+			"type": "Note",
+			"to":   []string{public},
+			"cc":   []string{"https://peer.example/users/alice/followers"},
+		},
+	}
+	recipients := []friendRecipient{
+		{actorURL: "https://peer.example/federation/users/bob", inboxURL: "https://peer.example/federation/inbox"},
+		{actorURL: "https://peer.example/federation/users/carol", inboxURL: "https://peer.example/federation/inbox"},
+	}
+
+	addressLimited(activity, recipients, "list")
+
+	obj, ok := activity["object"].(map[string]any)
+	if !ok {
+		t.Fatal("the object went missing")
+	}
+	for name, level := range map[string]map[string]any{"activity": activity, "object": obj} {
+		to, _ := level["to"].([]string)
+		if len(to) != 2 {
+			t.Errorf("%s: to has %d entries, want 2", name, len(to))
+		}
+		if isAddressedPublicly(to) {
+			t.Errorf("%s: still addressed to Public, so a receiver stores this post public", name)
+		}
+		if cc, _ := level["cc"].([]string); len(cc) != 0 {
+			t.Errorf("%s: cc = %v, want empty; the followers collection is not this post's audience", name, cc)
+		}
+		if level[audienceMarker] != "list" {
+			t.Errorf("%s: audience marker = %v, want \"list\"", name, level[audienceMarker])
+		}
+	}
+
+	// The round trip that matters: what a receiver would decide from this.
+	to, _ := obj["to"].([]string)
+	cc, _ := obj["cc"].([]string)
+	if got := friendsOnlyVisibility("list", isAddressedPublicly(to, cc)); got != "private" {
+		t.Errorf("a receiver would store this as %q, want \"private\" (AGORA-342's fail-closed value)", got)
+	}
+}
+
+// TestDeliverLimitedDeduplicatesByInbox covers the per-instance addressing.
+// Agora serves one shared inbox per instance, so several recipients on the same
+// peer must not each get their own copy of an identical activity.
+func TestDeliverLimitedDeduplicatesByInbox(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var userID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("fl343_%d", unique)).Scan(&userID); err != nil {
+		t.Fatalf("seeding the author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, userID) })
+	t.Cleanup(func() { db.Exec(`DELETE FROM ap_delivery_queue WHERE actor_user_id = $1`, userID) })
+
+	peerInbox := fmt.Sprintf("https://peer343-%d.example/federation/inbox", unique)
+	other := fmt.Sprintf("https://other343-%d.example/federation/inbox", unique)
+	recipients := []friendRecipient{
+		{actorURL: "https://a.example/users/bob", inboxURL: peerInbox},
+		{actorURL: "https://a.example/users/carol", inboxURL: peerInbox},
+		{actorURL: "https://b.example/users/dave", inboxURL: other},
+		{actorURL: "https://b.example/users/erin", inboxURL: ""}, // no inbox: skipped
+	}
+
+	if n := s.deliverLimited(userID, recipients, map[string]any{"type": "Delete"}); n != 2 {
+		t.Errorf("delivered to %d inboxes, want 2 (one per instance, skipping the recipient with no inbox)", n)
+	}
+
+	var queued int
+	db.QueryRow(`SELECT COUNT(*) FROM ap_delivery_queue WHERE actor_user_id = $1`, userID).Scan(&queued)
+	if queued != 2 {
+		t.Errorf("queued %d deliveries, want 2", queued)
+	}
+}
+
+// TestLimitedPostAudienceSurvivesDelete is the one that would have caught the
+// obvious way to write this wrong. DeletePost soft-deletes the row before it
+// broadcasts, so an audience query filtering on deleted_at returns nobody for
+// every delete, and every recipient silently keeps their copy.
+func TestLimitedPostAudienceSurvivesDelete(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var authorID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("fl343d_a_%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("seeding the author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+
+	peerDomain := fmt.Sprintf("peer343d-%d.example", unique)
+	var friendID string
+	if err := db.QueryRow(`
+		INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+		VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+	`, fmt.Sprintf("fl343d_f_%d", unique), peerDomain, "https://"+peerDomain+"/federation/users/bob").Scan(&friendID); err != nil {
+		t.Fatalf("seeding the friend failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, friendID) })
+	if _, err := db.Exec(`INSERT INTO friendships (requester_id,addressee_id,status) VALUES ($1,$2,'accepted')`, authorID, friendID); err != nil {
+		t.Fatalf("seeding the friendship failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM friendships WHERE requester_id = $1`, authorID) })
+
+	var postID string
+	if err := db.QueryRow(`
+		INSERT INTO posts (author_id,content,visibility) VALUES ($1,'hi','friends') RETURNING id
+	`, authorID).Scan(&postID); err != nil {
+		t.Fatalf("seeding the post failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, postID) })
+
+	recipients, limited := s.limitedPostAudience(authorID, postID)
+	if !limited || len(recipients) != 1 {
+		t.Fatalf("before delete: limited=%v, %d recipients; want true, 1", limited, len(recipients))
+	}
+
+	// Exactly what DeletePost does before it broadcasts.
+	db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, postID)
+
+	recipients, limited = s.limitedPostAudience(authorID, postID)
+	if !limited {
+		t.Error("a deleted post no longer reads as limited, so its delete would go to followers and Public")
+	}
+	if len(recipients) != 1 {
+		t.Errorf("after delete: %d recipients, want 1. Nobody is told to remove their copy.", len(recipients))
+	}
+}
+
+// TestLimitedPostAudienceClassification covers the branch that decides whether a
+// post takes the limited path at all. A public post must keep the follower and
+// relay delivery it has always had.
+func TestLimitedPostAudienceClassification(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var authorID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("fl343c_%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("seeding the author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+
+	mkPost := func(visibility string) string {
+		var id string
+		if err := db.QueryRow(`INSERT INTO posts (author_id,content,visibility) VALUES ($1,'x',$2) RETURNING id`,
+			authorID, visibility).Scan(&id); err != nil {
+			t.Fatalf("seeding a %s post failed: %v", visibility, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, id) })
+		return id
+	}
+
+	if _, limited := s.limitedPostAudience(authorID, mkPost("public")); limited {
+		t.Error("a public post took the limited path, losing its follower and relay delivery")
+	}
+	if _, limited := s.limitedPostAudience(authorID, mkPost("friends")); !limited {
+		t.Error("a friends-only post took the public path, broadcasting it to followers and Public")
+	}
+	// 'private' has no federated audience, but must still not fall through to
+	// the public branch.
+	if _, limited := s.limitedPostAudience(authorID, mkPost("private")); !limited {
+		t.Error("a private post took the public path")
+	}
+	if _, limited := s.limitedPostAudience(authorID, "00000000-0000-0000-0000-000000000000"); limited {
+		t.Error("an unresolvable post reported as limited")
+	}
+}
+
+// ── AGORA-344: withdrawal fan-out ─────────────────────────────────────────────
+
+// TestUndoLikeFanOutIdentity covers the one thing Undo needed that Like already
+// had: telling the signer apart from the person who acted.
+//
+// For a forwarded withdrawal those differ, and keying the removal on the signer
+// would try to un-react on behalf of the thread's owner. The reaction that was
+// meant to go stays on every instance downstream, which is the exact drift this
+// ticket exists to stop.
+func TestUndoLikeFanOutIdentity(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var authorID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("fl344_a_%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("seeding the author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+
+	peerDomain := fmt.Sprintf("peer344-%d.example", unique)
+	likerActor := "https://" + peerDomain + "/federation/users/bob"
+	var likerID string
+	if err := db.QueryRow(`
+		INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+		VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+	`, fmt.Sprintf("fl344_b_%d", unique), peerDomain, likerActor).Scan(&likerID); err != nil {
+		t.Fatalf("seeding the liker failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, likerID) })
+	if _, err := db.Exec(`INSERT INTO friendships (requester_id,addressee_id,status) VALUES ($1,$2,'accepted')`, authorID, likerID); err != nil {
+		t.Fatalf("seeding the friendship failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM friendships WHERE requester_id = $1`, authorID) })
+
+	var username string
+	db.QueryRow(`SELECT username FROM users WHERE id = $1`, authorID).Scan(&username)
+
+	var postID string
+	if err := db.QueryRow(`
+		INSERT INTO posts (author_id,content,visibility) VALUES ($1,'hi','friends') RETURNING id
+	`, authorID).Scan(&postID); err != nil {
+		t.Fatalf("seeding the post failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, postID) })
+	postURL := "https://local.example/federation/users/" + username + "/posts/" + postID
+
+	seedLike := func() {
+		if _, err := db.Exec(`INSERT INTO reactions (user_id,post_id,reaction_type) VALUES ($1,$2,'like')
+			ON CONFLICT (user_id,post_id) DO UPDATE SET reaction_type = 'like'`, likerID, postID); err != nil {
+			t.Fatalf("seeding the reaction failed: %v", err)
+		}
+	}
+	stillLiked := func() bool {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE user_id=$1 AND post_id=$2`, likerID, postID).Scan(&n)
+		return n > 0
+	}
+	objectRaw, _ := json.Marshal(postURL)
+
+	t.Run("a direct withdrawal removes the reaction", func(t *testing.T) {
+		seedLike()
+		s.handleInboundUndoLike(likerActor, likerActor, objectRaw, nil)
+		if stillLiked() {
+			t.Error("the reaction survived its own author's withdrawal")
+		}
+	})
+
+	t.Run("a stranger cannot withdraw somebody else's reaction", func(t *testing.T) {
+		seedLike()
+		t.Cleanup(func() { db.Exec(`DELETE FROM reactions WHERE user_id = $1`, likerID) })
+		// A signer who does not own the thread, claiming to relay the liker's
+		// withdrawal. isThreadOwnerForwarding must refuse it.
+		s.handleInboundUndoLike("https://"+peerDomain+"/federation/users/mallory", likerActor, objectRaw, []byte(`{"type":"Undo"}`))
+		if !stillLiked() {
+			t.Error("a peer that does not own this thread cleared somebody else's reaction")
+		}
+	})
 }

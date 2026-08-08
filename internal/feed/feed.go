@@ -238,6 +238,13 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
 			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
+			  -- AGORA-310: the same block guard the main feed has had all along.
+			  -- Being in one of your lists did not exempt somebody from a block,
+			  -- but this query never checked, so a blocked person's posts kept
+			  -- appearing in the one view built from a list you curated yourself.
+			  -- Symmetric, matching every other site: a block hides you from them
+			  -- as well as them from you.
+			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4

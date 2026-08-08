@@ -1014,9 +1014,11 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		case "Follow":
 			s.handleInboundUndoFollow(verifiedActor, inner.Object)
 		case "Like":
-			s.handleInboundUndoLike(verifiedActor, inner.Object)
+			// a.Actor is the Undo's own actor, which for a forwarded
+			// withdrawal is the person who made it rather than the signer.
+			s.handleInboundUndoLike(verifiedActor, a.Actor, inner.Object, body)
 		case "Announce":
-			s.handleInboundUndoAnnounce(verifiedActor, inner.Object)
+			s.handleInboundUndoAnnounce(verifiedActor, a.Actor, inner.Object, body)
 		case "Block":
 			s.handleInboundUndoBlock(verifiedActor, inner.Object)
 		}
@@ -2580,7 +2582,20 @@ func (s *Service) GetQuoteAuthorization(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(obj)
 }
 
-func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.RawMessage) {
+// handleInboundUndoLike removes a reaction and, in a limited thread this
+// instance owns, forwards the withdrawal to the rest of that thread's audience.
+//
+// AGORA-344: the fan-out is the half AGORA-341 left. Without it, counts agreed
+// across instances until somebody changed their mind and then drifted apart
+// exactly as before, which is the worse failure of the two: it looks correct
+// most of the time and goes wrong only on a specific action.
+//
+// The parameters mirror handleInboundLike for the same reason it needed them:
+// activityActor is who withdrew the reaction and verifiedActor is who signed,
+// and for a forwarded Undo they differ. Keying the removal on the signer would
+// try to un-react on behalf of the thread owner, leaving the reaction it was
+// meant to remove in place on every instance downstream.
+func (s *Service) handleInboundUndoLike(verifiedActor, activityActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var objectURL string
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
@@ -2589,15 +2604,39 @@ func (s *Service) handleInboundUndoLike(verifiedActor string, objectRaw json.Raw
 	if postID == "" {
 		return
 	}
-	var remoteUserID string
-	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
+
+	unliker := activityActor
+	if unliker == "" {
+		unliker = verifiedActor
+	}
+	forwarded := unliker != verifiedActor
+	if forwarded && !s.isThreadOwnerForwarding(verifiedActor, objectURL) {
+		return
+	}
+
+	// Resolved through remoteUserIDForActor rather than a bare ap_actor_url
+	// lookup, so a reaction from somebody held as a legacy stub can still be
+	// withdrawn. No actor fetch: removing a reaction from an account we have
+	// never seen is a no-op, so there is nothing to create.
+	remoteUserID := s.remoteUserIDForActor(unliker)
 	if remoteUserID == "" {
 		return
 	}
+
 	// Only remove the reaction if it's still the 'like' we created — a remote
 	// actor's Undo(Like) shouldn't be able to clear a since-changed reaction.
-	s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2 AND reaction_type = 'like'`, remoteUserID, postID)
+	res, err := s.db.Exec(`DELETE FROM reactions WHERE user_id = $1 AND post_id = $2 AND reaction_type = 'like'`, remoteUserID, postID)
+	if err != nil {
+		return
+	}
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
+
+	// Gated on a real state change, so a redelivered Undo for a reaction that is
+	// already gone is not forwarded again. Never re-forwards a forward.
+	if n, _ := res.RowsAffected(); n == 0 || forwarded || len(rawActivity) == 0 {
+		return
+	}
+	go s.FanOutThreadReply(postID, unliker, rawActivity)
 }
 
 func (s *Service) handleInboundAnnounce(activityID, verifiedActor string, objectRaw json.RawMessage) {
@@ -2704,7 +2743,11 @@ func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, o
 	`, remoteReposterID, postID, activityID, domainFromURL(activityID))
 }
 
-func (s *Service) handleInboundUndoAnnounce(verifiedActor string, objectRaw json.RawMessage) {
+// handleInboundUndoAnnounce withdraws a repost, with the same fan-out and the
+// same signer/actor distinction as Undo(Like) above (AGORA-344). A repost count
+// drifts apart across a limited thread for exactly the same reason a reaction
+// count does.
+func (s *Service) handleInboundUndoAnnounce(verifiedActor, activityActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var objectURL string
 	if err := json.Unmarshal(objectRaw, &objectURL); err != nil || objectURL == "" {
 		return
@@ -2713,13 +2756,30 @@ func (s *Service) handleInboundUndoAnnounce(verifiedActor string, objectRaw json
 	if postID == "" {
 		return
 	}
-	var remoteUserID string
-	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, verifiedActor).Scan(&remoteUserID)
+
+	booster := activityActor
+	if booster == "" {
+		booster = verifiedActor
+	}
+	forwarded := booster != verifiedActor
+	if forwarded && !s.isThreadOwnerForwarding(verifiedActor, objectURL) {
+		return
+	}
+
+	remoteUserID := s.remoteUserIDForActor(booster)
 	if remoteUserID == "" {
 		return
 	}
-	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE author_id = $1 AND repost_of_id = $2 AND is_remote = true AND deleted_at IS NULL`,
+	res, err := s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE author_id = $1 AND repost_of_id = $2 AND is_remote = true AND deleted_at IS NULL`,
 		remoteUserID, postID)
+	if err != nil {
+		return
+	}
+
+	if n, _ := res.RowsAffected(); n == 0 || forwarded || len(rawActivity) == 0 {
+		return
+	}
+	go s.FanOutThreadReply(postID, booster, rawActivity)
 }
 
 // usernameFromActorURL extracts the username from one of our own actor URLs
@@ -3665,7 +3725,19 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt)
-	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+	// AGORA-343: this read `visibility != "public"` and returned. Since
+	// AGORA-337 and AGORA-342 a limited post federates, so that turned every
+	// edit of one into a silent no-op: the author saw their correction and the
+	// people it was addressed to kept the original text forever, with nothing
+	// logged. A correction is usually the whole reason for an edit.
+	//
+	// profile_private is only consulted on the public path, matching
+	// BroadcastFriendsPost: it governs whether strangers can see a profile, and
+	// a limited post's recipients are not strangers.
+	if err != nil || !apEnabled {
+		return
+	}
+	if visibility == "public" && profilePrivate {
 		return
 	}
 
@@ -3704,6 +3776,20 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 			activity["to"] = to
 		}
 	}
+	// AGORA-343: a limited post's edit goes to the audience the Create went to,
+	// not to followers and not to Public. Returning here rather than falling
+	// through is the point: followers and relays are the wrong list for it, and
+	// a mention inside a limited post does not widen that list either.
+	if recipients, limited := s.limitedPostAudience(userID, postID); limited {
+		if len(recipients) == 0 {
+			return
+		}
+		addressLimited(activity, recipients, audienceMarkerFor(visibility))
+		n := s.deliverLimited(userID, recipients, activity)
+		log.Printf("federation: edit of %s post %s delivered to %d instance inbox(es)", visibility, postID, n)
+		return
+	}
+
 	s.deliverToFollowers(userID, activity)
 	for _, inboxURL := range mentionedInboxURLs {
 		s.enqueueAPDelivery(userID, inboxURL, activity)
@@ -3716,8 +3802,14 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 }
 
 // BroadcastDeletePost enqueues a signed Delete/Tombstone for a removed post.
-// Followers who never received the original Create simply ignore an unknown
-// object id, so this doesn't need to re-derive the post's past visibility.
+//
+// AGORA-343: this used to say it did not need to re-derive the post's
+// visibility, on the reasoning that a follower who never saw the Create ignores
+// an unknown object id. That was true while only public posts federated. Since
+// AGORA-337 and AGORA-342 it is wrong in both directions: followers are not the
+// audience of a limited post, so somebody who received it may not be on that
+// list and keeps their copy; and addressing Public announces that a post with
+// that id existed and was deleted to people it was deliberately withheld from.
 func (s *Service) BroadcastDeletePost(userID, postID string) {
 	if !s.activityPubEnabled() {
 		return
@@ -3726,9 +3818,12 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 	var username string
 	var profilePrivate, apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, profile_private, activitypub_enabled FROM users WHERE id = $1`, userID).
-		Scan(&username, &profilePrivate, &apEnabled); err != nil || profilePrivate || !apEnabled {
+		Scan(&username, &profilePrivate, &apEnabled); err != nil || !apEnabled {
 		return
 	}
+	// profile_private is checked on the public branch below rather than here.
+	// It governs whether strangers can see a profile; a private-profile user's
+	// friends still received their limited post and must still get its delete.
 
 	actor := s.actorURL(username)
 	objID := actor + "/posts/" + postID
@@ -3742,6 +3837,25 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 			"type": "Tombstone",
 		},
 		"to": []string{"https://www.w3.org/ns/activitystreams#Public"},
+	}
+
+	// AGORA-343: a limited post is withdrawn from exactly the people it reached.
+	// Derived after the row is soft-deleted, which is why limitedPostAudience
+	// does not filter on deleted_at.
+	if recipients, limited := s.limitedPostAudience(userID, postID); limited {
+		if len(recipients) == 0 {
+			return
+		}
+		var visibility string
+		s.db.QueryRow(`SELECT visibility FROM posts WHERE id = $1`, postID).Scan(&visibility)
+		addressLimited(activity, recipients, audienceMarkerFor(visibility))
+		n := s.deliverLimited(userID, recipients, activity)
+		log.Printf("federation: delete of %s post %s delivered to %d instance inbox(es)", visibility, postID, n)
+		return
+	}
+
+	if profilePrivate {
+		return
 	}
 	s.deliverToFollowers(userID, activity)
 	// AGORA-221: a relay-forwarded post that gets deleted at the source

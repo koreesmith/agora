@@ -483,3 +483,87 @@ func (s *Service) isAddressedListMember(postID, actorURL string) bool {
 	`, postID, actorURL).Scan(&ok)
 	return ok
 }
+
+// ── Edits and deletes of a limited post (AGORA-343) ───────────────────────────
+
+// limitedPostAudience returns the remote recipients of a non-public post,
+// derived the same way the original Create derived them, and reports whether
+// the post was limited at all.
+//
+// Deliberately does not filter on deleted_at: DeletePost soft-deletes the row
+// before broadcasting, so requiring a live row would return an empty audience
+// for every delete and leave the copies standing.
+//
+// The audience is read fresh rather than replayed from what was sent. Somebody
+// removed from the list since the post will therefore not receive the edit or
+// the delete. Their copy is already beyond recall, and adding them back to the
+// delivery list purely to withdraw it would tell them they had been removed.
+func (s *Service) limitedPostAudience(userID, postID string) (recipients []friendRecipient, limited bool) {
+	var visibility string
+	var groupID *string
+	if err := s.db.QueryRow(`
+		SELECT visibility, group_id FROM posts WHERE id = $1 AND author_id = $2
+	`, postID, userID).Scan(&visibility, &groupID); err != nil {
+		return nil, false
+	}
+
+	switch {
+	case visibility == "friends":
+		return s.remoteFriendRecipients(userID), true
+	case visibility == "group" && groupID != nil:
+		return s.remoteListRecipients(userID, *groupID), true
+	case visibility == "public":
+		return nil, false
+	default:
+		// 'private' and anything unrecognised: limited, with no federated
+		// audience. Returning limited=true is the point, since it keeps the
+		// caller off the public path rather than broadcasting to followers.
+		return nil, true
+	}
+}
+
+// addressLimited rewrites an activity and its object to address named
+// recipients only, replacing whatever public addressing the builder produced.
+//
+// Both levels have to be rewritten. A receiving instance reads the object's own
+// to/cc when deciding what a post is (friendsOnlyVisibility does exactly that),
+// so an activity addressed privately around an object still claiming Public
+// would be stored public by its recipient.
+func addressLimited(activity map[string]any, recipients []friendRecipient, marker string) {
+	to := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		to = append(to, r.actorURL)
+	}
+
+	activity["to"] = to
+	activity["cc"] = []string{}
+	activity[audienceMarker] = marker
+	if obj, ok := activity["object"].(map[string]any); ok {
+		obj["to"] = to
+		obj["cc"] = []string{}
+		obj[audienceMarker] = marker
+	}
+}
+
+// deliverLimited enqueues an activity to each recipient's instance, once per
+// inbox, since the addressing is per-instance rather than per-person.
+func (s *Service) deliverLimited(userID string, recipients []friendRecipient, activity map[string]any) int {
+	sent := map[string]bool{}
+	for _, r := range recipients {
+		if r.inboxURL == "" || sent[r.inboxURL] {
+			continue
+		}
+		sent[r.inboxURL] = true
+		s.enqueueAPDelivery(userID, r.inboxURL, activity)
+	}
+	return len(sent)
+}
+
+// audienceMarkerFor names the audience kind a post's visibility corresponds to
+// on the wire.
+func audienceMarkerFor(visibility string) string {
+	if visibility == "group" {
+		return "list"
+	}
+	return "friends"
+}

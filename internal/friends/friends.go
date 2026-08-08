@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
@@ -342,13 +343,35 @@ func (s *Service) isRemoteUser(userID string) bool {
 
 // ── Friend Groups ─────────────────────────────────────────────────────────────
 
+// ListGroups returns the caller's friend lists, each with the reach information
+// AGORA-345 needs to warn about a limited post that cannot stay limited.
+//
+// A list can contain a Mastodon or a Bluesky account (AGORA-182/257 allow it
+// deliberately), and posting to it behaves differently for each: another Agora
+// instance enforces the limit and carries the conversation back, Mastodon
+// honours the addressing but has no concept of the list and will not
+// participate in the fan-out, and Bluesky has no equivalent addressing at all
+// and is not delivered to.
+//
+// Returned from this endpoint rather than a new one because the composer
+// already calls it to populate the list picker, so the warning costs no extra
+// request and cannot lag behind the selection.
+//
+// "Is this an Agora instance" is answered by a federated_instances row, the
+// same signal CanFriend and friend_requests_from both read. A legacy stub
+// counts too: only Agora ever created one.
 func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	rows, _ := s.db.Query(`
 		SELECT g.id, g.name, g.created_at,
-		       COUNT(m.friend_id) as member_count
+		       COUNT(m.friend_id) AS member_count,
+		       COALESCE((array_agg(`+memberLabel+`) FILTER (WHERE `+isBluesky+`))[1:3], '{}') AS bluesky_names,
+		       COUNT(*) FILTER (WHERE `+isBluesky+`)   AS bluesky_count,
+		       COALESCE((array_agg(`+memberLabel+`) FILTER (WHERE `+isFediverse+`))[1:3], '{}') AS fediverse_names,
+		       COUNT(*) FILTER (WHERE `+isFediverse+`) AS fediverse_count
 		FROM friend_groups g
 		LEFT JOIN friend_group_members m ON m.group_id = g.id
+		LEFT JOIN users u ON u.id = m.friend_id
 		WHERE g.user_id = $1
 		GROUP BY g.id, g.name, g.created_at
 		ORDER BY g.name
@@ -360,16 +383,45 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		MemberCount int    `json:"member_count"`
 		CreatedAt   string `json:"created_at"`
+		// AGORA-345. Empty for the ordinary case, which is what keeps the
+		// composer quiet unless there is something specific to say.
+		BlueskyNames   []string `json:"bluesky_names"`
+		BlueskyCount   int      `json:"bluesky_count"`
+		FediverseNames []string `json:"fediverse_names"`
+		FediverseCount int      `json:"fediverse_count"`
 	}
 	var groups []Group
 	for rows.Next() {
 		var g Group
-		rows.Scan(&g.ID, &g.Name, &g.CreatedAt, &g.MemberCount)
+		rows.Scan(&g.ID, &g.Name, &g.CreatedAt, &g.MemberCount,
+			pq.Array(&g.BlueskyNames), &g.BlueskyCount,
+			pq.Array(&g.FediverseNames), &g.FediverseCount)
+		if g.BlueskyNames == nil { g.BlueskyNames = []string{} }
+		if g.FediverseNames == nil { g.FediverseNames = []string{} }
 		groups = append(groups, g)
 	}
 	if groups == nil { groups = []Group{} }
 	writeJSON(w, 200, map[string]any{"groups": groups})
 }
+
+// Member classification for ListGroups, kept as named fragments so the three
+// uses of each cannot drift apart.
+const (
+	memberLabel = `COALESCE(NULLIF(u.display_name, ''), u.username)`
+
+	// 'bsky.app' is the marker AT Proto ingestion stamps on Bluesky-origin
+	// rows, never used by fediverse ingestion.
+	isBluesky = `u.is_remote = true AND u.remote_instance = 'bsky.app'`
+
+	// Remote, not Bluesky, and not on an instance we know to be Agora.
+	isFediverse = `u.is_remote = true
+	               AND COALESCE(u.remote_instance, '') NOT IN ('', 'bsky.app')
+	               AND COALESCE(u.remote_user_id, '') = ''
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM federated_instances fi
+	                  WHERE LOWER(fi.domain) = LOWER(u.remote_instance)
+	               )`
+)
 
 func (s *Service) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())

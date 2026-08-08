@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video } from 'lucide-react'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video, Info } from 'lucide-react'
 import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
 import api from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -67,6 +67,11 @@ export default function CreatePost() {
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const friendLists = groupsData?.groups || []
+  // AGORA-345: only the list actually being posted to, so the reach notice
+  // below tracks the picker rather than describing every list at once.
+  const selectedList = visibility === 'group'
+    ? friendLists.find((g: any) => g.id === friendListId)
+    : null
 
   // Load pages owned by current user (for post-as-page)
   const { data: myPagesData } = useQuery({
@@ -706,7 +711,62 @@ export default function CreatePost() {
           {create.isPending ? 'Posting…' : 'Post'}
         </button>
       </div>
+
+      {/* AGORA-345: quiet unless lossy. Nothing is shown for the ordinary case,
+          because a standing warning on every limited post trains people to
+          ignore it and costs it its value on the one post that needs it. */}
+      <AudienceReach list={selectedList} />
     </div>
     </>
+  )
+}
+
+// AudienceReach says what will happen to the members of a limited audience
+// whose servers cannot honour the limit, and says nothing otherwise.
+//
+// Two levels, because the two cases genuinely differ. A Bluesky account is not
+// delivered to at all, which is the closest thing to a defect from the author's
+// point of view. A fediverse account does receive it, and their server does keep
+// it unlisted, but there is no Close Friends concept there and it will not carry
+// replies back to the rest of the list.
+//
+// Named rather than counted: "Dave will not see replies from the rest of this
+// list" is something an author can act on, where "1 member has reduced
+// functionality" is not. Posting is never blocked and the audience is never
+// silently changed; the author chose this list, and the job here is only to see
+// that they are not surprised by it.
+function AudienceReach({ list }: { list: any }) {
+  if (!list) return null
+
+  const names = (all: string[], total: number) => {
+    if (total > all.length) return `${all.join(', ')} and ${total - all.length} other${total - all.length === 1 ? '' : 's'}`
+    if (all.length > 1) return `${all.slice(0, -1).join(', ')} and ${all[all.length - 1]}`
+    return all[0] || ''
+  }
+
+  const bsky = list.bluesky_count > 0
+  const fedi = list.fediverse_count > 0
+  if (!bsky && !fedi) return null
+
+  return (
+    <div className="mt-2 flex items-start gap-2 text-xs text-agora-500 dark:text-agora-400">
+      <Info size={13} className="mt-0.5 flex-shrink-0" />
+      <div className="space-y-0.5">
+        {bsky && (
+          <p>
+            <span className="font-medium">{names(list.bluesky_names, list.bluesky_count)}</span>
+            {list.bluesky_count === 1 ? ' is' : ' are'} on Bluesky, which has no way to receive a post
+            limited to a list, so they will not get this one.
+          </p>
+        )}
+        {fedi && (
+          <p>
+            <span className="font-medium">{names(list.fediverse_names, list.fediverse_count)}</span>
+            {' will get this and their server will keep it unlisted, but it has no concept of this list, '}
+            so replies there will not reach the rest of it.
+          </p>
+        )}
+      </div>
+    </div>
   )
 }

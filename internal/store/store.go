@@ -1396,4 +1396,139 @@ var schema = []string{
 	// from a live table earns nothing here, and an empty value says "not used"
 	// as clearly as a missing column would.
 	`UPDATE federated_instances SET public_key = '' WHERE public_key != ''`,
+
+	// ── AGORA-346: one person, one row ─────────────────────────────────────
+	//
+	// The old protocol cached a remote person keyed on
+	// (remote_user_id, remote_instance) with no ap_actor_url. ActivityPub caches
+	// the same person keyed on ap_actor_url with no remote_user_id. Meet
+	// somebody both ways and there are two rows for one human, with the
+	// friendship on one and the posts on the other.
+	//
+	// AGORA-329 added the bridges that make that survivable and
+	// adoptActorURLForLegacyStub repairs a stub in place, but it declines when a
+	// twin already holds the actor URL, because the partial unique index on
+	// ap_actor_url would refuse it. That decline is where a duplicate becomes
+	// permanent, and merging is the only thing that resolves it.
+	//
+	// The merge lives in the database rather than in Go because it has to
+	// enumerate every foreign key pointing at users(id), and reading that from
+	// information_schema is the only version that cannot fall behind the schema.
+	// A hand-written list would be wrong the first time a table is added, and
+	// wrong in the worst way: posts.author_id is ON DELETE CASCADE, so a missed
+	// table means deleting the loser destroys somebody's posts.
+	`CREATE OR REPLACE FUNCTION agora_merge_duplicate_identity(loser UUID, winner UUID)
+	 RETURNS TEXT LANGUAGE plpgsql AS $fn$
+	 DECLARE
+	   fk       RECORD;
+	   row_ref  RECORD;
+	   leftover BIGINT;
+	   remaining BIGINT := 0;
+	 BEGIN
+	   IF loser IS NULL OR winner IS NULL OR loser = winner THEN
+	     RETURN 'skipped: not a pair';
+	   END IF;
+
+	   -- Repoint every reference, one row at a time. Per-row rather than a bulk
+	   -- UPDATE so a unique collision (both rows are friends with the same local
+	   -- user, both reacted to the same post) can be resolved precisely: the
+	   -- winner already holds the equivalent row, so the loser's copy is the
+	   -- redundant one and only that copy is dropped. A bulk UPDATE would fail
+	   -- the whole table and a bulk fallback would drop rows that never
+	   -- collided.
+	   FOR fk IN
+	     SELECT tc.table_name AS tbl, kcu.column_name AS col
+	       FROM information_schema.table_constraints tc
+	       JOIN information_schema.key_column_usage kcu
+	         ON kcu.constraint_name = tc.constraint_name
+	       JOIN information_schema.constraint_column_usage ccu
+	         ON ccu.constraint_name = tc.constraint_name
+	      WHERE tc.constraint_type = 'FOREIGN KEY'
+	        AND ccu.table_name = 'users' AND ccu.column_name = 'id'
+	        AND tc.table_schema = current_schema()
+	   LOOP
+	     FOR row_ref IN EXECUTE format('SELECT ctid FROM %I WHERE %I = $1', fk.tbl, fk.col) USING loser
+	     LOOP
+	       BEGIN
+	         EXECUTE format('UPDATE %I SET %I = $1 WHERE ctid = $2', fk.tbl, fk.col) USING winner, row_ref.ctid;
+	       EXCEPTION
+	         WHEN unique_violation OR check_violation THEN
+	           EXECUTE format('DELETE FROM %I WHERE ctid = $1', fk.tbl) USING row_ref.ctid;
+	       END;
+	     END LOOP;
+	   END LOOP;
+
+	   -- Carry the legacy key across so the historical identity still resolves,
+	   -- and so remoteUserIDForActor's second lookup keeps working.
+	   UPDATE users w
+	      SET remote_user_id  = COALESCE(NULLIF(w.remote_user_id, ''),  l.remote_user_id),
+	          remote_instance = COALESCE(NULLIF(w.remote_instance, ''), l.remote_instance)
+	     FROM users l
+	    WHERE w.id = winner AND l.id = loser;
+
+	   -- Only delete once the row provably has nothing left. The enumeration
+	   -- above is complete by construction, so this should always hold; it is
+	   -- checked anyway because the cost of being wrong is somebody's posts.
+	   FOR fk IN
+	     SELECT tc.table_name AS tbl, kcu.column_name AS col
+	       FROM information_schema.table_constraints tc
+	       JOIN information_schema.key_column_usage kcu
+	         ON kcu.constraint_name = tc.constraint_name
+	       JOIN information_schema.constraint_column_usage ccu
+	         ON ccu.constraint_name = tc.constraint_name
+	      WHERE tc.constraint_type = 'FOREIGN KEY'
+	        AND ccu.table_name = 'users' AND ccu.column_name = 'id'
+	        AND tc.table_schema = current_schema()
+	   LOOP
+	     EXECUTE format('SELECT COUNT(*) FROM %I WHERE %I = $1', fk.tbl, fk.col) INTO leftover USING loser;
+	     remaining := remaining + leftover;
+	   END LOOP;
+
+	   IF remaining > 0 THEN
+	     -- Neutered rather than deleted: blanking both keys stops it resolving
+	     -- by either identity, so it cannot claim traffic meant for the winner,
+	     -- and whatever is still attached is preserved for a human to look at.
+	     UPDATE users SET ap_actor_url = '', remote_user_id = '' WHERE id = loser;
+	     RETURN 'neutered: ' || remaining || ' reference(s) could not be moved';
+	   END IF;
+
+	   DELETE FROM users WHERE id = loser;
+	   RETURN 'merged';
+	 END;
+	 $fn$`,
+
+	// The one-shot pass over pairs that already exist. A twin is findable
+	// because the derivation is deterministic: a stub for handle h on instance i
+	// is the same person as the actor at https://i/federation/users/h, which is
+	// exactly what remoteAgoraActorURL computes.
+	//
+	// Guarded, and a no-op on an instance that never ran the old protocol, which
+	// is most of them.
+	`DO $do$
+	 DECLARE pair RECORD; n INT := 0;
+	 BEGIN
+	   IF EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_346_identity_merge') THEN
+	     RETURN;
+	   END IF;
+	   FOR pair IN
+	     SELECT l.id AS loser, a.id AS winner
+	       FROM users l
+	       JOIN users a
+	         ON a.ap_actor_url = 'https://' || l.remote_instance || '/federation/users/' || l.remote_user_id
+	      WHERE l.is_remote = true
+	        AND COALESCE(l.remote_user_id, '')  != ''
+	        AND COALESCE(l.remote_instance, '') != ''
+	        AND COALESCE(l.ap_actor_url, '')     = ''
+	        AND a.id != l.id
+	   LOOP
+	     PERFORM agora_merge_duplicate_identity(pair.loser, pair.winner);
+	     n := n + 1;
+	   END LOOP;
+	   IF n > 0 THEN
+	     RAISE NOTICE 'agora-346: merged % duplicate identity row(s)', n;
+	   END IF;
+	 END
+	 $do$`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_346_identity_merge')
+		ON CONFLICT (name) DO NOTHING`,
 }

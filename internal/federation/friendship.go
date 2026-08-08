@@ -94,9 +94,26 @@ func (s *Service) remoteAgoraActorURL(userID string) (string, error) {
 func (s *Service) adoptActorURLForLegacyStub(userID, actorURL string) {
 	var claimedBy string
 	s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1`, actorURL).Scan(&claimedBy)
+
+	// AGORA-346: a twin already holds this actor URL, so the two rows are one
+	// person and this is the moment we can prove it. This used to return here,
+	// which left the duplicate in place permanently and silently: the stub kept
+	// the friendship, the ActivityPub row kept the posts, and each surface
+	// showed whichever it happened to query.
+	//
+	// Merged onto the ActivityPub row, since that is the identity every current
+	// code path keys on. The merge repoints every reference before it removes
+	// anything, and refuses to remove the row at all if something is left over.
 	if claimedBy != "" && claimedBy != userID {
+		var outcome string
+		if err := s.db.QueryRow(`SELECT agora_merge_duplicate_identity($1, $2)`, userID, claimedBy).Scan(&outcome); err != nil {
+			log.Printf("federation: could not merge duplicate identity for %s: %v", actorURL, err)
+			return
+		}
+		log.Printf("federation: %s was held as two rows, %s onto the ActivityPub identity", actorURL, outcome)
 		return
 	}
+
 	s.db.Exec(`UPDATE users SET ap_actor_url = $1 WHERE id = $2 AND COALESCE(ap_actor_url,'') = ''`, actorURL, userID)
 }
 

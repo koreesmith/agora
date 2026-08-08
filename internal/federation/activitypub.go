@@ -1025,7 +1025,7 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 		if s.matchRelayByDomain(verifiedActor, "enabled", "pending") != "" {
 			s.ingestRelayForwardedCreate(a.Object)
 		} else {
-			s.handleInboundCreate(verifiedActor, a.Object)
+			s.handleInboundCreate(verifiedActor, a.Object, body)
 		}
 	case "Update":
 		s.handleInboundUpdate(verifiedActor, a.Object)
@@ -1691,7 +1691,10 @@ func (s *Service) applyInboundPoll(postID string, poll *apPoll) {
 
 // ── Inbound Create (replies into threads we own, or a followed account's own
 //    top-level posts — AGORA-146) ─────────────────────────────────────────────
-func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage) {
+// rawActivity is the exact bytes that arrived, kept so AGORA-340 can forward
+// a reply verbatim to the rest of a thread's audience without re-serializing
+// somebody else's activity through a struct this version may not fully model.
+func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var note struct {
 		ID           string         `json:"id"`
 		Type         string         `json:"type"` // AGORA-210: "Question" for a poll, "Note" otherwise
@@ -1718,8 +1721,26 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	}
 	// attributedTo must match the cryptographically verified signer — an
 	// activity envelope signed by A cannot claim to contain a Note by B.
-	if note.AttributedTo == "" || note.AttributedTo != verifiedActor {
+	//
+	// AGORA-340 carves out one exception: the instance that owns a thread may
+	// forward a reply into it on behalf of the replier. That is the only way a
+	// limited-audience conversation can work. Alice addresses a friends-only
+	// post to Bob and Carol; Bob replies, but Bob's instance was told nothing
+	// about Carol (deliberately, per ADR-002), so only Alice's instance knows
+	// the audience and only it can complete the conversation.
+	//
+	// The carve-out is narrow, and isThreadOwnerForwarding states exactly how.
+	// Without it a peer could put words in anyone's mouth; with it, a peer can
+	// only do so inside a thread it already controls entirely.
+	forwarded := false
+	if note.AttributedTo == "" {
 		return
+	}
+	if note.AttributedTo != verifiedActor {
+		if note.InReplyTo == "" || !s.isThreadOwnerForwarding(verifiedActor, note.InReplyTo) {
+			return
+		}
+		forwarded = true
 	}
 	if note.ID == "" {
 		return
@@ -1786,12 +1807,21 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// private profile's thread. A friends-only thread is open to the author's
 	// accepted friends and to nobody else, which is the same rule that governs
 	// who could see the post in the first place.
-	switch visibility {
-	case "public":
+	//
+	// AGORA-340: a forwarded reply is authorised differently, and deliberately.
+	// The check above already established that the signer owns this thread, and
+	// a thread owner deciding who is in their own conversation is the whole
+	// point. Requiring the replier to be OUR user's friend as well would be
+	// wrong, not merely strict: in Alice's thread, Carol sees Bob's reply
+	// because Alice's audience includes them both, not because Carol knows Bob.
+	switch {
+	case forwarded:
+		// Authorised by thread ownership, verified above.
+	case visibility == "public":
 		if profilePrivate {
 			return
 		}
-	case "friends":
+	case visibility == "friends":
 		if !s.isAcceptedFriendByActor(postAuthorID, verifiedActor) {
 			log.Printf("federation: dropping a reply into a friends-only thread from %s, who is not a friend of its author", verifiedActor)
 			return
@@ -1803,7 +1833,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
-	remoteUserID, err := s.getOrCreateRemoteAPUser(verifiedActor, postAuthorID)
+	// AGORA-340: the comment belongs to whoever wrote it, which for a forwarded
+	// reply is not the signer. Attributing it to the forwarding instance would
+	// put Bob's words under Alice's name on every instance but Bob's own.
+	remoteUserID, err := s.getOrCreateRemoteAPUser(note.AttributedTo, postAuthorID)
 	if err != nil || remoteUserID == "" {
 		return
 	}
@@ -1825,6 +1858,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	s.storeInboundImages(commentID, imageURLs)
 	s.storeInboundVideo(commentID, videoURL)
 	s.storeHashtags(commentID, hashtagsFromAPTags(note.Tag)) // AGORA-213
+
+	// AGORA-340: this instance owns the thread, so it is the only party that
+	// knows the audience and the only one that can complete the conversation.
+	// Forwarded verbatim, and only onward: a reply that arrived as a forward is
+	// not forwarded again, or two instances would bounce it between them.
+	if !forwarded && visibility == "friends" && len(rawActivity) > 0 {
+		go s.FanOutThreadReply(rootPostID, note.AttributedTo, rawActivity)
+	}
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
@@ -4270,6 +4311,24 @@ func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
 
 	payload, err := json.Marshal(activity)
 	if err != nil {
+		return
+	}
+	s.enqueueAPDeliveryRaw(userID, inboxURL, payload)
+}
+
+// enqueueAPDeliveryRaw queues an activity that is already serialized.
+//
+// AGORA-340 needs this: a forwarded reply must go out as the exact bytes that
+// arrived, since re-marshaling through map[string]any would drop any field this
+// version does not model and quietly rewrite somebody else's activity in the
+// process. Shares enqueueAPDelivery's ap_blocked_by guard rather than
+// duplicating it, since that is the one central check every outbound path
+// depends on.
+func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) {
+	var blocked bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_inbox_url = $2 AND blocker_inbox_url != '')`,
+		userID, inboxURL).Scan(&blocked)
+	if blocked {
 		return
 	}
 	s.db.Exec(`

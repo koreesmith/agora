@@ -190,3 +190,85 @@ func isAddressedPublicly(audiences ...[]string) bool {
 	}
 	return false
 }
+
+// ── Limited-audience thread fan-out (AGORA-340) ───────────────────────────────
+//
+// A limited-audience conversation can only be completed by the instance that
+// owns it. Alice addresses a friends-only post to Bob and Carol; Bob replies,
+// but Bob's instance was told nothing about Carol, deliberately, because
+// ADR-002 keeps the audience's membership off the wire. So Bob's reply reaches
+// Alice and stops there unless Alice's instance forwards it on.
+//
+// That requires the receiving instance to accept an activity attributed to Bob
+// but signed by Alice's, which is the one exception to the rule that a signer
+// may only speak for itself. The exception is bounded by thread ownership: a
+// peer can only put words in someone's mouth inside a thread it already
+// controls entirely, and could equally have posted those words as itself.
+// AGORA-222 already accepts relay-forwarded Creates on the same reasoning.
+
+// isThreadOwnerForwarding reports whether verifiedActor is the author of the
+// thread that inReplyTo belongs to, and so is entitled to forward a reply into
+// it on somebody else's behalf.
+//
+// Every condition here is load-bearing:
+//   - the target must resolve to a post this instance already holds, so a
+//     forward cannot introduce a thread nobody was part of;
+//   - that post's author must be the signer, so only the thread's owner may
+//     forward into it;
+//   - the thread must be limited-audience, since a public thread needs no
+//     forwarding and should not gain a bypass it has no use for.
+func (s *Service) isThreadOwnerForwarding(verifiedActor, inReplyTo string) bool {
+	parentID, _, visibility, postAuthorID, ok := s.resolveReplyTarget(inReplyTo)
+	if !ok || parentID == "" || postAuthorID == "" {
+		return false
+	}
+	if visibility != "friends" {
+		return false
+	}
+
+	// The thread author must be the signer. Locally-authored threads are
+	// excluded by construction: a local user has no ap_actor_url, so this
+	// cannot match, and this instance would be the forwarder rather than a
+	// recipient of one.
+	var authorActor string
+	s.db.QueryRow(`SELECT COALESCE(ap_actor_url,'') FROM users WHERE id = $1`, postAuthorID).Scan(&authorActor)
+	return authorActor != "" && authorActor == verifiedActor
+}
+
+// FanOutThreadReply forwards a reply in a thread this instance owns to the rest
+// of that thread's audience.
+//
+// Called after a remote reply has been ingested into a local friends-only
+// thread. The replier is excluded, since their own instance already has it, and
+// so is anyone whose instance shares an inbox with them, because the activity is
+// addressed per-instance rather than per-person.
+func (s *Service) FanOutThreadReply(rootPostID, replierActorURL string, activity []byte) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var authorID, visibility string
+	if err := s.db.QueryRow(`
+		SELECT author_id, visibility FROM posts WHERE id = $1 AND deleted_at IS NULL AND is_remote = false
+	`, rootPostID).Scan(&authorID, &visibility); err != nil || visibility != "friends" {
+		return
+	}
+
+	replierInbox, _ := s.remoteInboxFor(authorID, replierActorURL)
+
+	var sent int
+	seen := map[string]bool{}
+	for _, r := range s.remoteFriendRecipients(authorID) {
+		// Skip the replier's own instance. It has the reply already, and
+		// sending it back would be a redelivery its dedup has to absorb.
+		if r.inboxURL == "" || r.inboxURL == replierInbox || r.actorURL == replierActorURL || seen[r.inboxURL] {
+			continue
+		}
+		seen[r.inboxURL] = true
+		s.enqueueAPDeliveryRaw(authorID, r.inboxURL, activity)
+		sent++
+	}
+	if sent > 0 {
+		log.Printf("federation: forwarded a reply in thread %s to %d further instance inbox(es)", rootPostID, sent)
+	}
+}

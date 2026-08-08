@@ -201,3 +201,70 @@ func TestIsAcceptedFriendByActor(t *testing.T) {
 		})
 	}
 }
+
+// TestIsThreadOwnerForwarding covers the one exception AGORA-340 makes to the
+// rule that a signer may only speak for itself. Every condition is a boundary
+// worth pinning: too loose and a peer can forge a reply from anyone, too tight
+// and a limited-audience conversation cannot be completed at all.
+func TestIsThreadOwnerForwarding(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano() % 1_000_000
+
+	domain := fmt.Sprintf("t340-%d.example", unique)
+	ownerActor := "https://" + domain + "/federation/users/alice"
+	otherActor := "https://" + domain + "/federation/users/mallory"
+
+	// The thread author, as this instance holds them: a remote stub.
+	var ownerID string
+	if err := db.QueryRow(`
+		INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+		VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+	`, fmt.Sprintf("own340%d", unique), domain, ownerActor).Scan(&ownerID); err != nil {
+		t.Fatalf("insert owner: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, ownerID) })
+
+	mkPost := func(visibility string) string {
+		t.Helper()
+		remoteID := fmt.Sprintf("https://%s/federation/users/alice/posts/%s-%d", domain, visibility, unique)
+		var id string
+		if err := db.QueryRow(`
+			INSERT INTO posts (author_id, content, visibility, is_remote, remote_post_id, remote_instance)
+			VALUES ($1,'hi',$2,true,$3,$4) RETURNING id
+		`, ownerID, visibility, remoteID, domain).Scan(&id); err != nil {
+			t.Fatalf("insert post: %v", err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, id) })
+		return remoteID
+	}
+
+	friendsThread := mkPost("friends")
+	publicThread := mkPost("public")
+
+	t.Run("the thread's own author may forward into it", func(t *testing.T) {
+		if !s.isThreadOwnerForwarding(ownerActor, friendsThread) {
+			t.Error("refused the thread owner, so a limited-audience conversation can never be completed")
+		}
+	})
+
+	t.Run("nobody else may", func(t *testing.T) {
+		if s.isThreadOwnerForwarding(otherActor, friendsThread) {
+			t.Error("allowed a non-owner to forward, which lets any peer forge a reply from anyone")
+		}
+	})
+
+	t.Run("a public thread grants no bypass", func(t *testing.T) {
+		// A public thread needs no forwarding, so it must not acquire an
+		// exception it has no use for.
+		if s.isThreadOwnerForwarding(ownerActor, publicThread) {
+			t.Error("allowed forwarding into a public thread")
+		}
+	})
+
+	t.Run("an unknown thread is refused", func(t *testing.T) {
+		if s.isThreadOwnerForwarding(ownerActor, "https://"+domain+"/federation/users/alice/posts/nope") {
+			t.Error("allowed a forward to introduce a thread this instance never had")
+		}
+	})
+}

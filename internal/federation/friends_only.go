@@ -139,6 +139,29 @@ func (s *Service) remoteFriendRecipients(userID string) []friendRecipient {
 	return out
 }
 
+// isAcceptedFriendByActor reports whether the remote account behind an actor URL
+// is an accepted friend of a local user (AGORA-339).
+//
+// Keyed on the actor URL because that is the only identity an inbound activity
+// carries, and resolved through remoteUserIDForActor so a friendship recorded
+// against a legacy stub, which has no ap_actor_url, still counts. Without that
+// fallback a friendship formed before AGORA-333 would silently fail this check.
+func (s *Service) isAcceptedFriendByActor(localUserID, actorURL string) bool {
+	remoteUserID := s.remoteUserIDForActor(actorURL)
+	if remoteUserID == "" {
+		return false
+	}
+	var ok bool
+	s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE status = 'accepted'
+			  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+		)
+	`, localUserID, remoteUserID).Scan(&ok)
+	return ok
+}
+
 // friendsOnlyVisibility decides what an inbound addressed Note should be stored
 // as, given its audience marker and whether it was addressed publicly.
 //

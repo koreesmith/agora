@@ -119,3 +119,85 @@ func TestRemoteFriendRecipients(t *testing.T) {
 		t.Errorf("inboxURL = %q, want the derived shared inbox %q", got[0].inboxURL, want)
 	}
 }
+
+// TestIsAcceptedFriendByActor covers the gate AGORA-339 put in front of replies
+// and reactions on a friends-only thread. Getting it wrong either lets a
+// stranger into a private conversation or locks a genuine friend out of one, so
+// both directions are pinned.
+func TestIsAcceptedFriendByActor(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var authorID string
+	authorName := fmt.Sprintf("a339%d", unique%1_000_000)
+	db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`, authorName).Scan(&authorID)
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+	t.Cleanup(func() { db.Exec(`DELETE FROM friendships WHERE requester_id = $1 OR addressee_id = $1`, authorID) })
+
+	// users.username is VARCHAR(50), so these stay short. An over-long name
+	// makes the insert fail silently and the test then asserts against a
+	// friendship that was never created, which reads as a code bug.
+	domain := fmt.Sprintf("p339-%d.example", unique%1_000_000)
+	mkRemote := func(handle string, useActorURL bool) (string, string) {
+		t.Helper()
+		actorURL := "https://" + domain + "/federation/users/" + handle
+		name := fmt.Sprintf("%s339%d", handle, unique%1_000_000)
+		var id string
+		var err error
+		if useActorURL {
+			err = db.QueryRow(`INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+			             VALUES ($1,$1,'x',true,$2,$3) RETURNING id`, name, domain, actorURL).Scan(&id)
+		} else {
+			// A legacy stub: no ap_actor_url at all. A friendship formed before
+			// AGORA-333 looks like this, and must still pass.
+			err = db.QueryRow(`INSERT INTO users (username,email,password_hash,is_remote,remote_instance,remote_user_id)
+			             VALUES ($1,$1,'x',true,$2,$3) RETURNING id`, name, domain, handle).Scan(&id)
+		}
+		if err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+		return id, actorURL
+	}
+	befriend := func(otherID, status string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO friendships (requester_id,addressee_id,status) VALUES ($1,$2,$3)`,
+			authorID, otherID, status); err != nil {
+			t.Fatalf("befriend: %v", err)
+		}
+	}
+
+	friendID, friendActor := mkRemote("friend", true)
+	befriend(friendID, "accepted")
+
+	_, strangerActor := mkRemote("stranger", true)
+
+	pendingID, pendingActor := mkRemote("pending", true)
+	befriend(pendingID, "pending")
+
+	legacyID, legacyActor := mkRemote("legacy", false)
+	befriend(legacyID, "accepted")
+
+	cases := []struct {
+		name  string
+		actor string
+		want  bool
+	}{
+		{"an accepted friend may join the thread", friendActor, true},
+		{"a stranger may not", strangerActor, false},
+		{"a pending request is not yet a friend", pendingActor, false},
+		// Resolved through remoteUserIDForActor, so a friendship recorded
+		// against a legacy stub with no ap_actor_url still counts.
+		{"a friend on a legacy stub still counts", legacyActor, true},
+		{"an unknown actor may not", "https://" + domain + "/federation/users/nobody", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := s.isAcceptedFriendByActor(authorID, c.actor); got != c.want {
+				t.Errorf("isAcceptedFriendByActor(author, %q) = %v, want %v", c.actor, got, c.want)
+			}
+		})
+	}
+}

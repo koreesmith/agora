@@ -1770,7 +1770,36 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// mirrors the same defense-in-depth re-check BroadcastPublicPost does.
 	var profilePrivate, apEnabled bool
 	if err := s.db.QueryRow(`SELECT profile_private, activitypub_enabled FROM users WHERE id = $1`, postAuthorID).
-		Scan(&profilePrivate, &apEnabled); err != nil || profilePrivate || !apEnabled || visibility != "public" {
+		Scan(&profilePrivate, &apEnabled); err != nil || !apEnabled {
+		return
+	}
+
+	// AGORA-339: which threads a remote actor may reply into.
+	//
+	// This used to be `visibility != "public"` and nothing else, so a friends-
+	// only post accepted no replies at all: a remote friend could see the post
+	// (AGORA-337) and their reply was silently discarded on arrival. A friend
+	// on another instance is a friend, and that has to include being able to
+	// answer.
+	//
+	// A public thread stays open to anyone, as before, and still refuses a
+	// private profile's thread. A friends-only thread is open to the author's
+	// accepted friends and to nobody else, which is the same rule that governs
+	// who could see the post in the first place.
+	switch visibility {
+	case "public":
+		if profilePrivate {
+			return
+		}
+	case "friends":
+		if !s.isAcceptedFriendByActor(postAuthorID, verifiedActor) {
+			log.Printf("federation: dropping a reply into a friends-only thread from %s, who is not a friend of its author", verifiedActor)
+			return
+		}
+	default:
+		// 'group' (friend-list) and 'private' threads have no federated
+		// audience yet, so a reply into one cannot be authorised. Revisit with
+		// the audience storage in AGORA-328.
 		return
 	}
 
@@ -2233,7 +2262,29 @@ func (s *Service) resolveFederatableTarget(verifiedActor, objectURL string) (pos
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
 	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled)
-	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
+	if err != nil || !apEnabled {
+		return "", "", false
+	}
+
+	// AGORA-339: the same widening the reply path needed, in the one place that
+	// gates Likes, Undo(Like), Announce and Undo(Announce). It read
+	// `visibility != "public"` and nothing else, so a remote friend could see a
+	// friends-only post but not react to it, and their reaction disappeared
+	// without a word.
+	//
+	// Friends-only opens to the author's accepted friends and nobody else,
+	// which is the same rule that decided who could see the post. Everything
+	// with no federated audience yet ('group', 'private') stays closed.
+	switch visibility {
+	case "public":
+		if profilePrivate {
+			return "", "", false
+		}
+	case "friends":
+		if !s.isAcceptedFriendByActor(postAuthorID, verifiedActor) {
+			return "", "", false
+		}
+	default:
 		return "", "", false
 	}
 	return postID, postAuthorID, true

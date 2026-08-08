@@ -329,3 +329,192 @@ func TestResolveFederatableTargetForSeparatesSignerFromActor(t *testing.T) {
 		}
 	})
 }
+
+// ── AGORA-342: friend-list audiences ──────────────────────────────────────────
+
+// TestListPostVisibilityIsFailClosed pins the storage decision. A friend-list
+// post lands as 'private' because every existing feed filter already excludes
+// that value, so a query site overlooked during this change hides the post
+// rather than publishing it. Were this to drift to a value the filters admit,
+// somebody's limited post becomes visible to their whole instance.
+func TestListPostVisibilityIsFailClosed(t *testing.T) {
+	if got := friendsOnlyVisibility("list", false); got != "private" {
+		t.Errorf("friendsOnlyVisibility(\"list\", false) = %q, want \"private\"", got)
+	}
+	// Same contradiction rule as friends-only: claiming a limited audience while
+	// addressing Public has already published it.
+	if got := friendsOnlyVisibility("list", true); got != "public" {
+		t.Errorf("friendsOnlyVisibility(\"list\", true) = %q, want \"public\"", got)
+	}
+}
+
+// TestRemoteListRecipients covers who a friend-list post is addressed to: the
+// members of that one list who live elsewhere. A member of a different list must
+// not be swept in, which would deliver the post to somebody the author did not
+// choose.
+func TestRemoteListRecipients(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var localID string
+	localName := fmt.Sprintf("fl342_own_%d", unique)
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`, localName).Scan(&localID); err != nil {
+		t.Fatalf("seeding the list owner failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, localID) })
+
+	peerDomain := fmt.Sprintf("flpeer342-%d.example", unique)
+	mk := func(suffix, name string) string {
+		var id string
+		uname := fmt.Sprintf("fl342_%s_%d", suffix, unique)
+		if err := db.QueryRow(`
+			INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+			VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+		`, uname, peerDomain, "https://"+peerDomain+"/federation/users/"+name).Scan(&id); err != nil {
+			t.Fatalf("seeding %s failed: %v", suffix, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+		return id
+	}
+	inList := mk("inlist", "bob")
+	otherList := mk("otherlist", "carol")
+
+	mkGroup := func(name string, members ...string) string {
+		var gid string
+		if err := db.QueryRow(`INSERT INTO friend_groups (user_id,name) VALUES ($1,$2) RETURNING id`, localID, name).Scan(&gid); err != nil {
+			t.Fatalf("seeding list %q failed: %v", name, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM friend_groups WHERE id = $1`, gid) })
+		for _, m := range members {
+			if _, err := db.Exec(`INSERT INTO friend_group_members (group_id,friend_id) VALUES ($1,$2)`, gid, m); err != nil {
+				t.Fatalf("seeding membership failed: %v", err)
+			}
+		}
+		return gid
+	}
+	closeFriends := mkGroup(fmt.Sprintf("Close Friends %d", unique), inList)
+	mkGroup(fmt.Sprintf("Work %d", unique), otherList)
+
+	got := s.remoteListRecipients(localID, closeFriends)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d recipients, want 1 (only the member of that list)", len(got))
+	}
+	if want := "https://" + peerDomain + "/federation/users/bob"; got[0].actorURL != want {
+		t.Errorf("actorURL = %q, want %q; a member of another list must never be addressed", got[0].actorURL, want)
+	}
+}
+
+// TestRecordPostAudienceIgnoresUnknownActors covers the receiving end. Being
+// named in the addressing is the whole of the permission, so recording a user
+// who was not named would hand them somebody else's limited post.
+func TestRecordPostAudienceIgnoresUnknownActors(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	mkLocal := func(suffix string) (string, string) {
+		var id string
+		uname := fmt.Sprintf("fl342r_%s_%d", suffix, unique)
+		if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`, uname).Scan(&id); err != nil {
+			t.Fatalf("seeding %s failed: %v", suffix, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+		return id, uname
+	}
+	addressedID, addressedName := mkLocal("addressed")
+	bystanderID, _ := mkLocal("bystander")
+
+	var authorID string
+	if err := db.QueryRow(`
+		INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+		VALUES ($1,$1,'x',true,'peer342.example','https://peer342.example/federation/users/alice') RETURNING id
+	`, fmt.Sprintf("fl342r_author_%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("seeding the remote author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+
+	var postID string
+	if err := db.QueryRow(`
+		INSERT INTO posts (author_id,content,visibility) VALUES ($1,'limited','private') RETURNING id
+	`, authorID).Scan(&postID); err != nil {
+		t.Fatalf("seeding the post failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, postID) })
+
+	n := s.recordPostAudience(postID, []string{
+		"https://local.example/federation/users/" + addressedName,
+		"https://peer342.example/federation/users/nobody-we-host",
+		"https://www.w3.org/ns/activitystreams#Public",
+	})
+	if n != 1 {
+		t.Fatalf("recorded %d local recipients, want 1", n)
+	}
+
+	var addressedHas, bystanderHas bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id=$1 AND user_id=$2)`, postID, addressedID).Scan(&addressedHas)
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id=$1 AND user_id=$2)`, postID, bystanderID).Scan(&bystanderHas)
+	if !addressedHas {
+		t.Error("the addressed user has no audience row, so the post they were sent stays invisible to them")
+	}
+	if bystanderHas {
+		t.Error("a user who was never addressed got an audience row, which hands them somebody else's limited post")
+	}
+}
+
+// TestIsAddressedListMember covers the authorisation counterpart: exactly the
+// people a list post was delivered to may reply to it or react to it.
+func TestIsAddressedListMember(t *testing.T) {
+	db := testFriendshipService(t)
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://local.example"}}
+	unique := time.Now().UnixNano()
+
+	var authorID string
+	if err := db.QueryRow(`INSERT INTO users (username,email,password_hash) VALUES ($1,$1,'x') RETURNING id`,
+		fmt.Sprintf("fl342m_author_%d", unique)).Scan(&authorID); err != nil {
+		t.Fatalf("seeding the author failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, authorID) })
+
+	peerDomain := fmt.Sprintf("flmpeer342-%d.example", unique)
+	memberActor := "https://" + peerDomain + "/federation/users/bob"
+	strangerActor := "https://" + peerDomain + "/federation/users/mallory"
+
+	var memberID string
+	if err := db.QueryRow(`
+		INSERT INTO users (username,email,password_hash,is_remote,remote_instance,ap_actor_url)
+		VALUES ($1,$1,'x',true,$2,$3) RETURNING id
+	`, fmt.Sprintf("fl342m_member_%d", unique), peerDomain, memberActor).Scan(&memberID); err != nil {
+		t.Fatalf("seeding the member failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, memberID) })
+
+	var groupID string
+	if err := db.QueryRow(`INSERT INTO friend_groups (user_id,name) VALUES ($1,$2) RETURNING id`,
+		authorID, fmt.Sprintf("Close Friends %d", unique)).Scan(&groupID); err != nil {
+		t.Fatalf("seeding the list failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM friend_groups WHERE id = $1`, groupID) })
+	if _, err := db.Exec(`INSERT INTO friend_group_members (group_id,friend_id) VALUES ($1,$2)`, groupID, memberID); err != nil {
+		t.Fatalf("seeding membership failed: %v", err)
+	}
+
+	var postID string
+	if err := db.QueryRow(`
+		INSERT INTO posts (author_id,content,visibility,group_id) VALUES ($1,'limited','group',$2) RETURNING id
+	`, authorID, groupID).Scan(&postID); err != nil {
+		t.Fatalf("seeding the post failed: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM posts WHERE id = $1`, postID) })
+
+	if !s.isAddressedListMember(postID, memberActor) {
+		t.Error("a member of the list was refused, so their reply to a post they can see would vanish")
+	}
+	if s.isAddressedListMember(postID, strangerActor) {
+		t.Error("a non-member was admitted into a limited thread")
+	}
+	if s.isAddressedListMember(postID, "") {
+		t.Error("an empty actor was admitted")
+	}
+}

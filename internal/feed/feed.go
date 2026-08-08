@@ -76,6 +76,8 @@ type fedSender interface {
 	BroadcastPublicPost(userID, postID string)
 	// AGORA-337: friends-only posts, addressed to remote friends by name.
 	BroadcastFriendsPost(userID, postID string)
+	// AGORA-342: the same for a post limited to one friend list.
+	BroadcastListPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
 	// BroadcastUpdatePost delivers a signed Update when a federated post is
 	// edited (AGORA-150).
@@ -231,7 +233,10 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
-			  AND p.visibility != 'private'
+			  AND (
+			    p.visibility != 'private'
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
@@ -241,7 +246,13 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  AND (
 			    p.visibility = 'public'
 			    OR p.visibility = 'friends'
+			    -- Both sides of a list post are named 'group', but they mean
+			    -- different lists: $4 is the viewer's own, and a remote author's
+			    -- is never represented here at all (ADR-002 keeps membership off
+			    -- the wire). A remote list post is admitted by the audience row
+			    -- instead, which is the receiving end of the same idea.
 			    OR (p.visibility = 'group' AND p.group_id = $4)
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
 			  )
 			  AND (
 			    p.community_group_id IS NULL
@@ -281,7 +292,13 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
-			  AND p.visibility != 'private'
+			  -- AGORA-342: a friend-list post from another Agora instance is stored
+			  -- 'private', so it stays hidden everywhere by default and surfaces
+			  -- only to the users it was actually addressed to.
+			  AND (
+			    p.visibility != 'private'
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND (
@@ -629,7 +646,11 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
-		  AND p.visibility != 'private'
+		  -- AGORA-342: remote friend-list posts, hidden unless addressed to us.
+		  AND (
+		    p.visibility != 'private'
+		    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+		  )
 		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 		  AND (
@@ -904,6 +925,12 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build visibility filter
+	// AGORA-342: the receiving end of a remote friend-list post. It is stored
+	// 'private' and carries no group_id we could match, because the author's list
+	// does not exist on this instance; being named in the audience is the whole
+	// of the permission.
+	const audienceClause = `EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)`
+
 	var visFilter string
 	switch {
 	case isSelf:
@@ -925,10 +952,13 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 					  AND fg.user_id = $2
 				)
 			)
+			OR ` + audienceClause + `
 		)`
 	default:
-		// Not friends, public profile: public only
-		visFilter = `p.visibility = 'public'`
+		// Not friends, public profile: public only. A remote author can still put
+		// a non-friend into one of their lists (AGORA-182/257 allow it locally
+		// too), so an explicit audience row is the one thing that gets past this.
+		visFilter = `(p.visibility = 'public' OR ` + audienceClause + `)`
 	}
 
 	// viewerID is compared against uuid columns; an empty string (guest) is
@@ -1170,6 +1200,14 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		go s.fed.BroadcastFriendsPost(userID, id)
 	}
 
+	// AGORA-342: the same for a friend-list post, addressed to the members of
+	// that one list who live elsewhere. The list's name and the rest of its
+	// membership stay on this instance; each recipient learns only that they
+	// were included.
+	if req.Visibility == "group" && req.GroupID != "" && s.fed != nil {
+		go s.fed.BroadcastListPost(userID, id)
+	}
+
 	// AGORA-190: federate as an app.bsky.feed.post record, independent of
 	// the AP broadcast above — a separate protocol with its own opt-in.
 	if req.Visibility == "public" && s.atproto != nil {
@@ -1229,8 +1267,17 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	if authorID != viewerID {
 		switch visibility {
 		case "private":
-			writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private"})
-			return
+			// AGORA-342: a remote friend-list post is stored 'private' so that
+			// every filter hides it by default; the audience row is what lets
+			// the people it was addressed to open and reply to it.
+			var addressed bool
+			if viewerID != "" {
+				s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id = $1 AND user_id = $2)`, id, viewerID).Scan(&addressed)
+			}
+			if !addressed {
+				writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private"})
+				return
+			}
 		case "friends", "group":
 			// Check friendship
 			var isFriend bool

@@ -1328,6 +1328,25 @@ var schema = []string{
 	`INSERT INTO schema_backfills (name) VALUES ('agora_336_friendship_following')
 		ON CONFLICT (name) DO NOTHING`,
 
+	// AGORA-342: who an inbound limited-audience post was addressed to.
+	//
+	// A friends-only post needs no such record, because the audience is
+	// derivable at both ends from a friendship both ends already hold
+	// (AGORA-337). A friend-list post is not: the list is the author's own
+	// private categorization, and ADR-002 keeps its membership off the wire, so
+	// the receiving instance is told only that it was addressed and to whom on
+	// its own side. That per-recipient fact has nowhere else to live.
+	//
+	// Deliberately not a friend_groups reference. The receiving instance has no
+	// row for somebody else's "Close Friends" and must never invent one; all it
+	// knows, and all it needs, is which of its users may see this post.
+	`CREATE TABLE IF NOT EXISTS post_audience (
+		post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		PRIMARY KEY (post_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_audience_user ON post_audience(user_id)`,
+
 	// AGORA-321: how a peering started. Two unrelated events wrote
 	// federated_instances rows that were then indistinguishable: an admin
 	// deliberately adding a peer (AddInstance), and an unknown instance being

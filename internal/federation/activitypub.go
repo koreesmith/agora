@@ -1783,7 +1783,16 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// claiming to be friends-only while addressed to Public is stored
 		// public, since that is what its author's own followers already saw.
 		visibility := friendsOnlyVisibility(note.Audience, isAddressedPublicly(note.To, note.CC))
-		s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+		postID := s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+
+		// AGORA-342: a list post is stored invisible and becomes visible only
+		// through this record. Written after the insert rather than before,
+		// so a post that failed to ingest leaves no audience row pointing at
+		// nothing.
+		if postID != "" && note.Audience == "list" {
+			n := s.recordPostAudience(postID, append(append([]string{}, note.To...), note.CC...))
+			log.Printf("federation: list post %s addressed to %d local user(s)", note.ID, n)
+		}
 		return
 	}
 
@@ -1831,10 +1840,17 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 			log.Printf("federation: dropping a reply into a friends-only thread from %s, who is not a friend of its author", verifiedActor)
 			return
 		}
+	case visibility == "group":
+		// AGORA-342: a friend-list thread is open to the list, which is the
+		// same set the post was delivered to.
+		if !s.isAddressedListMember(rootPostID, verifiedActor) {
+			log.Printf("federation: dropping a reply into a friend-list thread from %s, who is not in that list", verifiedActor)
+			return
+		}
 	default:
-		// 'group' (friend-list) and 'private' threads have no federated
-		// audience yet, so a reply into one cannot be authorised. Revisit with
-		// the audience storage in AGORA-328.
+		// A 'private' thread has no federated audience: locally that means a
+		// post the author addressed to nobody, and inbound it means a remote
+		// list post whose own instance is the one place a reply is authorised.
 		return
 	}
 
@@ -2015,16 +2031,16 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 // explicit (AGORA-337). Every caller but one wants "public"; a friends-only
 // post from another Agora instance wants "friends", which is what makes the
 // feed show it to the author's friends here and to nobody else.
-func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
+func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) (ingestedPostID string) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
-		return
+		return ""
 	}
 
 	remoteUserID, err := s.getOrCreateRemoteAPUser(actorURL, followerUserID)
 	if err != nil || remoteUserID == "" {
-		return
+		return ""
 	}
 
 	domain := domainFromURL(noteID)
@@ -2042,7 +2058,7 @@ func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, su
 		// sharedInbox optimization declared) — expected, not an error. Also
 		// means the notification loop below only ever runs on the actual
 		// first insert, never on a redelivery/duplicate no-op.
-		return
+		return ""
 	}
 	s.storeInboundImages(postID, imageURLs)
 	s.storeInboundVideo(postID, videoURL)
@@ -2073,6 +2089,7 @@ func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, su
 			}
 		}
 	}
+	return postID
 }
 
 // storeInboundImages persists a remote Note's image attachments — a single
@@ -2336,7 +2353,7 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 	switch {
 	case authorizeAs == "":
 		// Forwarded: authorised by thread ownership, verified by the caller.
-		if visibility != "friends" {
+		if visibility != "friends" && visibility != "group" {
 			return "", "", false
 		}
 	case visibility == "public":
@@ -2345,6 +2362,12 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 		}
 	case visibility == "friends":
 		if !s.isAcceptedFriendByActor(postAuthorID, authorizeAs) {
+			return "", "", false
+		}
+	case visibility == "group":
+		// AGORA-342: a friend-list post opens to the members of that list, which
+		// is precisely the set it was delivered to.
+		if !s.isAddressedListMember(postID, authorizeAs) {
 			return "", "", false
 		}
 	default:

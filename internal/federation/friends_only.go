@@ -171,8 +171,20 @@ func (s *Service) isAcceptedFriendByActor(localUserID, actorURL string) bool {
 // visibility is the more public one, since that is what the sender's own
 // followers will already have seen.
 func friendsOnlyVisibility(marker string, addressedPublicly bool) string {
-	if marker == "friends" && !addressedPublicly {
+	if addressedPublicly {
+		return "public"
+	}
+	switch marker {
+	case "friends":
 		return "friends"
+	case "list":
+		// AGORA-342: fail-closed. 'private' is already excluded by every
+		// existing feed filter, so a list post is invisible until an explicit
+		// post_audience join says otherwise. A dedicated visibility value would
+		// have been admitted by default anywhere a query excludes rather than
+		// allow-lists, and a missed query there leaks the post instead of
+		// hiding it.
+		return "private"
 	}
 	return "public"
 }
@@ -218,11 +230,22 @@ func isAddressedPublicly(audiences ...[]string) bool {
 //   - the thread must be limited-audience, since a public thread needs no
 //     forwarding and should not gain a bypass it has no use for.
 func (s *Service) isThreadOwnerForwarding(verifiedActor, inReplyTo string) bool {
-	parentID, _, visibility, postAuthorID, ok := s.resolveReplyTarget(inReplyTo)
+	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(inReplyTo)
 	if !ok || parentID == "" || postAuthorID == "" {
 		return false
 	}
-	if visibility != "friends" {
+	// AGORA-342: a received friend-list post is stored 'private', so allow that
+	// too, but only where an audience record proves it is one. Every other
+	// 'private' post is genuinely addressed to nobody.
+	switch visibility {
+	case "friends":
+	case "private":
+		var isListPost bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id = $1)`, rootPostID).Scan(&isListPost)
+		if !isListPost {
+			return false
+		}
+	default:
 		return false
 	}
 
@@ -248,9 +271,22 @@ func (s *Service) FanOutThreadReply(rootPostID, replierActorURL string, activity
 	}
 
 	var authorID, visibility string
+	var groupID *string
 	if err := s.db.QueryRow(`
-		SELECT author_id, visibility FROM posts WHERE id = $1 AND deleted_at IS NULL AND is_remote = false
-	`, rootPostID).Scan(&authorID, &visibility); err != nil || visibility != "friends" {
+		SELECT author_id, visibility, group_id FROM posts WHERE id = $1 AND deleted_at IS NULL AND is_remote = false
+	`, rootPostID).Scan(&authorID, &visibility, &groupID); err != nil {
+		return
+	}
+
+	// AGORA-342: the audience to forward to is the one the post went out to, so
+	// a reply in a friend-list thread reaches that list and stops there.
+	var audience []friendRecipient
+	switch {
+	case visibility == "friends":
+		audience = s.remoteFriendRecipients(authorID)
+	case visibility == "group" && groupID != nil:
+		audience = s.remoteListRecipients(authorID, *groupID)
+	default:
 		return
 	}
 
@@ -258,7 +294,7 @@ func (s *Service) FanOutThreadReply(rootPostID, replierActorURL string, activity
 
 	var sent int
 	seen := map[string]bool{}
-	for _, r := range s.remoteFriendRecipients(authorID) {
+	for _, r := range audience {
 		// Skip the replier's own instance. It has the reply already, and
 		// sending it back would be a redelivery its dedup has to absorb.
 		if r.inboxURL == "" || r.inboxURL == replierInbox || r.actorURL == replierActorURL || seen[r.inboxURL] {
@@ -271,4 +307,179 @@ func (s *Service) FanOutThreadReply(rootPostID, replierActorURL string, activity
 	if sent > 0 {
 		log.Printf("federation: forwarded a reply in thread %s to %d further instance inbox(es)", rootPostID, sent)
 	}
+}
+
+// ── Friend-list posts (AGORA-342) ─────────────────────────────────────────────
+//
+// The other half of AGORA-328, and the harder one. A friends-only audience is
+// derivable at both ends from a relationship both ends record; a list is not.
+// "Close Friends" is the author's own categorization, and ADR-002 keeps its
+// membership off the wire, so the receiving instance learns only that its user
+// was addressed. That is enough to enforce correctly and is all it should know.
+//
+// Stored fail-closed. The post lands with visibility 'private', which every
+// existing feed filter already excludes, and becomes visible solely through an
+// explicit post_audience join added where an addressed user should see it. The
+// alternative, a new visibility value, would have been admitted by default
+// anywhere a query excludes by `!= 'private'` rather than allow-listing, and a
+// query overlooked there leaks somebody's private post rather than hiding it.
+// For a privacy feature the failure mode decides the design.
+
+// BroadcastListPost delivers a friend-list post to the list's members on other
+// Agora instances, addressed to them by name.
+//
+// The list's name and its membership never leave this instance. Recipients are
+// addressed individually, so each learns that they were included and nothing
+// about who else was.
+func (s *Service) BroadcastListPost(userID, postID string) {
+	if !s.activityPubEnabled() {
+		return
+	}
+
+	var username, visibility, content, contentWarning string
+	var apEnabled bool
+	var createdAt time.Time
+	var groupID *string
+	err := s.db.QueryRow(`
+		SELECT u.username, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.group_id
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
+	`, postID, userID).Scan(&username, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &groupID)
+	if err != nil || visibility != "group" || !apEnabled || groupID == nil {
+		return
+	}
+
+	recipients := s.remoteListRecipients(userID, *groupID)
+	if len(recipients) == 0 {
+		return
+	}
+
+	actor := s.actorURL(username)
+	note := s.buildNoteObject(actor, postID, content, createdAt, "", contentWarning)
+
+	to := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		to = append(to, r.actorURL)
+	}
+	note["to"] = to
+	note["cc"] = []string{}
+	note[audienceMarker] = "list"
+
+	create := map[string]any{
+		"@context":     agoraContext,
+		"id":           actor + "/posts/" + postID + "/activity",
+		"type":         "Create",
+		"actor":        actor,
+		"to":           to,
+		"cc":           []string{},
+		audienceMarker: "list",
+		"object":       note,
+	}
+
+	sent := map[string]bool{}
+	for _, r := range recipients {
+		if r.inboxURL == "" || sent[r.inboxURL] {
+			continue
+		}
+		sent[r.inboxURL] = true
+		s.enqueueAPDelivery(userID, r.inboxURL, create)
+	}
+	log.Printf("federation: list post %s delivered to %d instance inbox(es) for %d member(s)", postID, len(sent), len(recipients))
+}
+
+// remoteListRecipients lists the members of one friend list who live on another
+// Agora instance.
+//
+// Membership is not gated on friendship here, unlike remoteFriendRecipients.
+// AGORA-182/257 deliberately allow a followed account into a list without a
+// mutual friendship, and a list's own membership is the audience the author
+// chose; second-guessing it would silently drop somebody they meant to include.
+func (s *Service) remoteListRecipients(userID, groupID string) []friendRecipient {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT u.ap_actor_url,
+		       COALESCE(NULLIF(af.followed_inbox_url, ''),
+		                'https://' || u.remote_instance || '/federation/inbox')
+		FROM friend_group_members fgm
+		JOIN friend_groups fg ON fg.id = fgm.group_id AND fg.user_id = $1
+		JOIN users u ON u.id = fgm.friend_id
+		LEFT JOIN ap_following af
+		       ON af.follower_user_id = $1 AND af.followed_actor_url = u.ap_actor_url
+		WHERE fgm.group_id = $2
+		  AND u.is_remote = true
+		  AND COALESCE(u.ap_actor_url, '') != ''
+		  AND COALESCE(u.remote_instance, '') != ''
+	`, userID, groupID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []friendRecipient
+	for rows.Next() {
+		var r friendRecipient
+		if rows.Scan(&r.actorURL, &r.inboxURL) == nil && r.actorURL != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// recordPostAudience records which local users an inbound limited post was
+// addressed to, which is the only thing that will make it visible to them.
+//
+// Silently recording nobody is the correct outcome for a post addressed only to
+// users this instance does not host: it stays stored and invisible, rather than
+// becoming visible to everyone for want of an audience.
+func (s *Service) recordPostAudience(postID string, addressed []string) int {
+	var n int
+	for _, actorURL := range addressed {
+		var userID string
+		s.db.QueryRow(`
+			SELECT id FROM users WHERE is_remote = false AND ap_actor_url = $1
+		`, actorURL).Scan(&userID)
+		if userID == "" {
+			// Local actor URLs are not stored on the row, so fall back to the
+			// username the actor URL encodes.
+			if name := usernameFromActorURL(actorURL, s.cfg.InstanceDomain); name != "" {
+				s.db.QueryRow(`SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND is_remote = false`, name).Scan(&userID)
+			}
+		}
+		if userID == "" {
+			continue
+		}
+		if _, err := s.db.Exec(`
+			INSERT INTO post_audience (post_id, user_id) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, postID, userID); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// isAddressedListMember reports whether a remote actor is in the friend list a
+// local post was limited to, and so is entitled to reply to it or react to it.
+//
+// This is the authorisation counterpart to remoteListRecipients: exactly the
+// people that function delivered the post to are the people this one lets back
+// in. Membership is read fresh, so removing somebody from a list closes the
+// thread to them from that moment; the copy they already hold is beyond recall,
+// but nothing further of theirs is accepted.
+func (s *Service) isAddressedListMember(postID, actorURL string) bool {
+	if actorURL == "" {
+		return false
+	}
+	var ok bool
+	s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1
+			FROM posts p
+			JOIN friend_group_members fgm ON fgm.group_id = p.group_id
+			JOIN users u ON u.id = fgm.friend_id
+			WHERE p.id = $1
+			  AND p.group_id IS NOT NULL
+			  AND u.ap_actor_url = $2
+		)
+	`, postID, actorURL).Scan(&ok)
+	return ok
 }

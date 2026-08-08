@@ -1706,6 +1706,12 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		EndTime      string         `json:"endTime"`
 		Name         string         `json:"name"` // AGORA-268: set only on a poll-vote Note, never a normal reply
 		Published    string         `json:"published"` // AGORA-270: origin publish time
+		// AGORA-337: a friends-only post from another Agora instance is
+		// addressed to named actors with no Public, and says so. to/cc are read
+		// to verify that claim rather than trust it.
+		To       []string `json:"to"`
+		CC       []string `json:"cc"`
+		Audience string   `json:"agora:audience"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -1744,7 +1750,14 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	// practice (no real AP client posts a poll as a reply), so poll data
 	// only ever flows through this branch.
 	if note.InReplyTo == "" {
-		s.ingestFollowedPost(verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+		// AGORA-337: a friends-only post from another Agora instance stores as
+		// 'friends' rather than 'public', so the feed shows it to this
+		// instance's friends of the author and to nobody else. The marker is
+		// only honoured when the addressing actually backs it up: a Note
+		// claiming to be friends-only while addressed to Public is stored
+		// public, since that is what its author's own followers already saw.
+		visibility := friendsOnlyVisibility(note.Audience, isAddressedPublicly(note.To, note.CC))
+		s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 		return
 	}
 
@@ -1920,6 +1933,14 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
 func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
+	s.ingestFollowedPostAs("public", actorURL, noteID, content, summary, imageURLs, videoURL, poll, tags, emojis, publishedAt)
+}
+
+// ingestFollowedPostAs is ingestFollowedPost with the stored visibility made
+// explicit (AGORA-337). Every caller but one wants "public"; a friends-only
+// post from another Agora instance wants "friends", which is what makes the
+// feed show it to the author's friends here and to nobody else.
+func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -1935,10 +1956,10 @@ func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, 
 	var postID string
 	err = s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $8, NULL, true, $3, $4, $5, $6, $7)
 		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 		RETURNING id
-	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis), publishedAt).Scan(&postID)
+	`, remoteUserID, HTMLToPlainText(content), noteID, domain, HTMLToPlainText(summary), emojisJSON(emojis), publishedAt, visibility).Scan(&postID)
 	if err != nil {
 		// ON CONFLICT DO NOTHING + RETURNING yields sql.ErrNoRows on
 		// redelivery (or a second local follower's copy of the same

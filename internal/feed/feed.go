@@ -74,6 +74,8 @@ type fedSender interface {
 	// alongside them are gone, so BroadcastToFriendInstances is no longer part
 	// of this interface.
 	BroadcastPublicPost(userID, postID string)
+	// AGORA-337: friends-only posts, addressed to remote friends by name.
+	BroadcastFriendsPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
 	// BroadcastUpdatePost delivers a signed Update when a federated post is
 	// edited (AGORA-150).
@@ -1158,6 +1160,14 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// two rows the dedup index could not collapse. See ADR-002.
 	if req.Visibility == "public" && s.fed != nil {
 		go s.fed.BroadcastPublicPost(userID, id)
+	}
+
+	// AGORA-337: a friends-only post reaches friends on other Agora instances,
+	// addressed to them by name with no Public anywhere. Until now only public
+	// posts federated at all, so a remote friend was silently treated as though
+	// the friendship did not exist.
+	if req.Visibility == "friends" && s.fed != nil {
+		go s.fed.BroadcastFriendsPost(userID, id)
 	}
 
 	// AGORA-190: federate as an app.bsky.feed.post record, independent of

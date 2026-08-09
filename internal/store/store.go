@@ -1561,4 +1561,24 @@ var schema = []string{
 	// an upgrade should decide on an admin's behalf.
 	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS timeline_exchange BOOLEAN NOT NULL DEFAULT false`,
 	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS carries_our_timeline BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AGORA-299: the Bluesky thread root, captured at ingest ──────────────
+	//
+	// Every inbound Bluesky post is stored flat, with parent_id NULL, whatever
+	// its real position in a thread. rootPostIDFor then walks parent_id upward
+	// and concludes the post is its own root, so a local reply federates with
+	// reply.root naming the ingested post rather than the true thread root, and
+	// Bluesky clients thread on root. The reply renders as a detached
+	// mini-thread instead of appearing in the conversation, silently: the
+	// record is written and committed, and nothing on this side looks wrong.
+	//
+	// The record already carries what is needed. bsky.FeedPost.Reply.Root is a
+	// strong ref (uri + cid) present on any ingested post that was itself a
+	// reply, so it is captured at ingest rather than derived later, with no
+	// extra AppView call.
+	//
+	// Empty for a genuinely top-level post, which is what tells the delivery
+	// side to fall back to the local walk rather than guess.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_uri TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_cid TEXT NOT NULL DEFAULT ''`,
 }

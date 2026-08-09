@@ -41,6 +41,33 @@ func (s *Service) blueskyRef(postID string) (uri, recordCid string, ok bool) {
 	return "at://" + did + "/app.bsky.feed.post/" + rkey, cidStr, true
 }
 
+// blueskyThreadRoot resolves the strong ref a reply's `root` field must carry.
+//
+// AGORA-299: rootPostIDFor walks parent_id upward, which is correct for a
+// thread built here and wrong for one ingested from Bluesky. Every inbound
+// Bluesky post is stored flat, so the walk stops at the ingested post and
+// declares it the root. Replying to a post that was itself a reply then
+// produced a record whose `root` named the wrong thing, and Bluesky clients
+// thread on `root`, so the reply appeared as a detached mini-thread rather
+// than in the conversation. Silently: the record committed fine.
+//
+// The stored ref wins when the parent carries one, because it came off the
+// parent's own record and is the truth. Its absence is meaningful rather than
+// missing data: a post ingested with no reply.root genuinely is a thread root,
+// so the local walk is right in that case and is kept as the fallback, which
+// also covers threads that started here.
+func (s *Service) blueskyThreadRoot(replyToID string) (uri, cid string, ok bool) {
+	var storedURI, storedCID string
+	s.db.QueryRow(`
+		SELECT COALESCE(bsky_root_uri, ''), COALESCE(bsky_root_cid, '')
+		FROM posts WHERE id = $1 AND deleted_at IS NULL
+	`, replyToID).Scan(&storedURI, &storedCID)
+	if storedURI != "" && storedCID != "" {
+		return storedURI, storedCID, true
+	}
+	return s.blueskyRef(s.rootPostIDFor(replyToID))
+}
+
 // rootPostIDFor walks parent_id up to the top-level post, mirroring
 // federation's own resolveReplyTarget walk (activitypub.go) — Agora's
 // comment tree is capped at two levels deep (root -> comment -> reply), so
@@ -97,8 +124,7 @@ func (s *Service) DeliverReply(userID, commentID, replyToID string) {
 	if !parentOK {
 		return
 	}
-	rootID := s.rootPostIDFor(replyToID)
-	rootURI, rootCid, rootOK := s.blueskyRef(rootID)
+	rootURI, rootCid, rootOK := s.blueskyThreadRoot(replyToID)
 	if !rootOK {
 		return
 	}
@@ -183,8 +209,7 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 	if !parentOK {
 		return
 	}
-	rootID := s.rootPostIDFor(replyToID)
-	rootURI, rootCid, rootOK := s.blueskyRef(rootID)
+	rootURI, rootCid, rootOK := s.blueskyThreadRoot(replyToID)
 	if !rootOK {
 		return
 	}

@@ -9,6 +9,23 @@ import (
 	"github.com/bluesky-social/indigo/api/bsky"
 )
 
+// blueskyRootRef pulls the thread root's strong ref off an ingested record
+// (AGORA-299).
+//
+// Present on any post that was itself a reply, and empty on a genuinely
+// top-level one, which is exactly the distinction the delivery side needs: an
+// empty root means "this really is the root" rather than "we did not look".
+//
+// Captured at ingest because it is already in the record being ingested.
+// Deriving it later would mean an AppView round trip per post to recover
+// something that was in our hands the first time.
+func blueskyRootRef(rec *bsky.FeedPost) (uri, cid string) {
+	if rec == nil || rec.Reply == nil || rec.Reply.Root == nil {
+		return "", ""
+	}
+	return rec.Reply.Root.Uri, rec.Reply.Root.Cid
+}
+
 // AGORA-197 chose AppView polling over consuming Bluesky's network-wide
 // firehose. Agora's existing firehose (AGORA-191) is outbound-only — this
 // instance's own commits, served to a relay that asks for them. Ingesting
@@ -204,13 +221,21 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 		return ""
 	}
 
+	rootURI, rootCID := blueskyRootRef(post)
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
-		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET
+			remote_post_id = EXCLUDED.remote_post_id,
+			-- AGORA-299: idempotent. Re-ingesting must not clear a root we
+			-- already hold, and must fill one we do not, so a post ingested
+			-- before this change is repaired the next time it is seen.
+			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
+			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt)).Scan(&postID)
+	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt),
+		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return ""
 	}
@@ -360,13 +385,15 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			continue
 		}
 
+		rootURI, rootCID := blueskyRootRef(rec)
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
+		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+			rootURI, rootCID).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
@@ -443,13 +470,18 @@ func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *
 		return
 	}
 
+	rootURI, rootCID := blueskyRootRef(rec)
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
-		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET
+			remote_post_id = EXCLUDED.remote_post_id,
+			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
+			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
+	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return
 	}

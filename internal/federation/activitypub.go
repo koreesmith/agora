@@ -1039,9 +1039,9 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			s.handleInboundCreate(verifiedActor, a.Object, body)
 		}
 	case "Update":
-		s.handleInboundUpdate(verifiedActor, a.Object)
+		s.handleInboundUpdate(verifiedActor, a.Object, body)
 	case "Delete":
-		s.handleInboundAPDelete(verifiedActor, a.Object)
+		s.handleInboundAPDelete(verifiedActor, a.Object, body)
 	case "Like":
 		s.handleInboundLike(verifiedActor, a.Actor, a.Object, body)
 	case "Announce":
@@ -1959,7 +1959,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // cache miss (unlike Create's ON CONFLICT DO NOTHING dance): an Update for a
 // post Agora never ingested in the first place is a safe no-op, not a
 // reason to retroactively ingest it now.
-func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage) {
+func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var note struct {
 		ID           string         `json:"id"`
 		Type         string         `json:"type"` // AGORA-210
@@ -1975,9 +1975,21 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
 	}
-	// Same cryptographic tie-back handleInboundCreate does — an edit can only
-	// be applied by the same actor whose signature we already verified.
-	if note.AttributedTo == "" || note.AttributedTo != verifiedActor || note.ID == "" {
+	if note.AttributedTo == "" || note.ID == "" {
+		return
+	}
+
+	// Same cryptographic tie-back handleInboundCreate does: an edit can only be
+	// applied by the same actor whose signature we already verified.
+	//
+	// AGORA-347 adds the one exception, and it is the same one AGORA-340 made
+	// for the reply itself. An edit forwarded by the owner of a limited thread
+	// is attributed to the replier and signed by the thread's author, so this
+	// check would refuse every forwarded edit and the fan-out below would be
+	// delivering into a wall. Authorised by thread ownership instead, verified
+	// against a thread this instance already holds.
+	forwarded := note.AttributedTo != verifiedActor
+	if forwarded && !s.isThreadOwnerForwardingComment(verifiedActor, s.localPostIDForRemoteObject(note.ID, note.AttributedTo)) {
 		return
 	}
 
@@ -1996,10 +2008,14 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	// remote actor sending an Update can't touch a post they don't own, the
 	// same defense-in-depth resolveFederatableTarget's callers already rely
 	// on for Like/Announce.
+	// Scoped to the author the edit claims, not the signer. For a direct edit
+	// those are the same; for a forwarded one the author is the replier, and
+	// attributing the edit to the forwarder would put their name on somebody
+	// else's words.
 	if err := s.db.QueryRow(`
 		SELECT p.id FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.remote_post_id = $1 AND p.remote_instance = $2 AND u.ap_actor_url = $3 AND p.deleted_at IS NULL
-	`, note.ID, domain, verifiedActor).Scan(&postID); err != nil {
+	`, note.ID, domain, note.AttributedTo).Scan(&postID); err != nil {
 		return // never ingested, or actor mismatch — safe no-op
 	}
 
@@ -2022,6 +2038,14 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.applyInboundPoll(postID, parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime))
 	// AGORA-213: same replace-not-merge treatment as attachments/poll above.
 	s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
+
+	// AGORA-347: this instance owns the thread, so it is the only party that
+	// can carry the edit to the rest of the audience. Never re-forwards a
+	// forward, for the same reason replies do not: two instances would bounce
+	// it between them.
+	if !forwarded {
+		go s.FanOutThreadLifecycle(postID, note.AttributedTo, rawActivity)
+	}
 }
 
 // logUnmatchedAttachments logs the raw "attachment" JSON when an inbound
@@ -2050,7 +2074,7 @@ func logUnmatchedAttachments(actor string, objectRaw json.RawMessage, attachment
 // ({"id": ..., "type": "Tombstone"}) — both are handled. Named distinctly
 // from federation.go's handleInboundDelete, which is the older custom
 // pre-ActivityPub protocol's own unrelated delete handler.
-func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.RawMessage) {
+func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var objectID string
 	if err := json.Unmarshal(objectRaw, &objectID); err != nil || objectID == "" {
 		var tombstone struct {
@@ -2069,20 +2093,44 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 	}
 
 	domain := domainFromURL(objectID)
-	// Scoped to the post's author actually being verifiedActor — the same
+
+	// Scoped to the post's author actually being verifiedActor, the same
 	// ownership check handleInboundUpdate uses, so one remote actor can't
 	// delete a post ingested from someone else.
-	res, err := s.db.Exec(`
-		UPDATE posts p SET deleted_at = NOW()
-		FROM users u
-		WHERE p.author_id = u.id AND p.remote_post_id = $1 AND p.remote_instance = $2
-		  AND u.ap_actor_url = $3 AND p.deleted_at IS NULL
-	`, objectID, domain, verifiedActor)
+	//
+	// AGORA-347: a Delete carries no attributedTo, only an id, so the author is
+	// whoever this instance recorded as having written it. That makes the
+	// forwarded case simpler than the edit's: resolve the row first, then
+	// decide whether the signer is entitled to remove it, either by being its
+	// author or by owning the limited thread it sits in.
+	var postID, authorActor string
+	s.db.QueryRow(`
+		SELECT p.id, COALESCE(u.ap_actor_url, '')
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.remote_post_id = $1 AND p.remote_instance = $2 AND p.deleted_at IS NULL
+	`, objectID, domain).Scan(&postID, &authorActor)
+	if postID == "" {
+		return // never ingested or already deleted, safe no-op
+	}
+
+	forwarded := authorActor != verifiedActor
+	if forwarded && !s.isThreadOwnerForwardingComment(verifiedActor, postID) {
+		return // not theirs to delete
+	}
+
+	res, err := s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, postID)
 	if err != nil {
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return // never ingested, already deleted, or actor mismatch — safe no-op
+		return // raced with another delete
+	}
+
+	// AGORA-347: carry the withdrawal to the rest of a thread this instance
+	// owns. A delete that reaches fewer people than the reply did is the
+	// failure worth avoiding, which is the same call AGORA-343 made for posts.
+	if !forwarded {
+		go s.FanOutThreadLifecycle(postID, authorActor, rawActivity)
 	}
 }
 
@@ -4050,6 +4098,25 @@ func (s *Service) DeliverReplyUpdate(userID, commentID, replyToID string) {
 			continue // already delivered above
 		}
 		s.enqueueAPDelivery(userID, mentionedInboxURLs[i], activity)
+	}
+
+	// AGORA-347: also reach the thread's owner when they are not the parent's
+	// author, which happens whenever this edits a reply to somebody else's
+	// comment. They are the only party who can carry the edit to the rest of a
+	// limited audience, so missing them means the edit stops at two instances.
+	delivered := map[string]bool{}
+	if targetOK {
+		delivered[targetInboxURL] = true
+	}
+	for _, i := range mentionedInboxURLs {
+		delivered[i] = true
+	}
+	for _, r := range s.threadLifecycleRecipients(replyToID, commentID) {
+		if r.inboxURL == "" || delivered[r.inboxURL] {
+			continue
+		}
+		delivered[r.inboxURL] = true
+		s.enqueueAPDelivery(userID, r.inboxURL, activity)
 	}
 }
 

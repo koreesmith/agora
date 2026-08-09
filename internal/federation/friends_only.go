@@ -500,11 +500,24 @@ func (s *Service) isAddressedListMember(postID, actorURL string) bool {
 // delivery list purely to withdraw it would tell them they had been removed.
 func (s *Service) limitedPostAudience(userID, postID string) (recipients []friendRecipient, limited bool) {
 	var visibility string
-	var groupID *string
+	var groupID, parentID *string
 	if err := s.db.QueryRow(`
-		SELECT visibility, group_id FROM posts WHERE id = $1 AND author_id = $2
-	`, postID, userID).Scan(&visibility, &groupID); err != nil {
+		SELECT visibility, group_id, parent_id FROM posts WHERE id = $1 AND author_id = $2
+	`, postID, userID).Scan(&visibility, &groupID, &parentID); err != nil {
 		return nil, false
+	}
+
+	// AGORA-347: a reply inherits its thread's visibility, so it arrives here
+	// looking limited, but its audience is the thread's and not this author's.
+	// Answering with the author's own friends would be wrong twice over: it
+	// misses the people who actually hold the reply, and it tells the author's
+	// friends that a post they never saw has been withdrawn.
+	//
+	// The replier cannot know the thread's audience and by design never will,
+	// so the correct recipient is the thread itself, and its owner fans out
+	// from there.
+	if parentID != nil {
+		return s.threadLifecycleRecipients(*parentID, postID), true
 	}
 
 	switch {
@@ -566,4 +579,152 @@ func audienceMarkerFor(visibility string) string {
 		return "list"
 	}
 	return "friends"
+}
+
+// ── Edits and deletes of a reply in a limited thread (AGORA-347) ──────────────
+//
+// AGORA-343 fixed a limited *post's* edit and delete. A reply is a different
+// path: it reaches the thread's author, and the author's instance forwards it to
+// the rest of the audience, because the replier's instance does not know who
+// else is in it and by design never will. Nothing did the equivalent for an
+// Update or a Delete of that reply, so an edit reached the thread author and
+// nobody else, and a delete left every other copy standing.
+//
+// Two halves are needed, not one. Forwarding the activity is useless on its own,
+// because both inbound handlers require attributedTo to equal the signer, and a
+// forwarded edit is by definition attributed to somebody other than the
+// forwarder. So the receiving side needs the same carve-out AGORA-340 made for
+// the reply itself, or the fan-out would deliver into a wall.
+
+// rootPostIDOf returns the top-level post a comment belongs to, or the post
+// itself when it is already top-level.
+func (s *Service) rootPostIDOf(postID string) string {
+	var parentID *string
+	if err := s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, postID).Scan(&parentID); err != nil {
+		return ""
+	}
+	if parentID == nil {
+		return postID
+	}
+	// Agora caps threads at root -> comment -> reply, so one hop up is enough,
+	// and a second walk would only re-find the same row.
+	var grandParentID *string
+	s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, *parentID).Scan(&grandParentID)
+	if grandParentID != nil {
+		return *grandParentID
+	}
+	return *parentID
+}
+
+// isThreadOwnerForwardingComment authorises a forwarded edit or delete.
+//
+// Mirrors isThreadOwnerForwarding, but keyed on a comment this instance already
+// holds rather than on an inReplyTo URL, because an Update carries no inReplyTo
+// and a Delete carries nothing but an id.
+//
+// The conditions are the same three, and each is load-bearing: the comment must
+// resolve to a thread we already hold, that thread's author must be the signer,
+// and the thread must be limited. A public thread gains no bypass because it has
+// no use for one.
+func (s *Service) isThreadOwnerForwardingComment(verifiedActor, commentPostID string) bool {
+	rootID := s.rootPostIDOf(commentPostID)
+	if rootID == "" || rootID == commentPostID {
+		// Not a comment. A forwarded edit of a top-level post is not a thing:
+		// the author's own instance sends that directly to everyone.
+		return false
+	}
+
+	var visibility, rootAuthorActor string
+	if err := s.db.QueryRow(`
+		SELECT p.visibility, COALESCE(u.ap_actor_url, '')
+		FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.id = $1 AND p.deleted_at IS NULL
+	`, rootID).Scan(&visibility, &rootAuthorActor); err != nil {
+		return false
+	}
+	if rootAuthorActor == "" || rootAuthorActor != verifiedActor {
+		return false
+	}
+
+	switch visibility {
+	case "friends":
+		return true
+	case "private":
+		// A received friend-list post is stored 'private' (AGORA-342), so allow
+		// that, but only where an audience record proves it is one. Every other
+		// 'private' post is genuinely addressed to nobody.
+		var isListPost bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id = $1)`, rootID).Scan(&isListPost)
+		return isListPost
+	}
+	return false
+}
+
+// FanOutThreadLifecycle forwards an edit or a delete of a reply to the rest of
+// the thread's audience, when this instance owns that thread.
+//
+// Thin on purpose: FanOutThreadReply already resolves the audience from the
+// root post's own visibility, refuses a thread this instance does not own, and
+// skips the sender's instance. The only thing worth adding here is finding the
+// root, since the caller has a comment.
+func (s *Service) FanOutThreadLifecycle(commentPostID, senderActorURL string, activity []byte) {
+	if len(activity) == 0 || commentPostID == "" {
+		return
+	}
+	rootID := s.rootPostIDOf(commentPostID)
+	if rootID == "" || rootID == commentPostID {
+		return
+	}
+	s.FanOutThreadReply(rootID, senderActorURL, activity)
+}
+
+// localPostIDForRemoteObject resolves a remote object id to the local row
+// holding it, scoped to the author it claims.
+//
+// Used to authorise a forwarded edit or delete before applying it: the check
+// needs the local comment, and the caller only has the sender's object id.
+func (s *Service) localPostIDForRemoteObject(objectID, authorActorURL string) string {
+	if objectID == "" || authorActorURL == "" {
+		return ""
+	}
+	var postID string
+	s.db.QueryRow(`
+		SELECT p.id FROM posts p JOIN users u ON u.id = p.author_id
+		WHERE p.remote_post_id = $1 AND p.remote_instance = $2 AND u.ap_actor_url = $3 AND p.deleted_at IS NULL
+	`, objectID, domainFromURL(objectID), authorActorURL).Scan(&postID)
+	return postID
+}
+
+// threadLifecycleRecipients addresses an edit or a delete of a reply at the
+// thread it belongs to, which for the replier's instance means the parent's
+// author and the thread's owner.
+//
+// Deliberately the same target DeliverReply already uses, resolved through
+// lookupRemoteTarget so a stale stub with no inbox self-heals here as it does
+// there (AGORA-254). Anything beyond these two is the thread owner's to reach,
+// which is what FanOutThreadLifecycle does on the other side.
+func (s *Service) threadLifecycleRecipients(parentID, commentID string) []friendRecipient {
+	seen := map[string]bool{}
+	var out []friendRecipient
+
+	add := func(targetID string) {
+		if targetID == "" {
+			return
+		}
+		actorURL, inboxURL, _, ok := s.lookupRemoteTarget(targetID)
+		if !ok || actorURL == "" || inboxURL == "" || seen[inboxURL] {
+			return
+		}
+		seen[inboxURL] = true
+		out = append(out, friendRecipient{actorURL: actorURL, inboxURL: inboxURL})
+	}
+
+	add(parentID)
+	// The root as well as the direct parent: replying to a comment in somebody
+	// else's thread means the owner who has to fan out is not the parent's
+	// author, and reaching only the parent would leave them unaware.
+	if root := s.rootPostIDOf(commentID); root != "" && root != commentID {
+		add(root)
+	}
+	return out
 }

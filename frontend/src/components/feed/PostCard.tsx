@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { feedApi, friendsApi } from '../../api'
+import { feedApi, friendsApi, hiddenPostsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow, format } from 'date-fns'
 import CommentsSection, { renderContent, renderName } from './CommentsSection'
@@ -508,6 +508,14 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
     onSuccess: invalidate,
   })
 
+  // AGORA-309. Shares invalidate with delete, so the post leaves the list it is
+  // sitting in without a bespoke removal path: from the reader's point of view
+  // the two have the same immediate effect, and only one of them is permanent.
+  const hide = useMutation({
+    mutationFn: () => hiddenPostsApi.hide(post.id),
+    onSuccess: invalidate,
+  })
+
   const edit = useMutation({
     mutationFn: () => feedApi.editPost(post.id, {
       content: editContent,
@@ -670,6 +678,18 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
                         className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
                         <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                    {/* AGORA-309: hiding one post, for the times when a
+                        specific post is unwanted but the author is not. Needs
+                        no modal, unlike Report: it is reversible, affects
+                        nobody else, and notifies no one. Not offered on your
+                        own posts, where it would be a no-op nobody asked for. */}
+                    {!isOwn && (
+                      <button onClick={() => { hide.mutate(); setShowMenu(false) }}
+                        disabled={hide.isPending}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <EyeOff size={14} /> Hide post
                       </button>
                     )}
                     {!isOwn && (

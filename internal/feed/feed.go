@@ -245,6 +245,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  -- Symmetric, matching every other site: a block hides you from them
 			  -- as well as them from you.
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4
@@ -308,6 +309,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 			  AND (
 			    p.author_id = $1
 			    OR p.wall_user_id = $1
@@ -660,6 +662,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		  )
 		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+		  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 		  AND (
 		    p.author_id = $1
 		    OR p.wall_user_id = $1
@@ -753,9 +756,13 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		viewerParam = nil
 	}
 
+	// AGORA-309: a hidden post is hidden from whoever hid it, so like the block
+	// clause this only applies when there is a viewer to hide it from. An
+	// anonymous reader of the public feed has hidden nothing.
 	blockClause := ""
 	if viewerID != "" {
-		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))`
+		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)`
 	}
 
 	rows, err := s.db.Query(fmt.Sprintf(`

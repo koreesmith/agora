@@ -19,6 +19,7 @@ import (
 	"github.com/agora-social/agora/internal/atproto"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/blocks"
+	"github.com/agora-social/agora/internal/hidden"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/customfeeds"
 	"github.com/agora-social/agora/internal/dm"
@@ -69,6 +70,7 @@ func main() {
 	fedSvc    := federation.NewService(db, cfg, notifSvc)
 	dmSvc          := dm.New(db, cfg.AllowedOrigins)
 	blocksSvc      := blocks.New(db)
+	hiddenSvc      := hidden.New(db)   // AGORA-309
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
@@ -185,6 +187,7 @@ func main() {
 			albums.RegisterRoutes(r, albumsSvc)
 			dm.RegisterRoutes(r, dmSvc)
 			blocks.RegisterRoutes(r, blocksSvc)
+			hidden.RegisterRoutes(r, hiddenSvc)
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
 			pages.RegisterRoutes(r, pagesSvc)
 			interactions.RegisterRoutes(r, interactionsSvc)

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
-import { usersApi, authApi, notificationsApi, blocksApi } from '../api'
+import { usersApi, authApi, notificationsApi, blocksApi, hiddenPostsApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
 import CustomDomainPanel from '../components/common/CustomDomainPanel'
 
@@ -179,6 +179,19 @@ export default function SettingsPage() {
       ok(enabled ? 'Email notifications enabled' : 'Email notifications disabled')
     },
     onError: fail,
+  })
+
+  // AGORA-309: hidden posts live in the same tab as blocked users. Both are
+  // "things I have chosen not to see", and a tab of its own for a list most
+  // people will never open would cost more than it returns.
+  const { data: hiddenData, refetch: refetchHidden } = useQuery({
+    queryKey: ['hidden-posts'],
+    queryFn: () => hiddenPostsApi.list().then(r => r.data),
+    enabled: tab === 'blocked',
+  })
+  const unhide = useMutation({
+    mutationFn: (postId: string) => hiddenPostsApi.unhide(postId),
+    onSuccess: () => refetchHidden(),
   })
 
   const { data: blockedData, refetch: refetchBlocked } = useQuery({
@@ -475,6 +488,45 @@ export default function SettingsPage() {
                     className="btn-secondary text-xs py-1 px-3"
                   >
                     Unblock
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'blocked' && (
+        <div className="card p-4 space-y-3 mt-4">
+          <h3 className="font-semibold">Hidden posts</h3>
+          <p className="text-sm text-agora-500">
+            Posts you've hidden from your own timeline. Hiding is private: the author isn't told, and the post is
+            unaffected for everyone else.
+          </p>
+          {(hiddenData?.posts || []).length === 0 ? (
+            <p className="text-sm text-agora-400 py-4 text-center">You haven't hidden any posts.</p>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {(hiddenData?.posts || []).map((p: any) => (
+                <div key={p.id} className="flex items-start gap-3 py-2 border-b border-agora-100 dark:border-agora-700 last:border-0">
+                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {p.avatar_url
+                      ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">{(p.display_name || p.username)[0].toUpperCase()}</span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Link to={`/profile/${p.username}`} className="text-sm font-medium hover:underline">{p.display_name || p.username}</Link>
+                    {/* Enough to recognise which post this was, not a second
+                        feed. line-clamp keeps a long post from turning the
+                        management list into a wall of text. */}
+                    <p className="text-xs text-agora-500 line-clamp-2 mt-0.5">{p.content || (p.image_url ? '(image)' : '(no text)')}</p>
+                  </div>
+                  <button
+                    onClick={() => unhide.mutate(p.id)}
+                    disabled={unhide.isPending}
+                    className="btn-secondary text-xs py-1 px-3 flex-shrink-0"
+                  >
+                    Unhide
                   </button>
                 </div>
               ))}

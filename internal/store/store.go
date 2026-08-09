@@ -1581,4 +1581,22 @@ var schema = []string{
 	// side to fall back to the local walk rather than guess.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_uri TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_cid TEXT NOT NULL DEFAULT ''`,
+
+	// ── AGORA-309: hide a single post from your own timeline ────────────────
+	//
+	// A client-of-one visibility record, shaped after blocks. Sometimes one
+	// specific post is unwanted without the author being unwanted, and until
+	// now the only ways to say so were unfollow, block or report, all three of
+	// which are about the person.
+	//
+	// Server-side rather than local, so it holds across web, mobile and a
+	// re-login. Cascades on both sides: deleting the post or the user leaves
+	// nothing behind.
+	`CREATE TABLE IF NOT EXISTS hidden_posts (
+		user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id    UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_hidden_posts_post ON hidden_posts(post_id)`,
 }

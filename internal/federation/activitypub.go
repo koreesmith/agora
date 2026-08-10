@@ -3640,6 +3640,115 @@ func (s *Service) ListFollowing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"following": list})
 }
 
+// ListFollowers returns the caller's own inbound fediverse followers
+// (AGORA-348) — self-scoped only, unlike the public
+// /federation/users/{handle}/followers collection, which deliberately
+// exposes nothing but a count (see Followers above) and stays that way.
+func (s *Service) ListFollowers(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+
+	rows, err := s.db.Query(`
+		SELECT apf.follower_actor_url, apf.created_at,
+		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+		       COALESCE(u.avatar_url, ''), COALESCE(u.remote_instance, ''), COALESCE(u.emojis::text, '{}'),
+		       EXISTS(
+		         SELECT 1 FROM ap_following af
+		         WHERE af.follower_user_id = $1 AND af.followed_actor_url = apf.follower_actor_url
+		       )
+		FROM ap_followers apf
+		LEFT JOIN users u ON u.ap_actor_url = apf.follower_actor_url
+		WHERE apf.followed_user_id = $1
+		ORDER BY apf.created_at DESC
+	`, userID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type followerEntry struct {
+		ActorURL    string          `json:"actor_url"`
+		CreatedAt   string          `json:"created_at"`
+		UserID      string          `json:"user_id,omitempty"`
+		Username    string          `json:"username,omitempty"`
+		DisplayName string          `json:"display_name,omitempty"`
+		AvatarURL   string          `json:"avatar_url,omitempty"`
+		Instance    string          `json:"instance,omitempty"`
+		Emojis      json.RawMessage `json:"emojis,omitempty"`
+		// The inverse of ListFollowing's FollowsBack — whether the caller
+		// already follows this follower back.
+		FollowingBack bool `json:"following_back"`
+	}
+	var list []followerEntry
+	for rows.Next() {
+		var f followerEntry
+		var createdAt time.Time
+		var emojis string
+		if err := rows.Scan(&f.ActorURL, &createdAt, &f.UserID, &f.Username, &f.DisplayName,
+			&f.AvatarURL, &f.Instance, &emojis, &f.FollowingBack); err != nil {
+			continue
+		}
+		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		f.Emojis = json.RawMessage(emojis)
+		list = append(list, f)
+	}
+
+	// Backfill an unresolved stub the same way ListFollowing's own backfill
+	// loop does above — a follower can arrive before anything else about them
+	// is known locally (recordAPFollower only ever writes the actor/inbox
+	// URLs), which would otherwise leave them permanently missing here.
+	for i := range list {
+		if list[i].UserID != "" {
+			continue
+		}
+		uid, err := s.getOrCreateRemoteAPUser(list[i].ActorURL, userID)
+		if err != nil || uid == "" {
+			continue // an unresolvable follower is omitted, not returned bare
+		}
+		list[i].UserID = uid
+		var emojis string
+		s.db.QueryRow(`SELECT username, display_name, avatar_url, remote_instance, COALESCE(emojis::text,'{}') FROM users WHERE id = $1`, uid).
+			Scan(&list[i].Username, &list[i].DisplayName, &list[i].AvatarURL, &list[i].Instance, &emojis)
+		list[i].Emojis = json.RawMessage(emojis)
+	}
+
+	// Exclude anyone already tracked as a friend or a pending friend request
+	// in either direction — a friend request from a remote Agora user arrives
+	// as a marked Follow and writes an ap_followers row (recordAPFollower,
+	// unconditional) before the friend-request branch runs, so without this a
+	// friend or pending requester would double up in both this list and
+	// Friends/Requests.
+	connected := map[string]bool{}
+	if crows, err := s.db.Query(`
+		SELECT requester_id, addressee_id FROM friendships
+		WHERE status IN ('pending','accepted') AND (requester_id = $1 OR addressee_id = $1)
+	`, userID); err == nil {
+		for crows.Next() {
+			var reqID, addrID string
+			if crows.Scan(&reqID, &addrID) == nil {
+				if reqID == userID {
+					connected[addrID] = true
+				} else {
+					connected[reqID] = true
+				}
+			}
+		}
+		crows.Close()
+	}
+
+	out := list[:0]
+	for _, f := range list {
+		if f.UserID == "" || connected[f.UserID] {
+			continue
+		}
+		out = append(out, f)
+	}
+	if out == nil {
+		out = []followerEntry{}
+	}
+	writeJSON(w, 200, map[string]any{"followers": out})
+}
+
 // ── Outbound: broadcast public posts to followers ─────────────────────────────
 
 // BroadcastPublicPost is called after a new post is created. It re-checks

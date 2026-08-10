@@ -111,6 +111,8 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Post("/atproto/follow", s.FollowBlueskyAccount)
 	r.Delete("/atproto/follow/{id}", s.UnfollowBlueskyAccount)
 	r.Get("/atproto/following", s.ListBlueskyFollowing)
+	// AGORA-348: self-scoped only.
+	r.Get("/atproto/followers", s.ListBlueskyFollowers)
 	// AGORA-198: per-follow notification opt-in, mirroring federation's
 	// /federation/follow/{id}/notify.
 	r.Put("/atproto/follow/{id}/notify", s.ToggleFollowNotify)

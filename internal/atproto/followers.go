@@ -175,4 +175,10 @@ func (s *Service) pollFollowersFor(ctx context.Context, localUserID, did string,
 		s.db.ExecContext(ctx,
 			`UPDATE users SET atproto_followers_seeded = true WHERE id = $1`, localUserID)
 	}
+
+	// AGORA-348: reaching this point means every page fetched above succeeded
+	// (an error mid-walk returns early, before this), so the walk is worth
+	// recording as a sync even when it turned up no changes at all.
+	s.db.ExecContext(ctx,
+		`UPDATE users SET atproto_followers_synced_at = NOW() WHERE id = $1`, localUserID)
 }

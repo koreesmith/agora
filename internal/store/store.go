@@ -933,6 +933,14 @@ var schema = []string{
 	// test would swallow that account's genuine first follower forever.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_followers_seeded BOOLEAN NOT NULL DEFAULT false`,
 
+	// AGORA-348: when pollFollowersFor last completed a getFollowers walk for
+	// this account, successful or not — at_followers is only ever as current
+	// as this timestamp, since AT Proto never delivers a follow to us the way
+	// ap_followers gets pushed to. Lets the followers list distinguish "no
+	// followers yet" from "not synced yet" rather than rendering both as an
+	// empty list.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_followers_synced_at TIMESTAMPTZ`,
+
 	// atproto_account/atproto_all custom-feed filter types (analogous to
 	// fediverse_account/fediverse_all, AGORA-146) were added to the single
 	// authoritative filter_type CHECK constraint above (search

@@ -71,6 +71,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Post("/federation/follow",        s.FollowFediverseAccount)
 	r.Delete("/federation/follow/{id}", s.UnfollowFediverseAccount)
 	r.Get("/federation/following",      s.ListFollowing)
+	// AGORA-348: self-scoped only, distinct from the public
+	// /federation/users/{handle}/followers collection (totalItems only).
+	r.Get("/federation/followers",      s.ListFollowers)
 	r.Put("/federation/follow/{id}/notify", s.ToggleFollowNotify)
 	r.Put("/federation/follow/{id}/show-in-feed", s.ToggleShowInFeed)
 }

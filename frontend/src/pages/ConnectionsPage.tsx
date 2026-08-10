@@ -811,8 +811,13 @@ export default function ConnectionsPage() {
             <div className="space-y-2">
               {bskyFollowers.map((f: any) => (
                 <div key={f.did} className="flex items-center gap-3 py-2">
-                  {f.username
-                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  {/* AGORA-348 always resolves a follower to a cached stub
+                      before returning it, whose username equals its Bluesky
+                      handle (see getOrCreateRemoteATUser) — so f.handle, not
+                      a separate f.username the response never sends, is the
+                      right value for /profile/:username here. */}
+                  {f.handle
+                    ? <Link to={`/profile/${f.handle}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
                         {f.avatar_url
                           ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
                           : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
@@ -827,8 +832,8 @@ export default function ConnectionsPage() {
                             </span>}
                       </div>}
                   <div className="flex-1 min-w-0">
-                    {f.username
-                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.handle}</Link>
+                    {f.handle
+                      ? <Link to={`/profile/${f.handle}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.handle}</Link>
                       : <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>}
                     <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
                   </div>

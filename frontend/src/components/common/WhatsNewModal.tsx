@@ -2,41 +2,55 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 
-const SEEN_KEY = 'agora_seen_v3'
+const SEEN_KEY = 'agora_seen_v4'
 
 const FEATURES = [
   {
-    emoji: '🦋',
-    title: 'Native Bluesky account',
-    desc: "Every Agora account is now also a real Bluesky account — no bridge, no separate signup required. Your public posts sync both ways, and you can follow any Bluesky account natively, right alongside your fediverse and Agora connections.",
-    link: '/connections?tab=bluesky',
-    linkText: 'Explore Bluesky →',
+    emoji: '🌉',
+    title: 'Friends across Agora instances',
+    desc: "Friend requests, friends-only posts, and their replies and reactions now reach your friends even when they're on a different Agora instance, not just your own.",
+    link: '/connections',
+    linkText: 'See your friends →',
   },
   {
-    emoji: '🗂️',
-    title: 'Unified Connections & Friend Lists',
-    desc: 'Friends, Fediverse follows, and Bluesky follows now live together on one Connections page — and Friend Lists can include accounts from either network, not just Agora friends.',
-    link: '/connections?tab=lists',
-    linkText: 'See your lists →',
+    emoji: '✉️',
+    title: 'Direct messages across instances',
+    desc: 'Send and receive DMs with friends on other Agora instances, not just your own.',
+    link: '/messages',
+    linkText: 'Open Messages →',
   },
   {
-    emoji: '💬',
-    title: 'Quote posts',
-    desc: 'Mastodon and other fediverse apps can now quote your Agora posts, not just boost them.',
+    emoji: '🌐',
+    title: 'Bring your own domain',
+    desc: "Use your own custom domain as your AT Protocol handle. Once it's verified, a badge shows up right next to your name.",
+    link: '/settings?tab=bluesky',
+    linkText: 'Set it up →',
+  },
+  {
+    emoji: '📌',
+    title: 'Pinned feed pills',
+    desc: 'Pin your favorite feeds to the top of your feed bar, with an overflow menu for the rest.',
+    link: '/feed',
+    linkText: 'Try it →',
+  },
+  {
+    emoji: '😀',
+    title: 'Refreshed reactions',
+    desc: 'A realigned reaction set, shared consistently between posts and Messages.',
     link: null,
     linkText: null,
   },
   {
-    emoji: '🔍',
-    title: 'Unified search',
-    desc: 'Search now covers Agora, the Fediverse, and Bluesky in one place — accounts, posts, and hashtags.',
-    link: '/search',
-    linkText: 'Try it →',
+    emoji: '👀',
+    title: 'See your followers',
+    desc: 'View your fediverse and Bluesky follower and following lists, now with a dedicated Followers segment in each tab.',
+    link: '/connections?tab=fediverse&sub=followers',
+    linkText: 'Check your followers →',
   },
   {
-    emoji: '⚠️',
-    title: 'Trigger warnings on shares',
-    desc: "Add your own content warning when sharing someone else's post, independent of the original post's own visibility.",
+    emoji: '🙈',
+    title: 'Hide a post',
+    desc: 'Remove a post from your own timeline without deleting it.',
     link: null,
     linkText: null,
   },
@@ -83,7 +97,7 @@ export default function WhatsNewModal({ forceShow, onClose }: Props = {}) {
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-6 pb-3">
           <div>
-            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v3.0.0</div>
+            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v4.0.0</div>
             <h2 className="text-xl font-bold text-agora-900 dark:text-agora-100">What's New in Agora</h2>
           </div>
           <button onClick={dismiss} className="text-agora-400 hover:text-agora-600 transition-colors ml-4 flex-shrink-0">

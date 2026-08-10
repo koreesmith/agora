@@ -287,6 +287,8 @@ export const federationApi = {
   followFediverseAccount:   (actorUrl: string) => api.post('/federation/follow', { actor_url: actorUrl }),
   unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
   listFollowing:            ()                 => api.get('/federation/following'),
+  // AGORA-348: the caller's own inbound followers, self-scoped only.
+  listFollowers:            ()                 => api.get('/federation/followers'),
   toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
   toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
 }
@@ -300,6 +302,8 @@ export const atprotoApi = {
   followBlueskyAccount:   (actor: string)  => api.post('/atproto/follow', { actor }),
   unfollowBlueskyAccount: (id: string)     => api.delete(`/atproto/follow/${id}`),
   listBlueskyFollowing:   ()               => api.get('/atproto/following'),
+  // AGORA-348: the caller's own inbound followers, self-scoped only.
+  listBlueskyFollowers:   ()               => api.get('/atproto/followers'),
   // AGORA-198: per-follow notification opt-in, mirroring toggleFollowNotify.
   toggleFollowNotify:     (id: string, notify: boolean) => api.put(`/atproto/follow/${id}/notify`, { notify }),
   // AGORA-236: per-follow main-feed opt-in, mirroring federationApi's own toggleShowInFeed.

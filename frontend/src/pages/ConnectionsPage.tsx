@@ -19,6 +19,18 @@ export default function ConnectionsPage() {
   const [tab, setTab] = useState<'friends'|'requests'|'lists'|'fediverse'|'bluesky'>(
     (searchParams.get('tab') as any) || 'friends'
   )
+  // AGORA-349: which segment of the Fediverse/Bluesky tab is showing —
+  // separate per platform since a user can leave one on Followers and switch
+  // platforms without losing that. ?sub= only ever seeds whichever platform
+  // ?tab= itself points at, so a new-follower notification can deep-link
+  // straight to e.g. /connections?tab=bluesky&sub=followers.
+  const initialSub = searchParams.get('sub') === 'followers' ? 'followers' : 'following'
+  const [fediSubTab, setFediSubTab] = useState<'following'|'followers'>(
+    (searchParams.get('tab') as any) === 'fediverse' ? initialSub : 'following'
+  )
+  const [bskySubTab, setBskySubTab] = useState<'following'|'followers'>(
+    (searchParams.get('tab') as any) === 'bluesky' ? initialSub : 'following'
+  )
   const [newListName, setNewListName] = useState('')
   const [expandedList, setExpandedList] = useState<string | null>(null)
   const [listModalFriend, setListModalFriend] = useState<any | null>(null)
@@ -57,6 +69,17 @@ export default function ConnectionsPage() {
   })
   const following: any[] = followingData?.following ?? []
 
+  // AGORA-348/349: the caller's own inbound followers. Fetched whenever the
+  // Fediverse tab is open (not gated on fediSubTab === 'followers') so the
+  // Followers segment's count is live from the moment the tab renders and
+  // switching segments never shows a loading flash.
+  const { data: followersData } = useQuery({
+    queryKey: ['fediverse-followers'],
+    queryFn: () => federationApi.listFollowers().then(r => r.data),
+    enabled: tab === 'fediverse',
+  })
+  const followers: any[] = followersData?.followers ?? []
+
   const resolveFediHandle = useMutation({
     mutationFn: (h: string) => federationApi.resolveFediverseHandle(h).then(r => r.data),
     onSuccess: (data) => { setFediPreview(data); setFediSearchError('') },
@@ -68,6 +91,9 @@ export default function ConnectionsPage() {
       setFediPreview(null)
       setFediHandle('')
       qc.invalidateQueries({ queryKey: ['fediverse-following'] })
+      // A Follow Back from the Followers segment needs this list's
+      // following_back flags to settle too, not just the Following list.
+      qc.invalidateQueries({ queryKey: ['fediverse-followers'] })
     },
   })
   const unfollowFedi = useMutation({
@@ -124,6 +150,18 @@ export default function ConnectionsPage() {
   })
   const bskyFollowing: any[] = bskyFollowingData?.following ?? []
 
+  // AGORA-348/349: same shape as the fediverse followers query above —
+  // fetched whenever the Bluesky tab is open, not gated on bskySubTab, so the
+  // Followers segment's count and sync-freshness note are live immediately.
+  const { data: bskyFollowersData } = useQuery({
+    queryKey: ['bluesky-followers'],
+    queryFn: () => atprotoApi.listBlueskyFollowers().then(r => r.data),
+    enabled: tab === 'bluesky',
+  })
+  const bskyFollowers: any[] = bskyFollowersData?.followers ?? []
+  const bskyFollowersSeeded: boolean = bskyFollowersData?.seeded ?? false
+  const bskyFollowersSyncedAt: string | undefined = bskyFollowersData?.synced_at
+
   const resolveBskyHandle = useMutation({
     mutationFn: (h: string) => atprotoApi.resolveBlueskyHandle(h).then(r => r.data),
     onSuccess: (data) => { setBskyPreview(data); setBskySearchError('') },
@@ -135,6 +173,7 @@ export default function ConnectionsPage() {
       setBskyPreview(null)
       setBskyHandle('')
       qc.invalidateQueries({ queryKey: ['bluesky-following'] })
+      qc.invalidateQueries({ queryKey: ['bluesky-followers'] })
     },
     onError: (e: any) => setBskySearchError(e.response?.data?.error || 'Could not follow that account.'),
   })
@@ -365,6 +404,22 @@ export default function ConnectionsPage() {
       {/* ── Fediverse tab (moved from the standalone Fediverse page) ── */}
       {tab === 'fediverse' && (
         <div className="space-y-4">
+          {/* AGORA-349: Following vs Followers — kept as a segment inside this
+              tab rather than a sixth top-level tab, since the two carry very
+              different meaning (a follow you made vs. one made of you) but
+              share this tab's follow-by-handle machinery and platform framing. */}
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            <button onClick={() => setFediSubTab('following')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${fediSubTab === 'following' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Following ({following.length})
+            </button>
+            <button onClick={() => setFediSubTab('followers')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${fediSubTab === 'followers' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Followers ({followers.length})
+            </button>
+          </div>
+
+          {fediSubTab === 'following' && (
           <div className="card p-5 space-y-4">
             <div>
               <h2 className="font-semibold text-sm">Follow a fediverse account</h2>
@@ -427,7 +482,9 @@ export default function ConnectionsPage() {
               </div>
             )}
           </div>
+          )}
 
+          {fediSubTab === 'following' && (
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
             {following.length > 0 && (
@@ -533,6 +590,56 @@ export default function ConnectionsPage() {
               ))}
             </div>
           </div>
+          )}
+
+          {/* ── Followers segment (AGORA-349) ── */}
+          {fediSubTab === 'followers' && (
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your followers</h2>
+            {followers.length === 0 && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                No one on the fediverse follows you yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {followers.map((f: any) => (
+                <div key={f.actor_url} className="flex items-center gap-3 py-2">
+                  {f.username
+                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.username || '?')[0]}
+                            </span>}
+                      </Link>
+                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.username || '?')[0]}
+                            </span>}
+                      </div>}
+                  <div className="flex-1 min-w-0">
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name ? renderName(f.display_name, f.emojis) : f.actor_url}</p>}
+                    {f.username && <p className="text-xs text-agora-400 truncate">@{f.username}</p>}
+                  </div>
+                  {f.following_back
+                    ? <span className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                        <UserCheck size={12} /> Following
+                      </span>
+                    : <button
+                        onClick={() => followFedi.mutate(f.actor_url)}
+                        disabled={followFedi.isPending}
+                        className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                        <UserPlus size={13} /> Follow back
+                      </button>}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
 
           <p className="text-xs text-agora-400 text-center">
             Want to opt out of the fediverse entirely? That toggle lives in{' '}
@@ -544,6 +651,19 @@ export default function ConnectionsPage() {
       {/* ── Bluesky tab (AGORA-195) ── */}
       {tab === 'bluesky' && (
         <div className="space-y-4">
+          {/* AGORA-349: see the matching comment on the Fediverse tab above. */}
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            <button onClick={() => setBskySubTab('following')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${bskySubTab === 'following' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Following ({bskyFollowing.length})
+            </button>
+            <button onClick={() => setBskySubTab('followers')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${bskySubTab === 'followers' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Followers ({bskyFollowers.length})
+            </button>
+          </div>
+
+          {bskySubTab === 'following' && (
           <div className="card p-5 space-y-4">
             <div>
               <h2 className="font-semibold text-sm">Follow a Bluesky account</h2>
@@ -587,7 +707,9 @@ export default function ConnectionsPage() {
               </div>
             )}
           </div>
+          )}
 
+          {bskySubTab === 'following' && (
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
             {bskyFollowing.length > 0 && (
@@ -664,6 +786,67 @@ export default function ConnectionsPage() {
               ))}
             </div>
           </div>
+          )}
+
+          {/* ── Followers segment (AGORA-349) ── */}
+          {bskySubTab === 'followers' && (
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your followers</h2>
+            {/* AGORA-348: at_followers is only ever as current as the last
+                poll (AT Proto never delivers a follow to us), so an empty
+                list needs to say whether that's "no followers" or "not
+                synced yet" rather than reading as fact either way. */}
+            <p className="text-xs text-agora-400">
+              {bskyFollowersSeeded
+                ? (bskyFollowersSyncedAt
+                    ? `Last synced ${new Date(bskyFollowersSyncedAt).toLocaleString()}`
+                    : 'Synced')
+                : 'Not synced yet — this can take a little while after enabling Bluesky.'}
+            </p>
+            {bskyFollowers.length === 0 && bskyFollowersSeeded && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                No one on Bluesky follows you yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {bskyFollowers.map((f: any) => (
+                <div key={f.did} className="flex items-center gap-3 py-2">
+                  {f.username
+                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </Link>
+                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </div>}
+                  <div className="flex-1 min-w-0">
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.handle}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>}
+                    <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
+                  </div>
+                  {f.following_back
+                    ? <span className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                        <UserCheck size={12} /> Following
+                      </span>
+                    : <button
+                        onClick={() => followBsky.mutate(f.did)}
+                        disabled={followBsky.isPending}
+                        className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                        <UserPlus size={13} /> Follow back
+                      </button>}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
 
           <p className="text-xs text-agora-400 text-center">
             Want to opt out of Bluesky entirely? That toggle lives in{' '}

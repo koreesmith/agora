@@ -238,6 +238,11 @@ type inboundNote struct {
 	To            []string
 	CC            []string
 	DirectMessage bool
+	// Audience is the agora:audience marker (AGORA-337/342), read here so this
+	// path can tell a friends-only or list post meant for exactly one remote
+	// friend apart from an actual direct message. Both shapes are otherwise
+	// identical on the wire: one actor addressed, no Public, no inReplyTo.
+	Audience string
 }
 
 // handleInboundDirectMessage stores a message addressed to exactly one local
@@ -254,6 +259,16 @@ type inboundNote struct {
 // the caller knows not to treat it as a post.
 func (s *Service) handleInboundDirectMessage(verifiedActor string, note inboundNote) bool {
 	if note.InReplyTo != "" || isAddressedPublicly(note.To, note.CC) {
+		return false
+	}
+	// AGORA-337/342 give a friends-only or list post the exact same shape a
+	// direct message has once its audience happens to be a single remote
+	// friend: one actor addressed, no Public, no inReplyTo. That collision is
+	// what sent a friends-only post to a lone remote friend into their DMs
+	// instead of their wall. agora:audience is never set on an actual message,
+	// so its presence settles this before the single-actor fallback below ever
+	// runs.
+	if note.Audience != "" {
 		return false
 	}
 	// A Note addressed to a single actor with no inReplyTo is a direct message.

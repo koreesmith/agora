@@ -1769,7 +1769,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	if s.handleInboundDirectMessage(verifiedActor, inboundNote{
 		ID: note.ID, Content: note.Content, Published: note.Published,
 		InReplyTo: note.InReplyTo, To: note.To, CC: note.CC,
-		DirectMessage: note.DirectMessage,
+		DirectMessage: note.DirectMessage, Audience: note.Audience,
 	}) {
 		return
 	}

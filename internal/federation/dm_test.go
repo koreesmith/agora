@@ -162,6 +162,13 @@ func TestInboundDirectMessageRecognition(t *testing.T) {
 		{"a public note is never a direct message", inboundNote{To: []string{"https://www.w3.org/ns/activitystreams#Public"}, DirectMessage: true}, false},
 		{"unmarked and addressed to several is a post", inboundNote{To: []string{"https://a/1", "https://a/2"}}, false},
 		{"unaddressed is a post", inboundNote{}, false},
+		// AGORA-337's friends-only post and AGORA-323's direct message are the
+		// same shape once the audience is a single remote friend: one actor
+		// addressed, no Public, no inReplyTo. Without this case a friends-only
+		// post to a lone remote friend never reached their wall, it landed in
+		// their DMs instead.
+		{"a friends-only post to a single friend is still a post", inboundNote{To: []string{"https://local.example/federation/users/nobody"}, Audience: "friends"}, false},
+		{"a list post to a single member is still a post", inboundNote{To: []string{"https://local.example/federation/users/nobody"}, Audience: "list"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

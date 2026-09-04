@@ -1623,4 +1623,14 @@ var schema = []string{
 		public_key_pem TEXT        NOT NULL,
 		fetched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// AGORA-353: a row that exhausts maxDeliveryAttempts used to just sit
+	// excluded from the drain query's own `attempts < 10` filter forever —
+	// abandoned but with nothing distinguishing it from "still pending" to
+	// anyone querying the table. dead_at makes that state explicit and
+	// queryable (`WHERE dead_at IS NOT NULL`) instead of implicit in an
+	// attempts count nobody thought to check.
+	`ALTER TABLE ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE page_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE instance_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
 }

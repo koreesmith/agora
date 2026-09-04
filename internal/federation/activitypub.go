@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -4687,15 +4688,21 @@ func (s *Service) enqueuePageAPDelivery(pageID, inboxURL string, activity any) {
 	`, pageID, inboxURL, string(payload))
 }
 
-// drainPageAPQueue mirrors drainAPQueue for page-authored deliveries.
+// drainPageAPQueue mirrors drainAPQueue for page-authored deliveries,
+// including its AGORA-353 claiming/backoff/concurrency fix.
 func (s *Service) drainPageAPQueue() {
 	rows, err := s.db.Query(`
-		SELECT id, actor_page_id, inbox_url, activity
-		FROM page_ap_delivery_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`)
+		UPDATE page_ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM page_ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, actor_page_id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
 		return
 	}
@@ -4704,30 +4711,43 @@ func (s *Service) drainPageAPQueue() {
 	type job struct {
 		id, pageID, inboxURL string
 		activity             []byte
+		attempts             int
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		if rows.Scan(&j.id, &j.pageID, &j.inboxURL, &j.activity) == nil {
+		if rows.Scan(&j.id, &j.pageID, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
 	rows.Close()
 
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
 	for _, j := range jobs {
-		sendErr := s.deliverPageAPActivity(j.pageID, j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM page_ap_delivery_queue WHERE id = $1`, j.id)
-		} else {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverPageAPActivity(j.pageID, j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM page_ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
 			s.db.Exec(`
 				UPDATE page_ap_delivery_queue
 				SET attempts = attempts + 1,
 				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
-		}
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+		}(j)
 	}
+	wg.Wait()
 }
 
 func (s *Service) deliverPageAPActivity(pageID, inboxURL string, activity []byte) error {
@@ -4820,6 +4840,36 @@ func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
 // the last thing that needed it besides this one.
 const maxDeliveryAttempts = 10
 
+// deliveryBackoffCapMinutes bounds the wait between two delivery attempts.
+// AGORA-353: this used to cap at 1440 (24h), and with maxDeliveryAttempts's
+// doubling schedule (1, 2, 4, 8, 16, 32, ...) that meant a delivery stuck on
+// its 7th-9th attempt wouldn't retry again for 2-8.5 hours — indistinguishable
+// from "broken" to anyone waiting on it. 30 minutes keeps the same eventual
+// give-up point (still maxDeliveryAttempts tries) without any single wait
+// ballooning past what a transient outage should plausibly need.
+const deliveryBackoffCapMinutes = 30
+
+// apDeliveryConcurrency bounds how many outbound deliveries a single drain
+// pass sends in parallel. AGORA-353: delivery used to run strictly
+// sequentially, so one slow or dead inbox (held open up to fedHTTPClient's
+// 10s timeout) stalled every other job behind it in the same batch and held
+// this goroutine's DB connection open for the duration.
+const apDeliveryConcurrency = 8
+
+// apDeliveryClaimLease is how long a claimed row is protected from being
+// picked up again before its real outcome (success/failure) is written back.
+// AGORA-353: apQueueTicker fires every 20s regardless of whether the prior
+// drainAPQueue call finished, and drainAPQueue itself had no row locking —
+// an overrunning batch (plausible with several slow/dead inboxes in it) could
+// have its still-in-flight rows picked up a second time by the next tick's
+// goroutine, double-delivering them and doubling the DB connections held
+// blocked on outbound HTTP. The claiming UPDATE below (FOR UPDATE SKIP
+// LOCKED) prevents a literal concurrent double-claim; this lease additionally
+// covers the case where a claimed batch just takes longer than one tick to
+// finish. Comfortably above apDeliveryConcurrency's worst case (20 jobs /
+// 8 concurrent * fedHTTPClient's 10s timeout ≈ 25s).
+const apDeliveryClaimLease = 3 * time.Minute
+
 func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) {
 	var blocked bool
 	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_inbox_url = $2 AND blocker_inbox_url != '')`,
@@ -4839,64 +4889,98 @@ func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) 
 // separate from the legacy drainQueue (federation.go) because HTTP Signatures
 // must be computed at send time (a fresh Date header each attempt), not once
 // at enqueue time like the custom protocol's embedded-signature scheme.
-func (s *Service) drainAPQueue() {
+// apDeliveryJob is one claimed row from ap_delivery_queue.
+type apDeliveryJob struct {
+	id, userID, inboxURL string
+	activity             []byte
+	attempts             int
+}
+
+// claimAPDeliveryJobs atomically claims up to 20 due rows from
+// ap_delivery_queue for this drain pass. AGORA-353: FOR UPDATE SKIP LOCKED
+// means an overlapping drain from a slow-running previous tick can't grab
+// the same rows, and the next_attempt lease it writes (apDeliveryClaimLease)
+// keeps a claimed-but-still-in-flight row from being picked up again by the
+// next tick before this batch finishes. Split out from drainAPQueue so the
+// exclusivity guarantee is directly testable without going through
+// deliverAPActivity's network call.
+func (s *Service) claimAPDeliveryJobs() ([]apDeliveryJob, error) {
 	rows, err := s.db.Query(`
-		SELECT id, actor_user_id, inbox_url, activity, attempts
-		FROM ap_delivery_queue
-		WHERE attempts < $1 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`, maxDeliveryAttempts)
+		UPDATE ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, actor_user_id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
-	type job struct {
-		id, userID, inboxURL string
-		activity             []byte
-		attempts             int
-	}
-	var jobs []job
+	var jobs []apDeliveryJob
 	for rows.Next() {
-		var j job
+		var j apDeliveryJob
 		if rows.Scan(&j.id, &j.userID, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
-	rows.Close()
+	return jobs, rows.Err()
+}
 
-	for _, j := range jobs {
-		sendErr := s.deliverAPActivity(j.userID, j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM ap_delivery_queue WHERE id = $1`, j.id)
-			continue
-		}
-		s.db.Exec(`
-			UPDATE ap_delivery_queue
-			SET attempts = attempts + 1,
-			    last_error = $1,
-			    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-			WHERE id = $2
-		`, sendErr.Error(), j.id)
-
-		// AGORA-338: this queue recorded failures to last_error and logged
-		// nothing, so a delivery path failing every time looked exactly like
-		// one with nothing to send. AGORA-325 closed that on the legacy queue;
-		// this is the same gap on the queue that now carries everything,
-		// including friend requests and friends-only posts.
-		//
-		// First failure and final abandonment only. A peer down for a day would
-		// otherwise produce a line per activity per retry, and the noise is what
-		// makes a log stop being read.
-		switch {
-		case j.attempts == 0:
-			log.Printf("federation: ap delivery to %s failed (first attempt): %v", j.inboxURL, sendErr)
-		case j.attempts >= maxDeliveryAttempts-1:
-			log.Printf("federation: giving up on ap delivery to %s after %d attempts, last error: %v",
-				j.inboxURL, j.attempts+1, sendErr)
-		}
+func (s *Service) drainAPQueue() {
+	jobs, err := s.claimAPDeliveryJobs()
+	if err != nil {
+		return
 	}
+
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j apDeliveryJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverAPActivity(j.userID, j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
+			s.db.Exec(`
+				UPDATE ap_delivery_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+
+			// AGORA-338: this queue recorded failures to last_error and logged
+			// nothing, so a delivery path failing every time looked exactly like
+			// one with nothing to send. AGORA-325 closed that on the legacy queue;
+			// this is the same gap on the queue that now carries everything,
+			// including friend requests and friends-only posts.
+			//
+			// First failure and final abandonment only. A peer down for a day would
+			// otherwise produce a line per activity per retry, and the noise is what
+			// makes a log stop being read.
+			switch {
+			case j.attempts == 0:
+				log.Printf("federation: ap delivery to %s failed (first attempt): %v", j.inboxURL, sendErr)
+			case givingUp:
+				log.Printf("federation: giving up on ap delivery to %s after %d attempts, last error: %v",
+					j.inboxURL, j.attempts+1, sendErr)
+			}
+		}(j)
+	}
+	wg.Wait()
 }
 
 func (s *Service) deliverAPActivity(userID, inboxURL string, activity []byte) error {
@@ -4954,12 +5038,17 @@ func (s *Service) enqueueInstanceAPDelivery(inboxURL string, activity any) {
 
 func (s *Service) drainInstanceAPQueue() {
 	rows, err := s.db.Query(`
-		SELECT id, inbox_url, activity
-		FROM instance_ap_delivery_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`)
+		UPDATE instance_ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM instance_ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
 		return
 	}
@@ -4968,30 +5057,43 @@ func (s *Service) drainInstanceAPQueue() {
 	type instanceJob struct {
 		id, inboxURL string
 		activity     []byte
+		attempts     int
 	}
 	var jobs []instanceJob
 	for rows.Next() {
 		var j instanceJob
-		if rows.Scan(&j.id, &j.inboxURL, &j.activity) == nil {
+		if rows.Scan(&j.id, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
 	rows.Close()
 
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
 	for _, j := range jobs {
-		sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
-		} else {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j instanceJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
 			s.db.Exec(`
 				UPDATE instance_ap_delivery_queue
 				SET attempts = attempts + 1,
 				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
-		}
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+		}(j)
 	}
+	wg.Wait()
 }
 
 func (s *Service) deliverInstanceAPActivity(inboxURL string, activity []byte) error {

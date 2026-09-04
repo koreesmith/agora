@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -2783,7 +2784,7 @@ func scanPosts(rows interface {
 	for rows.Next() {
 		var p Post
 		var authorEmojis, contentEmojis, repostAuthorEmojis, repostContentEmojis string
-		rows.Scan(
+		if err := rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
@@ -2798,7 +2799,18 @@ func scanPosts(rows interface {
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,
 			&authorEmojis, &contentEmojis, &repostAuthorEmojis, &repostContentEmojis,
-		)
+		); err != nil {
+			// AGORA-355: this error used to be discarded, which meant a
+			// column-list drift between a query and this Scan call (e.g. a
+			// future federation/atproto column addition to one but not the
+			// other) would silently append a mostly-zero-valued Post instead
+			// of failing anywhere visible. Skipping the row and logging is
+			// strictly better than either silently corrupting it or blowing
+			// up every caller's signature for what should never happen in
+			// practice.
+			log.Printf("feed: scanPosts: skipping row after Scan error: %v", err)
+			continue
+		}
 		p.ReactionCounts = map[string]int{}
 		p.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
 		p.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))

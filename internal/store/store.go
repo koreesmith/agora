@@ -1633,4 +1633,24 @@ var schema = []string{
 	`ALTER TABLE ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
 	`ALTER TABLE page_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
 	`ALTER TABLE instance_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+
+	// AGORA-355: GetProfile used to synchronously fetch a remote account's
+	// live follower/following/post stats on every single profile view — for
+	// a fediverse actor, four sequential signed HTTP round trips (an actor
+	// doc fetch plus three collection totals), each up to fedHTTPClient's
+	// 10s timeout, with no caching at all. Shared by both the ActivityPub
+	// and AT Proto stats fetchers (actor_key holds either an ap_actor_url or
+	// a Bluesky DID — the two never collide in practice, one is always an
+	// https:// URL and the other always starts with "did:") since both are
+	// keyed by the same kind of opaque remote-identity string and need
+	// identical TTL/staleness handling.
+	`CREATE TABLE IF NOT EXISTS remote_actor_stats (
+		actor_key  TEXT        PRIMARY KEY,
+		followers  INT         NOT NULL DEFAULT 0,
+		following  INT         NOT NULL DEFAULT 0,
+		posts      INT         NOT NULL DEFAULT 0,
+		bio        TEXT        NOT NULL DEFAULT '',
+		locked     BOOLEAN     NOT NULL DEFAULT false,
+		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

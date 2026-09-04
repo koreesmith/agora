@@ -3305,7 +3305,32 @@ func (s *Service) fetchCollectionTotal(userID, collectionURL string) (int, bool)
 // than in a method of its own precisely because this call already dereferences
 // the actor document on every remote profile view — a separate accessor would
 // double the fetches to read a field the response already contains.
+// remoteActorStatsTTL bounds how long cached remote actor stats
+// (remote_actor_stats, AGORA-355) are served without a refresh.
+const remoteActorStatsTTL = 30 * time.Minute
+
 func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool) {
+	if followers, following, posts, bio, locked, fetchedAt, hit := s.cachedRemoteActorStats(actorURL); hit {
+		if time.Since(fetchedAt) >= remoteActorStatsTTL {
+			// Stale: still serve it immediately (better than blocking the
+			// request on a live fetch) and refresh in the background so the
+			// next viewer gets current numbers.
+			go s.fetchAndCacheRemoteActorStats(actorURL)
+		}
+		return followers, following, posts, bio, locked, true
+	}
+	// Cache miss (an actor nobody here has viewed before) — nothing to show
+	// yet, so this one has to be a live fetch. Rare in steady state; every
+	// later view of this same actor is served from cache.
+	return s.fetchAndCacheRemoteActorStats(actorURL)
+}
+
+// fetchAndCacheRemoteActorStats does the live network fetch GetRemoteActorStats
+// used to do unconditionally on every call (AGORA-355) — now only reached on
+// a cache miss or background refresh. The three collection-total fetches run
+// concurrently rather than sequentially, cutting the worst case (each up to
+// fedHTTPClient's 10s timeout) from ~30s to ~10s.
+func (s *Service) fetchAndCacheRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool) {
 	signerID := s.signerUserIDForActorFetch(actorURL)
 	if signerID == "" {
 		return 0, 0, 0, "", false, false
@@ -3314,10 +3339,36 @@ func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, po
 	if err != nil {
 		return 0, 0, 0, "", false, false
 	}
-	followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL)
-	following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL)
-	posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL)
-	return followers, following, posts, HTMLToPlainText(profile.Summary), profile.ManuallyApprovesFollowers, true
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL) }()
+	go func() { defer wg.Done(); following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL) }()
+	go func() { defer wg.Done(); posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL) }()
+	wg.Wait()
+
+	bio = HTMLToPlainText(profile.Summary)
+	locked = profile.ManuallyApprovesFollowers
+	s.cacheRemoteActorStats(actorURL, followers, following, posts, bio, locked)
+	return followers, following, posts, bio, locked, true
+}
+
+func (s *Service) cachedRemoteActorStats(actorKey string) (followers, following, posts int, bio string, locked bool, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`
+		SELECT followers, following, posts, bio, locked, fetched_at FROM remote_actor_stats WHERE actor_key = $1
+	`, actorKey).Scan(&followers, &following, &posts, &bio, &locked, &fetchedAt)
+	return followers, following, posts, bio, locked, fetchedAt, err == nil
+}
+
+func (s *Service) cacheRemoteActorStats(actorKey string, followers, following, posts int, bio string, locked bool) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_stats (actor_key, followers, following, posts, bio, locked, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (actor_key) DO UPDATE
+		  SET followers = $2, following = $3, posts = $4, bio = $5, locked = $6, fetched_at = NOW()
+	`, actorKey, followers, following, posts, bio, locked); err != nil {
+		log.Printf("federation: failed to cache remote actor stats for %s: %v", actorKey, err)
+	}
 }
 
 // resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger

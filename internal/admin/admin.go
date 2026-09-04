@@ -176,11 +176,18 @@ func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetStats(w http.ResponseWriter, r *http.Request) {
 	var totalUsers, postsToday, activeUsers7d, pendingReports int
 
+	// AGORA-356: postsToday/activeUsers7d had no is_remote filter, so a
+	// followed fediverse/Bluesky account's ingested posts inflated both —
+	// "Active (7d)" in particular counted every remote author whose post we
+	// happened to ingest that week as if they were an active local user.
+	// A remote-ingested post row is always flagged is_remote = true itself
+	// (mirroring its author), so filtering the post is enough here — no
+	// join back to users is needed.
 	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false`).Scan(&totalUsers)
-	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE created_at > NOW() - INTERVAL '1 day' AND deleted_at IS NULL`).Scan(&postsToday)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE created_at > NOW() - INTERVAL '1 day' AND deleted_at IS NULL AND is_remote = false`).Scan(&postsToday)
 	s.db.QueryRow(`
 		SELECT COUNT(DISTINCT author_id) FROM posts
-		WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL
+		WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL AND is_remote = false
 	`).Scan(&activeUsers7d)
 	s.db.QueryRow(`SELECT COUNT(*) FROM reports WHERE status = 'pending'`).Scan(&pendingReports)
 

@@ -2930,22 +2930,16 @@ type remoteActorProfile struct {
 	ManuallyApprovesFollowers bool
 }
 
-// fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
-// obtain its publicKeyPem, signed as a local user's own actor. Instances
-// that enforce "authorized fetch" (Threads chief among them) blanket-404
-// unsigned actor GETs — which used to break verifying the HTTP Signature on
-// every inbound activity they send us, including the Accept(Follow) that
-// confirms an outbound follow, leaving it stuck "Requested" forever
-// (AGORA-175). Prefers whichever local user has a pending follow of this
-// exact actor (the common case: verifying that follow's own Accept), falling
-// back to any local user with an existing keypair, then any local user at
-// all, so inbound activities from authorized-fetch instances still verify
-// even without a matching ap_following row.
 // signerUserIDForActorFetch picks which local user's key to sign an
-// authorized-fetch actor GET with: whichever local user has a pending (or
-// past) follow of actorURL, since we already have a legitimate reason to
-// query them; failing that, any local user with an existing keypair; failing
-// that, any local user at all (getOrCreateUserKeyPair lazily generates one).
+// authorized-fetch actor GET with. Instances that enforce "authorized fetch"
+// (Threads chief among them) blanket-404 unsigned actor GETs — which used to
+// break verifying the HTTP Signature on every inbound activity they send us,
+// including the Accept(Follow) that confirms an outbound follow, leaving it
+// stuck "Requested" forever (AGORA-175). Prefers whichever local user has a
+// pending (or past) follow of actorURL, since we already have a legitimate
+// reason to query them; failing that, any local user with an existing
+// keypair; failing that, any local user at all (getOrCreateUserKeyPair
+// lazily generates one).
 func (s *Service) signerUserIDForActorFetch(actorURL string) string {
 	var userID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
@@ -2958,7 +2952,63 @@ func (s *Service) signerUserIDForActorFetch(actorURL string) string {
 	return userID
 }
 
-func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error) {
+// remoteActorKeyTTL bounds how long a cached actor public key (AGORA-354) is
+// trusted before fetchActorPublicKeySigned falls back to a live fetch again,
+// independent of whether verifyInboundSignature's own refresh-on-mismatch
+// ever triggers for that actor.
+const remoteActorKeyTTL = 24 * time.Hour
+
+// fetchActorPublicKeySigned resolves an actor's HTTP-Signature public key,
+// preferring a cached copy (remote_actor_keys, AGORA-354) over a live signed
+// fetch. Before this cache existed, every inbound federated request paid for
+// a live actor-document GET here — up to fedHTTPClient's 10s timeout — and
+// any transient failure of that fetch (timeout, remote 5xx, DNS hiccup)
+// failed signature verification outright, which the sender's delivery queue
+// then recorded as a failed attempt and backed off on (see AGORA-353's
+// exponential retry schedule). fromCache tells the caller whether this
+// result came from the cache, so it knows whether a subsequent verification
+// failure is worth one live re-fetch (the remote side may have rotated its
+// key) rather than being a genuine forgery.
+func (s *Service) fetchActorPublicKeySigned(keyID string) (key *rsa.PublicKey, fromCache bool, err error) {
+	actorURL := strings.SplitN(keyID, "#", 2)[0]
+
+	if pubPEM, fetchedAt, ok := s.cachedActorPublicKeyPEM(actorURL); ok && time.Since(fetchedAt) < remoteActorKeyTTL {
+		if key, err := parseRSAPublicKeyPEM(pubPEM); err == nil {
+			return key, true, nil
+		}
+		// Fall through and refetch live if the cached PEM is somehow unparseable.
+	}
+
+	key, err = s.fetchActorPublicKeyLive(keyID)
+	return key, false, err
+}
+
+// cachedActorPublicKeyPEM looks up a previously-cached actor public key.
+// Returns ok=false on a cache miss; the caller is responsible for checking
+// fetchedAt against remoteActorKeyTTL since a stale-but-present row is still
+// useful as the pre-refresh key in the refresh-on-mismatch path.
+func (s *Service) cachedActorPublicKeyPEM(actorURL string) (pubPEM string, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`SELECT public_key_pem, fetched_at FROM remote_actor_keys WHERE actor_url = $1`, actorURL).
+		Scan(&pubPEM, &fetchedAt)
+	return pubPEM, fetchedAt, err == nil
+}
+
+func (s *Service) cacheActorPublicKeyPEM(actorURL, pubPEM string) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_keys (actor_url, public_key_pem, fetched_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (actor_url) DO UPDATE SET public_key_pem = $2, fetched_at = NOW()
+	`, actorURL, pubPEM); err != nil {
+		log.Printf("federation: failed to cache actor public key for %s: %v", actorURL, err)
+	}
+}
+
+// fetchActorPublicKeyLive always dereferences the actor document over the
+// network (never the cache) — the original behavior of this file's
+// fetchActorPublicKeySigned before AGORA-354 added caching in front of it.
+// Used both for a cache miss and for verifyInboundSignature's
+// refresh-on-mismatch retry when a cached key fails to verify.
+func (s *Service) fetchActorPublicKeyLive(keyID string) (*rsa.PublicKey, error) {
 	actorURL := strings.SplitN(keyID, "#", 2)[0]
 
 	userID := s.signerUserIDForActorFetch(actorURL)
@@ -3004,7 +3054,12 @@ func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error
 	if actor.PublicKey.PublicKeyPem == "" {
 		return nil, fmt.Errorf("actor has no publicKeyPem")
 	}
-	return parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
+	key, err := parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheActorPublicKeyPEM(actorURL, actor.PublicKey.PublicKeyPem)
+	return key, nil
 }
 
 // fetchActorProfileSigned dereferences a remote actor URL (via the SSRF-safe

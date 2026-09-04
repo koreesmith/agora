@@ -1607,4 +1607,20 @@ var schema = []string{
 		PRIMARY KEY (user_id, post_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_hidden_posts_post ON hidden_posts(post_id)`,
+
+	// AGORA-354: cache a remote actor's HTTP-Signature public key instead of
+	// re-fetching it (a live, signed HTTP GET) on every single inbound
+	// federated request. Keyed by actor URL rather than folded into `users`
+	// because a signer doesn't necessarily have a local stub row yet (e.g. a
+	// Like from an account nobody here follows) — decoupling the cache from
+	// that upsert lifecycle means it works for every signer, not just ones
+	// we've already ingested. fetched_at drives the TTL check in
+	// fetchActorPublicKeySigned; a signature that fails to verify against a
+	// cached key triggers one live re-fetch before failing, so key rotation
+	// on the remote side doesn't get stuck on a stale cache entry.
+	`CREATE TABLE IF NOT EXISTS remote_actor_keys (
+		actor_url      TEXT        PRIMARY KEY,
+		public_key_pem TEXT        NOT NULL,
+		fetched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

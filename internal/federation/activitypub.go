@@ -555,6 +555,52 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetPost serves a single local post's ActivityPub object representation at
+// its own object URL (.../federation/users/{handle}/posts/{postID}).
+//
+// AGORA-357: this route never existed — buildNoteObject has always minted
+// that exact URL as objID (the "id" of every Create/Update/Announce this
+// instance sends), but nothing ever served a GET on it, so any remote
+// server dereferencing a post by its own object id got a 404. That breaks
+// more than a direct lookup: Mastodon fetches a boosted, quoted, or
+// mentioned object by its id to render it, so a boost of one of this
+// instance's own posts could deliver successfully as an Announce activity
+// and still never display anything on the receiving end, because the
+// object it pointed at was unfetchable.
+//
+// Scoped to top-level posts only (parent_id IS NULL), mirroring Outbox's
+// own scope restriction just above — serving a reply/comment's object here
+// too is a separate follow-up, not attempted here.
+func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	postID := chi.URLParam(r, "postID")
+
+	u, ok := s.apEligibleUser(handle)
+	if !ok {
+		writeError(w, 404, "user not found")
+		return
+	}
+
+	var content, contentWarning, visibility, authorID string
+	var isRemote bool
+	var createdAt time.Time
+	err := s.db.QueryRow(`
+		SELECT content, content_warning, visibility, author_id, is_remote, created_at
+		FROM posts
+		WHERE id = $1 AND parent_id IS NULL AND deleted_at IS NULL
+	`, postID).Scan(&content, &contentWarning, &visibility, &authorID, &isRemote, &createdAt)
+	if err != nil || authorID != u.ID || isRemote || visibility != "public" {
+		writeError(w, 404, "post not found")
+		return
+	}
+
+	note := s.buildNoteObject(s.actorURL(u.Username), postID, content, createdAt, "", contentWarning)
+	note["@context"] = "https://www.w3.org/ns/activitystreams"
+
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(note)
+}
+
 // buildCreateActivity builds a Create activity wrapping a Note, used by the
 // Outbox (historical posts), BroadcastPublicPost (new top-level posts), and
 // DeliverReply (comment replies — inReplyTo set, to targeted at the
@@ -4398,17 +4444,26 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	if !s.activityPubEnabled() {
 		return
 	}
-	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
-	if !ok {
-		log.Printf("federation: DeliverAnnounce %s: original post %s is not a remote target, skipping direct delivery", repostID, originalPostID)
-		return
-	}
-
 	var username string
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
 		log.Printf("federation: DeliverAnnounce %s: reposter %s lookup failed or activitypub disabled (err=%v)", repostID, userID, err)
+		return
+	}
+
+	// AGORA-357: object used to be targetRemotePostID, computed only after
+	// requiring lookupRemoteTarget to succeed — which meant reposting
+	// anything without its own ap_actor_url (a local Agora post, or a
+	// Bluesky-origin post) returned here before ever calling
+	// deliverToFollowers, so the boost never reached the reposter's own
+	// fediverse followers at all. quotedPostURL resolves an object URL for
+	// any origin (local, AP-remote, or Bluesky), so the follower fan-out
+	// below can now always happen regardless of where the original came
+	// from.
+	objectURL := s.quotedPostURL(originalPostID)
+	if objectURL == "" {
+		log.Printf("federation: DeliverAnnounce %s: could not resolve an object URL for original post %s", repostID, originalPostID)
 		return
 	}
 
@@ -4418,33 +4473,44 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 		"id":       actor + "/announces/" + repostID,
 		"type":     "Announce",
 		"actor":    actor,
-		"object":   targetRemotePostID,
+		"object":   objectURL,
 		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"cc":       []string{actor + "/followers"},
 	}
 	// Fan out to the reposting user's own followers (so the boost shows up
-	// in their timelines, same as any other outbound activity) and also
-	// deliver directly to the original post's author — most Agora users
-	// won't yet have fediverse followers who'd otherwise relay it, and
-	// without a direct copy the origin server would never register the
-	// boost at all.
+	// in their timelines, same as any other outbound activity) — always,
+	// regardless of the original's origin.
 	s.deliverToFollowers(userID, activity)
-	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	// Additionally deliver directly to the original post's author when it
+	// has its own AP-remote inbox — most Agora users won't yet have
+	// fediverse followers who'd otherwise relay it, and without a direct
+	// copy the origin server would never register the boost at all. Not
+	// applicable (and not an error) for a local or Bluesky-origin original,
+	// which has no AP inbox to deliver a direct copy to.
+	if _, targetInboxURL, _, ok := s.lookupRemoteTarget(originalPostID); ok {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
 }
 
 func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	if !s.activityPubEnabled() {
 		return
 	}
-	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
-	if !ok {
-		log.Printf("federation: DeliverUnannounce %s: original post %s is not a remote target, skipping", repostID, originalPostID)
-		return
-	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
 		log.Printf("federation: DeliverUnannounce %s: unreposter %s lookup failed (err=%v)", repostID, userID, err)
+		return
+	}
+
+	// AGORA-357: mirrors DeliverAnnounce's own fix — must always reach the
+	// unreposter's own followers (whatever origin the Announce being
+	// retracted pointed at), not just when the original has its own
+	// AP-remote inbox, or an Undo for a boost of a local/Bluesky-origin post
+	// would never go out even though the Announce it retracts now does.
+	objectURL := s.quotedPostURL(originalPostID)
+	if objectURL == "" {
+		log.Printf("federation: DeliverUnannounce %s: could not resolve an object URL for original post %s", repostID, originalPostID)
 		return
 	}
 
@@ -4458,11 +4524,13 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 			"id":     actor + "/announces/" + repostID,
 			"type":   "Announce",
 			"actor":  actor,
-			"object": targetRemotePostID,
+			"object": objectURL,
 		},
 	}
 	s.deliverToFollowers(userID, activity)
-	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	if _, targetInboxURL, _, ok := s.lookupRemoteTarget(originalPostID); ok {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
 }
 
 // ── Outbound / Inbound Poll Vote (AGORA-268) ─────────────────────────────────

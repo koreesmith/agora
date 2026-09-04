@@ -129,6 +129,12 @@ func (s *Service) pollOptions(ctx context.Context, postID string) ([]string, err
 // Images are AGORA-194.
 func (s *Service) BroadcastPost(userID, postID string) {
 	if !s.atprotoEnabled() {
+		// AGORA-357: this used to return with no trace anywhere, so an
+		// instance that simply never had AT Proto turned on in Admin >
+		// Settings (it defaults off, unlike activitypub_enabled) looked
+		// identical in the logs to one where broadcasting was working
+		// correctly and just had nothing to send.
+		log.Printf("atproto: BroadcastPost %s skipped — AT Proto disabled instance-wide", postID)
 		return
 	}
 	ctx := context.Background()
@@ -149,6 +155,8 @@ func (s *Service) BroadcastPost(userID, postID string) {
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
 		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt)
 	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
+		log.Printf("atproto: BroadcastPost %s skipped — err=%v visibility=%q profilePrivate=%v isRemote=%v atprotoEnabled=%v",
+			postID, err, visibility, profilePrivate, isRemote, atprotoEnabled)
 		return
 	}
 

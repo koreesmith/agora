@@ -42,6 +42,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/users/{handle}",  s.GetUser)
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
 	r.Get("/federation/users/{handle}/followers", s.Followers)
+	// AGORA-357: a post's own object URL (the "id" buildNoteObject mints for
+	// every Create/Update/Announce) never had anything serving a GET on it.
+	r.Get("/federation/users/{handle}/posts/{postID}", s.GetPost)
 	// AGORA-255: FEP-044f dereferenceable quote-authorization stamp — other
 	// servers fetch this to verify a quote of one of this user's posts was
 	// actually granted, not just claimed by the quoting post.

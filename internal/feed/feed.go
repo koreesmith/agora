@@ -1497,6 +1497,18 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 
 // ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
 
+// reactionFederatesAsLike is the valence split (AGORA-359): neither
+// ActivityPub nor Bluesky has any concept of a named/emoji reaction, only a
+// plain Like. A positive-or-neutral reaction is close enough to that plain
+// Like that showing one there beats showing nothing at all, but a negative
+// reaction (sad/angry/dislike) has no equivalent on either protocol, and
+// mapping it to a Like would misrepresent what actually happened, so it
+// stays local-only.
+var reactionFederatesAsLike = map[string]bool{
+	"like": true, "love": true, "laugh": true, "wow": true, "care": true,
+	"thankful": true, "pride": true,
+}
+
 func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
@@ -1513,6 +1525,20 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Type = reactionType
+
+	// AGORA-359: captured before the upsert below overwrites it, so a
+	// reaction change can tell whether it's crossing the federates-as-Like
+	// boundary (needing a Like or an Unlike sent) versus just moving between
+	// two reactions on the same side of it (needing neither). Falls back to
+	// a legacy plain `likes` row when there's no existing `reactions` row,
+	// since that's the other place a prior "like" could be recorded — the
+	// upsert below always clears it once a `reactions` row exists.
+	var prevType string
+	s.db.QueryRow(`SELECT reaction_type FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID).Scan(&prevType)
+	wasFederatedLike := reactionFederatesAsLike[prevType]
+	if prevType == "" {
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)`, userID, postID).Scan(&wasFederatedLike)
+	}
 
 	// Upsert — replaces any existing reaction from this user on this post
 	s.db.Exec(`
@@ -1545,16 +1571,27 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
-	// AGORA-158: standard ActivityPub only has a plain Like, no concept of
-	// emoji reaction types — federate only when the reaction is exactly
-	// "like", the same restriction Mastodon's own favourite maps to.
-	if s.fed != nil && req.Type == "like" {
-		go s.fed.DeliverLike(userID, postID)
-	}
-	// AGORA-201: app.bsky.feed.like is likewise a plain like with no emoji
-	// concept, same restriction as the fediverse call above.
-	if s.atproto != nil && req.Type == "like" {
-		go s.atproto.DeliverLike(userID, postID)
+	// AGORA-359: send a Like/Unlike only when this reaction change actually
+	// crosses the federates-as-Like boundary — switching between two
+	// federating reactions (love -> pride) needs neither, since a Like is
+	// already out there; switching between two non-federating ones
+	// (sad -> angry) needs neither either, since nothing was ever sent.
+	nowFederatesAsLike := reactionFederatesAsLike[req.Type]
+	switch {
+	case nowFederatesAsLike && !wasFederatedLike:
+		if s.fed != nil {
+			go s.fed.DeliverLike(userID, postID)
+		}
+		if s.atproto != nil {
+			go s.atproto.DeliverLike(userID, postID)
+		}
+	case !nowFederatesAsLike && wasFederatedLike:
+		if s.fed != nil {
+			go s.fed.DeliverUnlike(userID, postID)
+		}
+		if s.atproto != nil {
+			go s.atproto.DeliverUnlike(userID, postID)
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})

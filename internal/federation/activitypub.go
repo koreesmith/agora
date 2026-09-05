@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/store"
 )
 
 // Standard ActivityPub support — WebFinger, actor documents, HTTP-Signature
@@ -2578,23 +2579,51 @@ func (s *Service) handleInboundLike(verifiedActor, activityActor string, objectR
 		return
 	}
 
-	// AGORA-157: write to reactions (reaction_type='like'), not the legacy
-	// likes table — the UI's like button (ReactPost) writes there, and
-	// enrichReactions (feed.go) only falls back to likes for a post that has
-	// zero reactions rows at all, so a Like landing in likes is invisible to
-	// the reaction count/list for virtually every real post. Mirrors
-	// ReactPost's own upsert + legacy-row cleanup exactly.
+	// AGORA-360: another Agora instance carries the exact reaction chosen in
+	// this custom property (see DeliverLike's outbound side) — real
+	// fediverse software never sets it, and this defaults to a plain "like"
+	// exactly as before when it's absent. Trusting a claimed value from an
+	// unconfirmed sender costs nothing worse than showing the wrong (but
+	// still validly normalized) reaction type locally, so this doesn't
+	// independently re-verify the sender's software the way DeliverLike
+	// checks isAgoraInstance on the way out.
+	reactionType := "like"
+	if len(rawActivity) > 0 {
+		var likeExt struct {
+			AgoraReaction string `json:"agoraReaction"`
+		}
+		if json.Unmarshal(rawActivity, &likeExt) == nil && likeExt.AgoraReaction != "" {
+			if normalized, ok := store.NormalizeReaction(likeExt.AgoraReaction); ok {
+				reactionType = normalized
+			}
+		}
+	}
+
+	// AGORA-157: write to reactions, not the legacy likes table — the UI's
+	// like button (ReactPost) writes there, and enrichReactions (feed.go)
+	// only falls back to likes for a post that has zero reactions rows at
+	// all, so a Like landing in likes is invisible to the reaction
+	// count/list for virtually every real post. Mirrors ReactPost's own
+	// upsert + legacy-row cleanup exactly.
+	//
+	// AGORA-360: DO UPDATE instead of the old DO NOTHING, but only when the
+	// type actually changed — WHERE reactions.reaction_type IS DISTINCT
+	// FROM $3 keeps a genuine redelivery of the same reaction a true no-op
+	// (RowsAffected=0 below, preserving the anti-redelivery-spam guard)
+	// while a real change (love -> pride from the same Agora peer) reports
+	// as affected and updates.
 	res, err := s.db.Exec(`
 		INSERT INTO reactions (user_id, post_id, reaction_type)
-		VALUES ($1, $2, 'like')
-		ON CONFLICT (user_id, post_id) DO NOTHING
-	`, remoteUserID, postID)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, post_id) DO UPDATE SET reaction_type = $3
+		WHERE reactions.reaction_type IS DISTINCT FROM $3
+	`, remoteUserID, postID, reactionType)
 	if err != nil {
 		return
 	}
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
 	if n, _ := res.RowsAffected(); n == 0 {
-		return // already liked — redelivery, don't re-notify
+		return // already recorded this exact reaction — redelivery, don't re-notify
 	}
 
 	// AGORA-341: forward to the rest of the audience, so a reaction count means
@@ -4421,13 +4450,60 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 	return actorURL, inboxURL, remotePostID, true
 }
 
-func (s *Service) DeliverLike(userID, postID string) {
+// instanceSoftwareCacheTTL bounds how long a remote domain's confirmed
+// software (remote_instance_software, AGORA-360) is trusted before
+// isAgoraInstance re-checks it. Long-lived on purpose — which software an
+// instance runs essentially never changes, unlike the actor/profile data
+// the other caches in this file hold.
+const instanceSoftwareCacheTTL = 24 * time.Hour
+
+// isAgoraInstance reports whether domain is confirmed to be running Agora,
+// caching the result so DeliverLike doesn't pay for a live fetch on every
+// single reaction. Reuses FetchInstanceInfo (federation.go) — the same
+// .well-known/agora-instance check already used for admin-initiated
+// peering — rather than a second, parallel way of asking the same question.
+func (s *Service) isAgoraInstance(domain string) bool {
+	var isAgora bool
+	var checkedAt time.Time
+	err := s.db.QueryRow(`SELECT is_agora, checked_at FROM remote_instance_software WHERE domain = $1`, domain).
+		Scan(&isAgora, &checkedAt)
+	if err == nil && time.Since(checkedAt) < instanceSoftwareCacheTTL {
+		return isAgora
+	}
+
+	_, _, _, fetchErr := s.FetchInstanceInfo(domain)
+	isAgora = fetchErr == nil
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_instance_software (domain, is_agora, checked_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (domain) DO UPDATE SET is_agora = $2, checked_at = NOW()
+	`, domain, isAgora); err != nil {
+		log.Printf("federation: failed to cache instance software for %s: %v", domain, err)
+	}
+	return isAgora
+}
+
+// DeliverLike sends a Like for userID's reactionType on postID, whose
+// author lives on a remote AP-tracked instance. AGORA-360: a confirmed
+// Agora peer gets the exact reaction (any valence — Agora-to-Agora can
+// represent all of them honestly) via the agoraReaction extension property;
+// real fediverse/unconfirmed software instead gets AGORA-359's valence
+// split — a plain Like for a positive/neutral reaction, or nothing at all
+// (retracting any Like already sent) for a negative one, since there's no
+// truthful way to send that anywhere but Agora.
+func (s *Service) DeliverLike(userID, postID, reactionType string) {
 	if !s.activityPubEnabled() {
 		return
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
 		log.Printf("federation: DeliverLike %s: not a remote target, skipping", postID)
+		return
+	}
+
+	isAgoraPeer := s.isAgoraInstance(domainFromURL(targetInboxURL))
+	if !isAgoraPeer && !store.FederatesAsLike[reactionType] {
+		s.DeliverUnlike(userID, postID)
 		return
 	}
 
@@ -4446,6 +4522,9 @@ func (s *Service) DeliverLike(userID, postID string) {
 		"type":     "Like",
 		"actor":    actor,
 		"object":   targetRemotePostID,
+	}
+	if isAgoraPeer {
+		activity["agoraReaction"] = reactionType
 	}
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
 }

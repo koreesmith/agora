@@ -1653,4 +1653,15 @@ var schema = []string{
 		locked     BOOLEAN     NOT NULL DEFAULT false,
 		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// AGORA-360: caches whether a remote domain is confirmed to be running
+	// Agora (via FetchInstanceInfo's existing .well-known/agora-instance
+	// check, previously only used for admin-initiated peering), so
+	// DeliverLike can decide whether to send a reaction's exact type
+	// without a live fetch on every single reaction.
+	`CREATE TABLE IF NOT EXISTS remote_instance_software (
+		domain     TEXT        PRIMARY KEY,
+		is_agora   BOOLEAN     NOT NULL,
+		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }

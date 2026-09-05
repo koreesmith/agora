@@ -97,7 +97,10 @@ type fedSender interface {
 	// DeliverLike/DeliverUnlike (AGORA-158): outbound Like/Undo(Like) when
 	// liking/unliking a remote post — the reverse of handleInboundLike
 	// (AGORA-153), which only ever handled a remote actor liking one of ours.
-	DeliverLike(userID, postID string)
+	// reactionType (AGORA-360) is the exact reaction chosen — sent as-is to
+	// a confirmed Agora peer, or collapsed/retracted per AGORA-359's valence
+	// split for anyone else; DeliverLike itself decides which.
+	DeliverLike(userID, postID, reactionType string)
 	DeliverUnlike(userID, postID string)
 	// DeliverAnnounce/DeliverUnannounce (AGORA-159): outbound Announce/
 	// Undo(Announce) when reposting/un-reposting a remote post — the reverse
@@ -1471,9 +1474,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
-	// AGORA-158: federate the like if the target is a remote post.
+	// AGORA-158: federate the like if the target is a remote post. The
+	// plain heart button is always exactly a "like" reaction (AGORA-360).
 	if s.fed != nil {
-		go s.fed.DeliverLike(userID, postID)
+		go s.fed.DeliverLike(userID, postID, "like")
 	}
 	// AGORA-201: same reasoning as the fediverse call above, for a Bluesky target.
 	if s.atproto != nil {
@@ -1497,18 +1501,6 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 
 // ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
 
-// reactionFederatesAsLike is the valence split (AGORA-359): neither
-// ActivityPub nor Bluesky has any concept of a named/emoji reaction, only a
-// plain Like. A positive-or-neutral reaction is close enough to that plain
-// Like that showing one there beats showing nothing at all, but a negative
-// reaction (sad/angry/dislike) has no equivalent on either protocol, and
-// mapping it to a Like would misrepresent what actually happened, so it
-// stays local-only.
-var reactionFederatesAsLike = map[string]bool{
-	"like": true, "love": true, "laugh": true, "wow": true, "care": true,
-	"thankful": true, "pride": true,
-}
-
 func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
@@ -1526,16 +1518,19 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Type = reactionType
 
-	// AGORA-359: captured before the upsert below overwrites it, so a
-	// reaction change can tell whether it's crossing the federates-as-Like
-	// boundary (needing a Like or an Unlike sent) versus just moving between
-	// two reactions on the same side of it (needing neither). Falls back to
-	// a legacy plain `likes` row when there's no existing `reactions` row,
-	// since that's the other place a prior "like" could be recorded — the
-	// upsert below always clears it once a `reactions` row exists.
+	// AGORA-359/360: captured before the upsert below overwrites it. The fed
+	// call site below needs to know only whether anything changed at all —
+	// federation.Service.DeliverLike decides for itself what (if anything)
+	// that change is worth sending, since only it knows whether the target
+	// is a confirmed Agora peer. The atproto call site still needs the
+	// federates-as-Like boundary directly, since Bluesky is never "another
+	// Agora instance" and keeps AGORA-359's plain valence gate. Falls back
+	// to a legacy plain `likes` row when there's no existing `reactions`
+	// row, since that's the other place a prior "like" could be recorded —
+	// the upsert below always clears it once a `reactions` row exists.
 	var prevType string
 	s.db.QueryRow(`SELECT reaction_type FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID).Scan(&prevType)
-	wasFederatedLike := reactionFederatesAsLike[prevType]
+	wasFederatedLike := store.FederatesAsLike[prevType]
 	if prevType == "" {
 		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)`, userID, postID).Scan(&wasFederatedLike)
 	}
@@ -1571,26 +1566,30 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
-	// AGORA-359: send a Like/Unlike only when this reaction change actually
-	// crosses the federates-as-Like boundary — switching between two
-	// federating reactions (love -> pride) needs neither, since a Like is
-	// already out there; switching between two non-federating ones
-	// (sad -> angry) needs neither either, since nothing was ever sent.
-	nowFederatesAsLike := reactionFederatesAsLike[req.Type]
-	switch {
-	case nowFederatesAsLike && !wasFederatedLike:
+	if prevType != req.Type {
+		// AGORA-360: always tell the fediverse side about a genuine change,
+		// on every switch — including between two reactions on the same
+		// side of the valence boundary (love -> pride), and including a
+		// negative one (sad -> angry). DeliverLike itself decides what (if
+		// anything) that's worth sending: the exact reaction to a confirmed
+		// Agora peer, a plain Like to anyone else if it's positive/neutral,
+		// or a retraction if it's negative and there's nothing truthful to
+		// send. ReactPost has no way to know which of those applies, so it
+		// no longer tries to.
 		if s.fed != nil {
-			go s.fed.DeliverLike(userID, postID)
+			go s.fed.DeliverLike(userID, postID, req.Type)
 		}
+		// AGORA-359: Bluesky is never "another Agora instance" to send the
+		// precise reaction to, so this side keeps the plain valence gate —
+		// send/retract only on actually crossing the boundary.
 		if s.atproto != nil {
-			go s.atproto.DeliverLike(userID, postID)
-		}
-	case !nowFederatesAsLike && wasFederatedLike:
-		if s.fed != nil {
-			go s.fed.DeliverUnlike(userID, postID)
-		}
-		if s.atproto != nil {
-			go s.atproto.DeliverUnlike(userID, postID)
+			nowFederatesAsLike := store.FederatesAsLike[req.Type]
+			switch {
+			case nowFederatesAsLike && !wasFederatedLike:
+				go s.atproto.DeliverLike(userID, postID)
+			case !nowFederatesAsLike && wasFederatedLike:
+				go s.atproto.DeliverUnlike(userID, postID)
+			}
 		}
 	}
 

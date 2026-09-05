@@ -17,9 +17,15 @@ import (
 // fakeFedSender/fakeAtprotoSender satisfy fedSender/atprotoSender with every
 // method a no-op except DeliverLike/DeliverUnlike, which record the call on
 // a buffered channel so a test can assert whether one happened (and wait for
-// the `go` call site without a sleep).
+// the `go` call site without a sleep). fakeFedSender's DeliverLike records
+// the reaction type it was called with (AGORA-360) rather than just the
+// postID, since which type reached it is exactly what these tests check —
+// federation.Service.DeliverLike itself decides what, if anything, that
+// turns into on the wire, which is federation package's own concern, not
+// this one's.
 type fakeFedSender struct {
-	likeCalls, unlikeCalls chan string
+	likeCalls   chan string // reaction type
+	unlikeCalls chan string // postID
 }
 
 func newFakeFedSender() *fakeFedSender {
@@ -35,7 +41,7 @@ func (f *fakeFedSender) DeliverReply(userID, commentID, replyToID string)       
 func (f *fakeFedSender) DeliverReplyUpdate(userID, commentID, replyToID string)    {}
 func (f *fakeFedSender) BroadcastPagePostUpdate(pageID, postID string)             {}
 func (f *fakeFedSender) BroadcastPagePostDelete(pageID, postID string)             {}
-func (f *fakeFedSender) DeliverLike(userID, postID string)                         { f.likeCalls <- postID }
+func (f *fakeFedSender) DeliverLike(userID, postID, reactionType string)           { f.likeCalls <- reactionType }
 func (f *fakeFedSender) DeliverUnlike(userID, postID string)                       { f.unlikeCalls <- postID }
 func (f *fakeFedSender) DeliverAnnounce(userID, repostID, originalPostID string)   {}
 func (f *fakeFedSender) DeliverUnannounce(userID, repostID, originalPostID string) {}
@@ -73,16 +79,38 @@ func expectCall(t *testing.T, ch chan string, want bool, what string) {
 	}
 }
 
-// AGORA-359: ActivityPub and Bluesky only have a plain Like, so ReactPost
-// federates a positive/neutral reaction as one (better than nothing) but
-// never a negative one (sad/angry/dislike — mapping those to a Like would
-// misrepresent what actually happened). It also must retract a Like when a
-// reaction moves off the federating side, and must not resend or re-retract
-// when it just moves between two reactions on the same side.
+func expectLikeCallWithType(t *testing.T, ch chan string, wantType string) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != wantType {
+			t.Errorf("fed DeliverLike called with type %q, want %q", got, wantType)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Errorf("expected a fed DeliverLike call with type %q, none arrived", wantType)
+	}
+}
+
+// TestReactPostFederationCallSite covers ReactPost's own dispatch logic —
+// what it calls fed/atproto with, not what federation.Service.DeliverLike
+// then decides to actually send (that's AGORA-360's isAgoraInstance/valence
+// split, covered in internal/federation's own tests).
+//
+// AGORA-359 first established: ActivityPub/Bluesky only have a plain Like,
+// so a fresh reaction only reaches atproto (and, pre-AGORA-360, fed) when
+// it's positive/neutral, and switching away from one must retract it.
+//
+// AGORA-360 changed the fed side specifically: since only
+// federation.Service.DeliverLike knows whether the target is a confirmed
+// Agora peer (which gets the exact reaction, any valence), ReactPost now
+// calls fed.DeliverLike with the new type on every genuine change, full
+// stop, and leaves the "what does this actually turn into" decision to it.
+// The atproto side is unaffected by AGORA-360 (Bluesky is never "another
+// Agora instance") and keeps AGORA-359's plain valence gate exactly.
 //
 // Requires the local agora-postgres-test instance (localhost:15433); skips
 // if it isn't reachable rather than failing the suite.
-func TestReactPostFederationByValence(t *testing.T) {
+func TestReactPostFederationCallSite(t *testing.T) {
 	db, err := store.Open("postgres://agora:agora@localhost:15433/agora_test?sslmode=disable")
 	if err != nil {
 		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
@@ -129,75 +157,94 @@ func TestReactPostFederationByValence(t *testing.T) {
 		}
 	}
 
-	t.Run("fresh reaction with a federating type sends a Like", func(t *testing.T) {
+	t.Run("fresh reaction with a federating type calls fed and atproto Like", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
 
 		react(t, s, userID, postID, "pride")
 
-		expectCall(t, fed.likeCalls, true, "fed DeliverLike")
+		expectLikeCallWithType(t, fed.likeCalls, "pride")
 		expectCall(t, atp.likeCalls, true, "atproto DeliverLike")
 		expectCall(t, fed.unlikeCalls, false, "fed DeliverUnlike")
 	})
 
-	t.Run("fresh reaction with a negative type sends nothing", func(t *testing.T) {
+	t.Run("fresh reaction with a negative type still reaches fed, but not atproto", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
 
 		react(t, s, userID, postID, "sad")
 
-		expectCall(t, fed.likeCalls, false, "fed DeliverLike")
+		// AGORA-360: fed always hears about a genuine change so it can
+		// decide (an Agora peer gets "sad" precisely; anyone else gets
+		// nothing) — only atproto's plain valence gate suppresses the call
+		// entirely for a negative reaction, since Bluesky has no equivalent
+		// of an Agora peer to send the exact type to.
+		expectLikeCallWithType(t, fed.likeCalls, "sad")
 		expectCall(t, atp.likeCalls, false, "atproto DeliverLike")
 	})
 
-	t.Run("switching between two federating reactions sends nothing further", func(t *testing.T) {
+	t.Run("re-selecting the same reaction calls neither", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
 
 		react(t, s, userID, postID, "love")
-		expectCall(t, fed.likeCalls, true, "fed DeliverLike")
+		expectLikeCallWithType(t, fed.likeCalls, "love")
+		expectCall(t, atp.likeCalls, true, "atproto DeliverLike")
+
+		react(t, s, userID, postID, "love")
+		expectCall(t, fed.likeCalls, false, "fed DeliverLike (re-send of an unchanged reaction)")
+		expectCall(t, atp.likeCalls, false, "atproto DeliverLike (re-send of an unchanged reaction)")
+	})
+
+	t.Run("switching between two federating reactions notifies fed with the new type, not atproto", func(t *testing.T) {
+		userID, postID := newUserAndPost(t)
+		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
+		s := &Service{db: db, fed: fed, atproto: atp}
+
+		react(t, s, userID, postID, "love")
+		expectLikeCallWithType(t, fed.likeCalls, "love")
 		expectCall(t, atp.likeCalls, true, "atproto DeliverLike")
 
 		react(t, s, userID, postID, "pride")
-		expectCall(t, fed.likeCalls, false, "fed DeliverLike (re-send)")
+		expectLikeCallWithType(t, fed.likeCalls, "pride")
 		expectCall(t, fed.unlikeCalls, false, "fed DeliverUnlike")
-		expectCall(t, atp.likeCalls, false, "atproto DeliverLike (re-send)")
+		expectCall(t, atp.likeCalls, false, "atproto DeliverLike (re-send, already liked)")
 		expectCall(t, atp.unlikeCalls, false, "atproto DeliverUnlike")
 	})
 
-	t.Run("switching from a federating to a negative reaction retracts the Like", func(t *testing.T) {
+	t.Run("switching from a federating to a negative reaction: fed gets the new type, atproto retracts", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
 
 		react(t, s, userID, postID, "like")
-		expectCall(t, fed.likeCalls, true, "fed DeliverLike")
+		expectLikeCallWithType(t, fed.likeCalls, "like")
 		expectCall(t, atp.likeCalls, true, "atproto DeliverLike")
 
 		react(t, s, userID, postID, "angry")
-		expectCall(t, fed.unlikeCalls, true, "fed DeliverUnlike")
+		expectLikeCallWithType(t, fed.likeCalls, "angry")
 		expectCall(t, atp.unlikeCalls, true, "atproto DeliverUnlike")
-		expectCall(t, fed.likeCalls, false, "fed DeliverLike (unexpected)")
 	})
 
-	t.Run("switching between two negative reactions sends nothing", func(t *testing.T) {
+	t.Run("switching between two negative reactions still notifies fed, not atproto", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
 
 		react(t, s, userID, postID, "sad")
-		react(t, s, userID, postID, "angry")
+		expectLikeCallWithType(t, fed.likeCalls, "sad")
 
-		expectCall(t, fed.likeCalls, false, "fed DeliverLike")
-		expectCall(t, fed.unlikeCalls, false, "fed DeliverUnlike")
+		react(t, s, userID, postID, "angry")
+		expectLikeCallWithType(t, fed.likeCalls, "angry")
+
 		expectCall(t, atp.likeCalls, false, "atproto DeliverLike")
 		expectCall(t, atp.unlikeCalls, false, "atproto DeliverUnlike")
 	})
 
-	t.Run("a prior legacy plain like row is treated as a federated like", func(t *testing.T) {
+	t.Run("a prior legacy plain like row is treated as a federated like for atproto's gate", func(t *testing.T) {
 		userID, postID := newUserAndPost(t)
 		fed, atp := newFakeFedSender(), newFakeAtprotoSender()
 		s := &Service{db: db, fed: fed, atproto: atp}
@@ -207,8 +254,7 @@ func TestReactPostFederationByValence(t *testing.T) {
 		}
 
 		react(t, s, userID, postID, "angry")
-		expectCall(t, fed.unlikeCalls, true, "fed DeliverUnlike")
+		expectLikeCallWithType(t, fed.likeCalls, "angry")
 		expectCall(t, atp.unlikeCalls, true, "atproto DeliverUnlike")
-		expectCall(t, fed.likeCalls, false, "fed DeliverLike (unexpected)")
 	})
 }

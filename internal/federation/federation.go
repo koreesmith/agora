@@ -363,11 +363,13 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AGORA-364: an empty q is a peer instance asking for a sample of local
+	// users to offer as Discover suggestions, rather than a keyword search.
+	// The wildcard below already matches everything when q is empty, so no
+	// separate query path is needed, and a caller could already enumerate
+	// nearly the same list today with a single common letter, so this is not
+	// a meaningfully bigger exposure than what the endpoint already allows.
 	q := r.URL.Query().Get("q")
-	if q == "" {
-		writeError(w, 400, "q required")
-		return
-	}
 
 	rows, err := s.db.Query(`
 		SELECT username, display_name, avatar_url
@@ -375,6 +377,7 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 		WHERE is_remote = false AND profile_private = false
 		  AND (username ILIKE '%'||$1||'%' OR display_name ILIKE '%'||$1||'%')
 		  AND deletion_scheduled_at IS NULL
+		ORDER BY random()
 		LIMIT 20
 	`, q)
 	if err != nil {

@@ -406,12 +406,14 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 // LookupUser resolves a user@instance handle by fetching their profile from the
 // remote instance and creating/updating the local stub. Returns the local profile.
 // Query param: handle=username@instance.com
+//
+// AGORA-363: deliberately not gated on federationEnabled(). That setting is
+// this instance's own opt-in to being discoverable by other Agora instances
+// (InstanceInfo, Search). It says nothing about whether this instance's own
+// users may look someone else up, which exposes nothing about this instance
+// to anyone. APLookup, which resolves the identical kind of handle over the
+// identical WebFinger path, has never had this gate.
 func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
-	if !s.federationEnabled() {
-		writeError(w, 404, "federation not enabled")
-		return
-	}
-
 	raw := strings.TrimSpace(r.URL.Query().Get("handle"))
 	if raw == "" {
 		writeError(w, 400, "handle required — format: username@instance.com")

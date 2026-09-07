@@ -32,10 +32,14 @@ func TestLookupUserStripsLeadingAt(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
+	// AGORA-363: federation_enabled off (the default) must not block this.
+	// That setting is this instance's own opt-in to being discoverable by
+	// other Agora instances, not a gate on this instance's own users looking
+	// someone up.
 	var prevFed string
 	db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'federation_enabled'`).Scan(&prevFed)
-	db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_enabled', 'true')
-		ON CONFLICT (key) DO UPDATE SET value = 'true'`)
+	db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_enabled', 'false')
+		ON CONFLICT (key) DO UPDATE SET value = 'false'`)
 	t.Cleanup(func() { db.Exec(`UPDATE instance_settings SET value = $1 WHERE key = 'federation_enabled'`, prevFed) })
 
 	username := fmt.Sprintf("agora362_%d", time.Now().UnixNano())
@@ -84,12 +88,6 @@ func TestLookupUserRejectsBareAt(t *testing.T) {
 		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
 	}
 	defer db.Close()
-
-	var prevFed string
-	db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'federation_enabled'`).Scan(&prevFed)
-	db.Exec(`INSERT INTO instance_settings (key, value) VALUES ('federation_enabled', 'true')
-		ON CONFLICT (key) DO UPDATE SET value = 'true'`)
-	t.Cleanup(func() { db.Exec(`UPDATE instance_settings SET value = $1 WHERE key = 'federation_enabled'`, prevFed) })
 
 	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://agora362.example"}}
 

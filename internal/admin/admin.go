@@ -118,6 +118,9 @@ var adminEditableSettings = map[string]bool{
 	"custom_domain_approval": true,
 	// AGORA-329: 'anyone' or 'peered_only', who may send a friend request.
 	"friend_requests_from": true,
+	// AGORA-361: 'true' or 'false', whether the sole user of a single-user
+	// instance may claim the instance's own domain as their handle.
+	"single_user_domain_handle": true,
 }
 
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {

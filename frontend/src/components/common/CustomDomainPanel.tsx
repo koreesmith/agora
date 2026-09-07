@@ -45,6 +45,14 @@ export default function CustomDomainPanel() {
     onError: fail,
   })
 
+  // AGORA-361: a single-user instance's own domain already resolves through
+  // it, so claiming it needs no DNS record or well-known file, just one call.
+  const useInstanceDomain = useMutation({
+    mutationFn: () => customDomainApi.useInstanceDomain(),
+    onSuccess: () => { setErr(''); refresh() },
+    onError: fail,
+  })
+
   const copy = (label: string, value: string) => {
     navigator.clipboard.writeText(value)
     setCopied(label)
@@ -97,6 +105,27 @@ export default function CustomDomainPanel() {
       {err && (
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2 text-sm text-red-700 dark:text-red-400">
           {err}
+        </div>
+      )}
+
+      {/* AGORA-361: offered only when an admin has turned this on and the
+          instance genuinely has one real user, see ClaimInstanceDomain.
+          Hidden once it's already the live handle, since there's nothing left
+          to do. */}
+      {data?.single_user_domain_available && claimed?.domain !== data?.instance_domain && (
+        <div className="rounded-lg border border-agora-200 dark:border-agora-700 bg-agora-50 dark:bg-agora-800/50 p-3 space-y-2">
+          <p className="text-sm">
+            This instance has one user, you can use{' '}
+            <span className="font-medium">{data?.instance_domain}</span> as your handle instantly, no DNS
+            setup required.
+          </p>
+          <button
+            onClick={() => useInstanceDomain.mutate()}
+            disabled={useInstanceDomain.isPending}
+            className="btn-primary text-sm"
+          >
+            {useInstanceDomain.isPending ? 'Setting up…' : `Use ${data?.instance_domain}`}
+          </button>
         </div>
       )}
 

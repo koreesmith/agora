@@ -580,6 +580,8 @@ export default function AdminPage() {
         <CustomDomainsPanel
           domains={domainsData?.domains||[]}
           approvalMode={domainsData?.approval_mode||'manual'}
+          singleUserDomainHandle={domainsData?.single_user_domain_handle||false}
+          instanceDomain={domainsData?.instance_domain||''}
           filter={domainFilter}
           onFilter={setDomainFilter}
           onChanged={()=>qc.invalidateQueries({queryKey:['admin-custom-domains']})}
@@ -1222,9 +1224,11 @@ function RelaysPanel({ relays, onChanged }: {
 // Settings tab because it's the switch that decides whether this queue is
 // used at all.
 
-function CustomDomainsPanel({ domains, approvalMode, filter, onFilter, onChanged }: {
+function CustomDomainsPanel({ domains, approvalMode, singleUserDomainHandle, instanceDomain, filter, onFilter, onChanged }: {
   domains: any[]
   approvalMode: string
+  singleUserDomainHandle: boolean
+  instanceDomain: string
   filter: 'pending'|'all'
   onFilter: (f: 'pending'|'all') => void
   onChanged: () => void
@@ -1237,6 +1241,14 @@ function CustomDomainsPanel({ domains, approvalMode, filter, onFilter, onChanged
 
   const setMode = useMutation({
     mutationFn: (mode: string) => adminApi.updateSettings({ custom_domain_approval: mode }),
+    onSuccess: () => { setErr(''); qc.invalidateQueries({queryKey:['admin-settings']}); onChanged() },
+    onError: fail,
+  })
+  // AGORA-361: separate switch from the approval-mode one above. This
+  // decides whether the shortcut exists at all, not how a third-party
+  // domain's own request is reviewed.
+  const setSingleUserDomainHandle = useMutation({
+    mutationFn: (enabled: boolean) => adminApi.updateSettings({ single_user_domain_handle: enabled ? 'true' : 'false' }),
     onSuccess: () => { setErr(''); qc.invalidateQueries({queryKey:['admin-settings']}); onChanged() },
     onError: fail,
   })
@@ -1283,6 +1295,24 @@ function CustomDomainsPanel({ domains, approvalMode, filter, onFilter, onChanged
             className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${approvalMode === 'auto' ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}
           >
             <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${approvalMode === 'auto' ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between py-2 border-t border-agora-100 dark:border-agora-700">
+          <div>
+            <p className="font-medium text-sm">Let a single-user instance claim its own domain</p>
+            <p className="text-xs text-agora-400">
+              Only takes effect when this instance has exactly one real user account. On, that user gets a
+              one-click option in their settings to use {instanceDomain || 'this instance’s domain'} as
+              their handle instead of {instanceDomain ? `username.${instanceDomain}` : 'their instance handle'},
+              with no DNS setup and no wait for review.
+            </p>
+          </div>
+          <button
+            onClick={()=>setSingleUserDomainHandle.mutate(!singleUserDomainHandle)}
+            disabled={setSingleUserDomainHandle.isPending}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${singleUserDomainHandle ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}
+          >
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${singleUserDomainHandle ? 'translate-x-5' : 'translate-x-0'}`} />
           </button>
         </div>
       </div>

@@ -233,7 +233,15 @@ var schema = []string{
 		-- position everywhere else in the federation layer; the setting is the
 		-- lever for an admin receiving sprayed requests, so they do not need a
 		-- code change to respond.
-		('friend_requests_from', 'anyone')
+		('friend_requests_from', 'anyone'),
+		-- AGORA-361: 'true' or 'false'. Lets the sole user of a single-user
+		-- instance claim the instance's own domain as their AT Proto handle
+		-- with no DNS setup, since the instance's own web server already
+		-- answers for that domain. Defaults false: it only ever does anything
+		-- when the instance also genuinely has exactly one real user, but an
+		-- admin should still turn it on deliberately rather than have it
+		-- appear automatically on every upgrade.
+		('single_user_domain_handle', 'false')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────

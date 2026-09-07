@@ -42,13 +42,33 @@ type apUser struct {
 }
 
 // apEligibleUser returns the given local username if it's eligible to be
-// federated: exists, local, not private, not scheduled for deletion, and
-// hasn't opted out via the per-account activitypub_enabled column. Also
-// checks the instance-wide activityPubEnabled() setting (AGORA-156) — not
-// the same thing despite the similar name: that one is an admin-controlled
-// instance_settings key, this column is a per-user opt-out. Used by every AP
-// endpoint (WebFinger, actor doc, Outbox, Followers, inbound Follow) so both
-// eligibility rules stay in exactly one place.
+// resolved as an ActivityPub actor: exists, local, not private, not
+// scheduled for deletion. Also checks the instance-wide activityPubEnabled()
+// setting (AGORA-156), not the same thing despite the similar name: that
+// one is an admin-controlled instance_settings key, a full kill switch for
+// the whole instance. Used by every AP discovery endpoint (WebFinger, actor
+// doc, Outbox, Followers, inbound Follow) so this eligibility rule stays in
+// exactly one place.
+//
+// AGORA-365: deliberately does NOT check the per-account activitypub_enabled
+// opt-out. That flag's own Settings copy is framed entirely as "talk to
+// Mastodon and the rest of the fediverse", but WebFinger and actor
+// resolution are also the only mechanism Agora-to-Agora federation has for
+// finding someone on a directly peered instance (there is no separate,
+// signed "this GET came from a trusted Agora peer, not a random fediverse
+// server" channel; both are the identical anonymous, unauthenticated
+// request). Gating discovery on it meant a user who opted out of Mastodon
+// specifically also became unfindable by an instance their own admin chose
+// to peer with deliberately, which is a narrower, admin-curated trust
+// relationship, not the same thing.
+//
+// activitypub_enabled keeps its effect everywhere else: DeliverLike,
+// broadcasting posts/DMs/reposts, and every outbound path still check it, so
+// turning it off still means "my content and activity are never pushed out
+// over ActivityPub." It no longer also means "nobody can find or friend me,"
+// which profile_private already covers and is the actual privacy control
+// every other discovery surface in this codebase (search/users,
+// federation/search) already keys on.
 func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 	if !s.activityPubEnabled() {
 		return nil, false
@@ -59,7 +79,7 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 		       federation_public_key, federation_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
-		  AND activitypub_enabled = true AND deletion_scheduled_at IS NULL
+		  AND deletion_scheduled_at IS NULL
 	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM)
 	if err != nil {
 		return nil, false
@@ -103,9 +123,9 @@ type apPage struct {
 	PrivKeyPEM  string
 }
 
-// apEligiblePage mirrors apEligibleUser: requires the instance-wide
-// activityPubEnabled() toggle, the page to be public, and the page's own
-// activitypub_enabled opt-out (owner-controlled) to be true.
+// apEligiblePage mirrors apEligibleUser (see AGORA-365 there for why it no
+// longer checks the per-account/page activitypub_enabled opt-out): requires
+// the instance-wide activityPubEnabled() toggle and the page to be public.
 func (s *Service) apEligiblePage(slug string) (*apPage, bool) {
 	if !s.activityPubEnabled() {
 		return nil, false
@@ -115,7 +135,7 @@ func (s *Service) apEligiblePage(slug string) (*apPage, bool) {
 		SELECT id, slug, display_name, bio, avatar_url,
 		       federation_public_key, federation_private_key
 		FROM pages
-		WHERE LOWER(slug) = LOWER($1) AND privacy = 'public' AND activitypub_enabled = true
+		WHERE LOWER(slug) = LOWER($1) AND privacy = 'public'
 	`, slug).Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Bio, &p.AvatarURL, &p.PubKeyPEM, &p.PrivKeyPEM)
 	if err != nil {
 		return nil, false

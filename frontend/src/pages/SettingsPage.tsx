@@ -366,13 +366,25 @@ export default function SettingsPage() {
           <h3 className="font-semibold">Fediverse (ActivityPub)</h3>
           <p className="text-sm text-agora-500">
             Agora can talk to Mastodon and the rest of the fediverse over ActivityPub — the same open protocol those
-            apps use amongst themselves. Turning this on lets people out there find, follow, and see your public
-            posts, and reply to them. Private and friends-only posts are never federated either way.
+            apps use amongst themselves. Turning this on lets people out there follow and see your public posts, and
+            reply to them. Private and friends-only posts are never federated either way.
           </p>
+          {/* AGORA-365: this used to also gate whether anyone could find and
+              friend this account from a directly peered Agora instance, since
+              that discovery runs over the same anonymous WebFinger request a
+              Mastodon server would use, with no way to tell the two apart.
+              Being findable by an instance your own admin chose to peer with
+              is a narrower, admin-curated trust decision than "the whole
+              fediverse can see me," so it no longer depends on this toggle;
+              only your profile's own privacy setting does. */}
           <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-              <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts.</p>
+              <p className="text-xs text-agora-400">
+                Let people on Mastodon and other fediverse apps follow and see your public posts. Doesn't affect
+                being found or friended from an instance federated with this one, only your profile's own privacy
+                setting does that.
+              </p>
             </div>
             <button onClick={() => toggleActivityPub.mutate()}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>

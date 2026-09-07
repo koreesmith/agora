@@ -33,7 +33,9 @@ export default function SearchPage() {
     setParams(p, { replace: true })
   }
 
-  const isHandleLookup = /^[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q)
+  // AGORA-362: a fediverse handle is conventionally typed with a leading @
+  // (@user@instance.com), so the match has to accept one without requiring it.
+  const isHandleLookup = /^@?[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q)
 
   const enabled = q.length >= 2
 
@@ -144,8 +146,8 @@ export default function SearchPage() {
             <UserResult
               user={{ ...lookupData.user, friendship_status: '' }}
               currentUserId={user?.id}
-              onAdd={() => {}}
-              addPending={false}
+              onAdd={() => send.mutate(lookupData.user.id)}
+              addPending={send.isPending}
             />
           )}
         </div>

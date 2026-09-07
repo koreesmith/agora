@@ -412,11 +412,16 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw := r.URL.Query().Get("handle")
+	raw := strings.TrimSpace(r.URL.Query().Get("handle"))
 	if raw == "" {
 		writeError(w, 400, "handle required — format: username@instance.com")
 		return
 	}
+	// AGORA-362: a fediverse handle is conventionally typed and displayed
+	// with a leading @ (@user@instance.com). Left in place, the split below
+	// sees an empty string before the first @ and 400s on the one format
+	// everyone actually types. APLookup already does this same trim.
+	raw = strings.TrimPrefix(raw, "@")
 
 	parts := strings.SplitN(raw, "@", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

@@ -39,6 +39,11 @@ type apUser struct {
 	CoverURL    string
 	PubKeyPEM   string
 	PrivKeyPEM  string
+	// Private is only ever true when this row came back from
+	// apEligibleUserIdentityOnly (AGORA-366). apEligibleUser itself never
+	// returns a private profile at all, so callers using that one can ignore
+	// this field entirely.
+	Private bool
 }
 
 // apEligibleUser returns the given local username if it's eligible to be
@@ -81,6 +86,42 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
 		  AND deletion_scheduled_at IS NULL
 	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM)
+	if err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// apEligibleUserIdentityOnly is apEligibleUser without the profile_private
+// requirement (AGORA-366): a private profile is invisible to browsing or
+// search either way (neither ever queried through here), but someone who
+// already has the exact handle should be able to confirm the account exists
+// and send a friend request, the same way a private account elsewhere still
+// turns up for an exact-username lookup even though it never appears in
+// search results.
+//
+// Deliberately narrow in what uses it. WebFinger and the actor document
+// (redacting content for a private profile, see writeActorObject) are safe:
+// neither ever handed out more than identity. A friend request is safe for
+// the same reason apEligibleUser's own doc comment gives for dropping
+// activitypub_enabled: it creates a pending request Agora's own model
+// already requires the recipient to accept before anything is shared, not an
+// automatic relationship. Outbox, Followers, Following, and a plain
+// (non-friend-request) Follow all keep using apEligibleUser instead, on
+// purpose: those hand out actual posts and social-graph data, or would let
+// a private profile be auto-followed by any fediverse account, which is a
+// real content exposure this function is not meant to allow.
+func (s *Service) apEligibleUserIdentityOnly(handle string) (*apUser, bool) {
+	if !s.activityPubEnabled() {
+		return nil, false
+	}
+	var u apUser
+	err := s.db.QueryRow(`
+		SELECT id, username, display_name, bio, avatar_url, cover_url,
+		       federation_public_key, federation_private_key, profile_private
+		FROM users
+		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND deletion_scheduled_at IS NULL
+	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM, &u.Private)
 	if err != nil {
 		return nil, false
 	}
@@ -254,7 +295,12 @@ func (s *Service) WebFinger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u, ok := s.apEligibleUser(username); ok {
+	// AGORA-366: identity-only resolution, not apEligibleUser. This response
+	// is already just a subject and an actor URL, nothing a private profile
+	// would consider content, so a caller who already has the exact handle
+	// gets the same "yes, this exists" answer a private account elsewhere
+	// gives an exact-username lookup, without ever turning up in search.
+	if u, ok := s.apEligibleUserIdentityOnly(username); ok {
 		actor := s.actorURL(u.Username)
 		profile := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username
 
@@ -312,8 +358,15 @@ func (s *Service) HostMeta(w http.ResponseWriter, r *http.Request) {
 // ActivityPub JSON. The legacy flat-JSON response GetUser returns otherwise is
 // untouched.
 
+// AGORA-366: identity-only resolution, not apEligibleUser, so a private
+// profile's actor document resolves too, rather than the friend-request flow
+// having a WebFinger entry that then 404s on the very next step. A private
+// profile's object below is stripped of everything but the protocol-required
+// fields, no name, no bio, no avatar or cover, so the fact that this
+// resolves at all costs it nothing beyond confirming the handle exists,
+// which the caller already knew going in.
 func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
-	u, ok := s.apEligibleUser(handle)
+	u, ok := s.apEligibleUserIdentityOnly(handle)
 	if !ok {
 		writeError(w, 404, "user not found")
 		return
@@ -334,8 +387,6 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 		"id":                 actor,
 		"type":               "Person",
 		"preferredUsername":  u.Username,
-		"name":               u.DisplayName,
-		"summary":            u.Bio,
 		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
 		"outbox":             actor + "/outbox",
 		"followers":          actor + "/followers",
@@ -346,15 +397,19 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 			"publicKeyPem": pubPEM,
 		},
 	}
-	if u.AvatarURL != "" {
-		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
-	}
-	// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
-	// the profile header/banner, the "icon" field's counterpart — was never
-	// set at all, so a remote follower's client never had a cover photo to
-	// show for this user regardless of anything on the receiving end.
-	if u.CoverURL != "" {
-		obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+	if !u.Private {
+		obj["name"] = u.DisplayName
+		obj["summary"] = u.Bio
+		if u.AvatarURL != "" {
+			obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
+		}
+		// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
+		// the profile header/banner, the "icon" field's counterpart. It was never
+		// set at all, so a remote follower's client never had a cover photo to
+		// show for this user regardless of anything on the receiving end.
+		if u.CoverURL != "" {
+			obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
@@ -1208,7 +1263,18 @@ func (s *Service) recordAPFollower(followedUserID, followerActor, followerInbox 
 }
 
 func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string, friendRequest bool) {
-	u, ok := s.apEligibleUser(username)
+	// AGORA-366: a friend request may reach a private profile (it only ever
+	// creates a pending request Agora's own model requires the recipient to
+	// accept, never an automatic relationship or shared content); a plain
+	// fediverse Follow may not, since that would let a private profile be
+	// auto-followed by any random account.
+	var u *apUser
+	var ok bool
+	if friendRequest {
+		u, ok = s.apEligibleUserIdentityOnly(username)
+	} else {
+		u, ok = s.apEligibleUser(username)
+	}
 	if !ok {
 		return
 	}

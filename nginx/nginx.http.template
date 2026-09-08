@@ -3,6 +3,16 @@ events {
 }
 
 http {
+    # AGORA-367: this file replaces the stock image's own /etc/nginx/nginx.conf
+    # wholesale (see docker-entrypoint-nginx.sh's `sed ... > nginx.conf`), so
+    # the mime table and default type it would otherwise provide have to be
+    # declared again here. Without this, every file /uploads/ serves directly
+    # goes out as text/plain (nginx's compiled-in fallback with no mime table
+    # loaded at all), which <img> tolerates via content sniffing and <video>
+    # does not.
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
     # This box is only ever reached through an internal-network reverse
     # proxy (never directly from the public internet), so every connection
     # nginx sees arrives from that one upstream hop rather than the real

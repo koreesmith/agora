@@ -182,7 +182,7 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
-		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Embed:         s.buildMediaEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
 		Facets:        linkFacetsForURLs(finalText),
 	}
@@ -268,7 +268,7 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
-		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Embed:         s.buildMediaEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
 		Facets:        linkFacetsForURLs(finalText),
 	}

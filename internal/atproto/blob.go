@@ -28,12 +28,12 @@ func blobCID(data []byte) (cid.Cid, error) {
 	return cid.NewCidV1(cid.Raw, mh), nil
 }
 
-// readLocalImage reads an already-uploaded post image straight off local
-// disk rather than fetching it over HTTP the way postImageURLs's federation
-// counterpart does for remote fediverse consumers — this instance already
-// has this exact file on its own filesystem (internal/media's UploadDir),
-// so a self-fetch would just be slower for no benefit.
-func readLocalImage(uploadDir, url string) (data []byte, mimeType string, err error) {
+// readLocalUpload reads an already-uploaded post image or video straight off
+// local disk rather than fetching it over HTTP the way postImageURLs's
+// federation counterpart does for remote fediverse consumers. This instance
+// already has this exact file on its own filesystem (internal/media's
+// UploadDir), so a self-fetch would just be slower for no benefit.
+func readLocalUpload(uploadDir, url string) (data []byte, mimeType string, err error) {
 	rel := strings.TrimPrefix(url, "/uploads/")
 	if rel == url {
 		return nil, "", &os.PathError{Op: "read", Path: url, Err: os.ErrNotExist}
@@ -74,13 +74,14 @@ func (s *Service) postImageURLs(ctx context.Context, postID string) []string {
 	return nil
 }
 
-// uploadImageBlob reads an already-uploaded local image and stores it as a
-// content-addressed blob in bs, returning the LexBlob ref a record embeds it
-// with. Shared by buildImageEmbed (post images, AGORA-194) and SyncProfile
-// (avatar/banner, AGORA-233) — the upload step itself doesn't care what kind
-// of image it is.
-func (s *Service) uploadImageBlob(ctx context.Context, bs *pgBlockstore, url string) (*lexutil.LexBlob, error) {
-	data, mimeType, err := readLocalImage(s.cfg.UploadDir, url)
+// uploadBlob reads an already-uploaded local file (image or video) and
+// stores it as a content-addressed blob in bs, returning the LexBlob ref a
+// record embeds it with. Shared by buildImageEmbed (post images, AGORA-194),
+// buildVideoEmbed (post video, AGORA-368), and SyncProfile (avatar/banner,
+// AGORA-233), since the upload step itself doesn't care what kind of file
+// it is.
+func (s *Service) uploadBlob(ctx context.Context, bs *pgBlockstore, url string) (*lexutil.LexBlob, error) {
+	data, mimeType, err := readLocalUpload(s.cfg.UploadDir, url)
 	if err != nil {
 		return nil, err
 	}
@@ -103,14 +104,14 @@ func (s *Service) uploadImageBlob(ctx context.Context, bs *pgBlockstore, url str
 }
 
 // buildImageEmbed uploads each of a post's images as a content-addressed
-// blob into this user's own block store (AGORA-194) — pgBlockstore's flat
+// blob into this user's own block store (AGORA-194): pgBlockstore's flat
 // (user_id, cid, data) shape holds a raw blob exactly as easily as an
-// MST/commit node, so no new storage plumbing is needed beyond
-// uploadImageBlob. Truncates to AT Proto's 4-image embed cap rather than
-// erroring the whole post federation attempt if Agora's own post_photos
-// limit (currently higher) was used. Alt text is left blank — Agora doesn't
-// capture per-image alt text today; a real follow-up if that ever changes,
-// not something to block this on.
+// MST/commit node, so no new storage plumbing is needed beyond uploadBlob.
+// Truncates to AT Proto's 4-image embed cap rather than erroring the whole
+// post federation attempt if Agora's own post_photos limit (currently
+// higher) was used. Alt text is left blank; Agora doesn't capture per-image
+// alt text today, a real follow-up if that ever changes, not something to
+// block this on.
 func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID string) *bsky.FeedPost_Embed {
 	urls := s.postImageURLs(ctx, postID)
 	if len(urls) == 0 {
@@ -122,7 +123,7 @@ func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID 
 
 	var images []*bsky.EmbedImages_Image
 	for _, url := range urls {
-		blob, err := s.uploadImageBlob(ctx, bs, url)
+		blob, err := s.uploadBlob(ctx, bs, url)
 		if err != nil {
 			log.Printf("atproto: could not upload image blob for %s: %v", url, err)
 			continue
@@ -136,4 +137,47 @@ func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID 
 		LexiconTypeID: "app.bsky.embed.images",
 		Images:        images,
 	}}
+}
+
+// postVideoURL returns a post's attached video's storage-relative URL
+// (AGORA-368), mirroring postImageURLs. A post has at most one video
+// (AGORA-137's own composer treats video and photos as mutually exclusive),
+// so unlike post_photos there's no ordered multi-row table behind it.
+func (s *Service) postVideoURL(ctx context.Context, postID string) string {
+	var videoURL string
+	s.db.QueryRowContext(ctx, `SELECT video_url FROM posts WHERE id = $1`, postID).Scan(&videoURL)
+	return videoURL
+}
+
+// buildVideoEmbed is buildImageEmbed's video counterpart. AT Proto's video
+// embed (app.bsky.embed.video) takes a single blob the same way an image
+// does; Agora's own transcode pipeline (AGORA-137, 720p H.264) already keeps
+// the output well under Bluesky's 100MB cap in every realistic case, so no
+// separate size check is added here, a failed upload (oversized or
+// otherwise) is simply logged and dropped rather than blocking the post.
+func (s *Service) buildVideoEmbed(ctx context.Context, bs *pgBlockstore, postID string) *bsky.FeedPost_Embed {
+	url := s.postVideoURL(ctx, postID)
+	if url == "" {
+		return nil
+	}
+	blob, err := s.uploadBlob(ctx, bs, url)
+	if err != nil {
+		log.Printf("atproto: could not upload video blob for %s: %v", url, err)
+		return nil
+	}
+	return &bsky.FeedPost_Embed{EmbedVideo: &bsky.EmbedVideo{
+		LexiconTypeID: "app.bsky.embed.video",
+		Video:         blob,
+	}}
+}
+
+// buildMediaEmbed picks whichever of image or video a post actually has
+// (AGORA-368) since FeedPost.Embed only ever holds one, and the compose UI
+// already keeps the two mutually exclusive, so at most one of these two ever
+// returns anything.
+func (s *Service) buildMediaEmbed(ctx context.Context, bs *pgBlockstore, postID string) *bsky.FeedPost_Embed {
+	if embed := s.buildImageEmbed(ctx, bs, postID); embed != nil {
+		return embed
+	}
+	return s.buildVideoEmbed(ctx, bs, postID)
 }

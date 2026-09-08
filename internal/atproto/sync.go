@@ -220,7 +220,7 @@ func (s *Service) ListRepos(w http.ResponseWriter, r *http.Request) {
 // the first time it's requested. Without this, a blob CID referenced from
 // a record points at bytes no consumer can actually retrieve, even once
 // the record itself indexes correctly. Content-Type is sniffed rather than
-// stored, mirroring readLocalImage's same approach for local files —
+// stored, mirroring readLocalUpload's same approach for local files.
 // pgBlockstore only ever holds raw bytes, no separate mimetype column.
 func (s *Service) GetBlob(w http.ResponseWriter, r *http.Request) {
 	u, ok := s.eligibleUserByDID(r.URL.Query().Get("did"))

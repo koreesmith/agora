@@ -735,6 +735,23 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		}
 		note["attachment"] = attachments
 	}
+	// AGORA-368: same reasoning as the image block above, video was never
+	// attached at all, so a video post federated as text-only. Independent
+	// of the image check (not an else) rather than a replacement for it,
+	// since a post could in principle carry both; the compose UI keeps them
+	// mutually exclusive today, but nothing here needs to assume that.
+	if videoURL, thumbURL := s.postVideoURL(postID); videoURL != "" {
+		video := map[string]any{
+			"type":      "Video",
+			"mediaType": "video/mp4",
+			"url":       videoURL,
+		}
+		if thumbURL != "" {
+			video["icon"] = map[string]string{"type": "Image", "url": thumbURL}
+		}
+		existing, _ := note["attachment"].([]map[string]any)
+		note["attachment"] = append(existing, video)
+	}
 	return note
 }
 
@@ -763,6 +780,23 @@ func (s *Service) postImageURLs(postID string) []string {
 		return []string{s.absoluteURL(imageURL)}
 	}
 	return nil
+}
+
+// postVideoURL returns a post's attached video (and its poster thumbnail, if
+// any) as absolute URLs, mirroring postImageURLs (AGORA-368). A post has at
+// most one video (AGORA-137's own composer treats video and photos as
+// mutually exclusive), so unlike post_photos there's no ordered multi-row
+// table behind it, just the posts row's own two columns.
+func (s *Service) postVideoURL(postID string) (videoURL, thumbURL string) {
+	var v, t string
+	s.db.QueryRow(`SELECT video_url, video_thumb_url FROM posts WHERE id = $1`, postID).Scan(&v, &t)
+	if v == "" {
+		return "", ""
+	}
+	if t != "" {
+		t = s.absoluteURL(t)
+	}
+	return s.absoluteURL(v), t
 }
 
 func guessImageMediaType(url string) string {

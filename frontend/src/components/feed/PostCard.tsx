@@ -31,6 +31,10 @@ interface Post {
   content: string
   image_url: string
   visibility: string
+  // AGORA-372: set only on the author's own view of an external_only post —
+  // never present for any other viewer.
+  external_only?: boolean
+  only_on?: string
   content_warning: string
   link_url: string
   link_title: string
@@ -657,6 +661,13 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
               <span className="text-agora-300 dark:text-agora-600 flex items-center gap-0.5 text-xs">
                 {visIcons[post.visibility]}
               </span>
+              {/* AGORA-372/374: only ever set on the author's own view — no
+                  other viewer's post list can contain one of these rows. */}
+              {post.external_only && post.only_on && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-agora-100 dark:bg-agora-700 text-agora-600 dark:text-agora-300">
+                  {post.only_on}
+                </span>
+              )}
             </div>
 
             {/* Menu — edit/delete/report all require auth */}

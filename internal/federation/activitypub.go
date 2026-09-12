@@ -2021,7 +2021,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
-	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(note.InReplyTo)
+	parentID, rootPostID, visibility, postAuthorID, externalOnly, ok := s.resolveReplyTarget(note.InReplyTo)
 	if !ok {
 		return
 	}
@@ -2056,7 +2056,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	switch {
 	case forwarded:
 		// Authorised by thread ownership, verified above.
-	case visibility == "public":
+	case visibility == "public", externalOnly:
+		// AGORA-373: an external_only thread is stored 'private' but was
+		// delivered to the Fediverse exactly like a public thread, so a
+		// reply into it is opened the same way a public thread's is.
 		if profilePrivate {
 			return
 		}
@@ -2073,9 +2076,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 			return
 		}
 	default:
-		// A 'private' thread has no federated audience: locally that means a
-		// post the author addressed to nobody, and inbound it means a remote
-		// list post whose own instance is the one place a reply is authorised.
+		// A plain 'private' thread has no federated audience: locally that
+		// means a post the author addressed to nobody, and inbound it means a
+		// remote list post whose own instance is the one place a reply is
+		// authorised.
 		return
 	}
 
@@ -2412,19 +2416,19 @@ func (s *Service) storeInboundVideo(postID, videoURL string) {
 // so inbound replies can't create threads deeper than the UI supports.
 // inReplyTo may point at either one of our own post/comment AP object URLs,
 // or a previously-ingested remote reply (looked up by remote_post_id).
-func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, visibility, postAuthorID string, ok bool) {
+func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, visibility, postAuthorID string, externalOnly bool, ok bool) {
 	targetID := localPostIDFromURL(inReplyTo, s.cfg.InstanceDomain)
 	if targetID == "" {
 		s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND is_remote = true`, inReplyTo).Scan(&targetID)
 	}
 	if targetID == "" {
-		return "", "", "", "", false
+		return "", "", "", "", false, false
 	}
 
 	var targetParentID *string
 	if err := s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, targetID).
 		Scan(&targetParentID); err != nil {
-		return "", "", "", "", false
+		return "", "", "", "", false, false
 	}
 
 	if targetParentID == nil {
@@ -2436,17 +2440,17 @@ func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, vi
 		var grandParentID *string
 		s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, *targetParentID).Scan(&grandParentID)
 		if grandParentID != nil {
-			return "", "", "", "", false
+			return "", "", "", "", false, false
 		}
 		rootPostID = *targetParentID
 	}
 	parentID = targetID
 
-	if err := s.db.QueryRow(`SELECT visibility, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, rootPostID).
-		Scan(&visibility, &postAuthorID); err != nil || postAuthorID == "" {
-		return "", "", "", "", false
+	if err := s.db.QueryRow(`SELECT visibility, author_id, external_only FROM posts WHERE id = $1 AND deleted_at IS NULL`, rootPostID).
+		Scan(&visibility, &postAuthorID, &externalOnly); err != nil || postAuthorID == "" {
+		return "", "", "", "", false, false
 	}
-	return parentID, rootPostID, visibility, postAuthorID, true
+	return parentID, rootPostID, visibility, postAuthorID, externalOnly, true
 }
 
 // localPostIDFromURL extracts the trailing post/comment UUID from one of our
@@ -2618,12 +2622,12 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 		return "", "", false
 	}
 	var visibility string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, externalOnly bool
 	err := s.db.QueryRow(`
-		SELECT p.author_id, p.visibility, u.profile_private, u.activitypub_enabled
+		SELECT p.author_id, p.visibility, u.profile_private, u.activitypub_enabled, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
-	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled)
+	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled, &externalOnly)
 	if err != nil || !apEnabled {
 		return "", "", false
 	}
@@ -2636,14 +2640,18 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 	//
 	// Friends-only opens to the author's accepted friends and nobody else,
 	// which is the same rule that decided who could see the post. Everything
-	// with no federated audience yet ('group', 'private') stays closed.
+	// with no federated audience yet ('group', plain 'private') stays closed.
+	//
+	// AGORA-373: an external_only post is stored 'private' but was delivered
+	// to the Fediverse exactly like a public post, so a Like/Announce
+	// targeting it is opened the same way a public post's is.
 	switch {
 	case authorizeAs == "":
 		// Forwarded: authorised by thread ownership, verified by the caller.
 		if visibility != "friends" && visibility != "group" {
 			return "", "", false
 		}
-	case visibility == "public":
+	case visibility == "public", externalOnly:
 		if profilePrivate {
 			return "", "", false
 		}
@@ -4233,33 +4241,35 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple, federateAP bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP, externalOnly bool
 	var createdAt time.Time
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt, &federateAP)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt, &federateAP, &externalOnly)
 	// AGORA-343: this read `visibility != "public"` and returned. Since
 	// AGORA-337 and AGORA-342 a limited post federates, so that turned every
 	// edit of one into a silent no-op: the author saw their correction and the
 	// people it was addressed to kept the original text forever, with nothing
 	// logged. A correction is usually the whole reason for an edit.
 	//
-	// profile_private is only consulted on the public path, matching
-	// BroadcastFriendsPost: it governs whether strangers can see a profile, and
-	// a limited post's recipients are not strangers.
+	// profile_private is only consulted on the public (and AGORA-373:
+	// external_only) path, matching BroadcastFriendsPost: it governs whether
+	// strangers can see a profile, and a limited post's recipients are not
+	// strangers.
 	if err != nil || !apEnabled {
 		return
 	}
-	if visibility == "public" && profilePrivate {
+	if (visibility == "public" || externalOnly) && profilePrivate {
 		return
 	}
-	// AGORA-370: federateAP only governs the public path — a limited (friends
-	// or list) post's federation is unconditional and unaffected by it, same
-	// as CreatePost never consults it for those visibilities either.
-	if visibility == "public" && !federateAP {
+	// AGORA-370/373: federateAP only governs the public and external_only
+	// paths — a limited (friends or list) post's federation is unconditional
+	// and unaffected by it, same as CreatePost never consults it for those
+	// visibilities either.
+	if (visibility == "public" || externalOnly) && !federateAP {
 		return
 	}
 

@@ -1672,4 +1672,11 @@ var schema = []string{
 		is_agora   BOOLEAN     NOT NULL,
 		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+
+	// AGORA-370: per-post network targeting. DEFAULT true keeps every
+	// existing post, and every client that never sends the new
+	// federate_activitypub/federate_atproto request fields, federating
+	// exactly as before.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_ap BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_atproto BOOLEAN NOT NULL DEFAULT true`,
 }

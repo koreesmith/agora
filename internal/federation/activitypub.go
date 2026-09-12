@@ -4063,17 +4063,20 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP bool
 	var createdAt time.Time
 	var repostOfID *string
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt)
-	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
-		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt, &federateAP)
+	// AGORA-370: federateAP is this post's own choice of whether to send it to
+	// the Fediverse at all — re-checked here, not just at the CreatePost call
+	// site, for the same defense-in-depth reason every other flag here is.
+	if err != nil || visibility != "public" || profilePrivate || !apEnabled || !federateAP {
+		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v federateAP=%v", postID, err, visibility, profilePrivate, apEnabled, federateAP)
 		return
 	}
 
@@ -4225,14 +4228,14 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP bool
 	var createdAt time.Time
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt, &federateAP)
 	// AGORA-343: this read `visibility != "public"` and returned. Since
 	// AGORA-337 and AGORA-342 a limited post federates, so that turned every
 	// edit of one into a silent no-op: the author saw their correction and the
@@ -4246,6 +4249,12 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 		return
 	}
 	if visibility == "public" && profilePrivate {
+		return
+	}
+	// AGORA-370: federateAP only governs the public path — a limited (friends
+	// or list) post's federation is unconditional and unaffected by it, same
+	// as CreatePost never consults it for those visibilities either.
+	if visibility == "public" && !federateAP {
 		return
 	}
 
@@ -4363,6 +4372,16 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 	}
 
 	if profilePrivate {
+		return
+	}
+	// AGORA-370: a public post created with federate_ap: false never reached
+	// a single Fediverse follower in the first place, so its delete has
+	// nowhere to withdraw anything from. Defaults true so a query failure
+	// doesn't newly suppress a delete that would have gone out before this
+	// column existed.
+	federateAP := true
+	s.db.QueryRow(`SELECT federate_ap FROM posts WHERE id = $1`, postID).Scan(&federateAP)
+	if !federateAP {
 		return
 	}
 	s.deliverToFollowers(userID, activity)

@@ -1053,6 +1053,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		PollMultipleChoice   bool     `json:"poll_multiple_choice"`
 		PollAllowsNewOptions bool     `json:"poll_allows_new_options"`
 		WallUserID           string   `json:"wall_user_id"`
+		// AGORA-370: per-post network targeting. Pointers so "omitted" (keep
+		// today's behaviour: respect the account's own activitypub_enabled /
+		// atproto_enabled plus the instance switch) is distinguishable from an
+		// explicit false (skip that network for this post) or true (attempt it,
+		// still subject to the same account/instance gates — a true from an
+		// account with the network off is a no-op, not an error). Only
+		// meaningful when Visibility is "public"; ignored otherwise.
+		FederateActivityPub *bool `json:"federate_activitypub"`
+		FederateATProto     *bool `json:"federate_atproto"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -1144,6 +1153,18 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
+	// AGORA-370: default true, matching today's behaviour (respect the
+	// account's own opt-in plus the instance switch), for every client that
+	// doesn't send these fields at all.
+	federateAP := true
+	if req.FederateActivityPub != nil {
+		federateAP = *req.FederateActivityPub
+	}
+	federateATProto := true
+	if req.FederateATProto != nil {
+		federateATProto = *req.FederateATProto
+	}
+
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
@@ -1151,15 +1172,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
-		                   poll_expires_at)
+		                   poll_expires_at, federate_ap, federate_atproto)
 		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
+		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END, $20, $21)
 		RETURNING id
 	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
 		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
-		req.VideoURL, req.VideoThumbURL).Scan(&id)
+		req.VideoURL, req.VideoThumbURL, federateAP, federateATProto).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -1206,7 +1227,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// the two keyed ingested posts differently, so a recipient who was both a
 	// legacy friend and an ActivityPub follower received the same post twice as
 	// two rows the dedup index could not collapse. See ADR-002.
-	if req.Visibility == "public" && s.fed != nil {
+	if req.Visibility == "public" && s.fed != nil && federateAP {
 		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
@@ -1228,7 +1249,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// AGORA-190: federate as an app.bsky.feed.post record, independent of
 	// the AP broadcast above — a separate protocol with its own opt-in.
-	if req.Visibility == "public" && s.atproto != nil {
+	if req.Visibility == "public" && s.atproto != nil && federateATProto {
 		go s.atproto.BroadcastPost(userID, id)
 	}
 

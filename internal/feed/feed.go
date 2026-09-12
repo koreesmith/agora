@@ -1062,6 +1062,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		// meaningful when Visibility is "public"; ignored otherwise.
 		FederateActivityPub *bool `json:"federate_activitypub"`
 		FederateATProto     *bool `json:"federate_atproto"`
+		// AGORA-371: a post that should never appear on Agora at all, only
+		// delivered outbound. Requires Visibility "public" (the same
+		// visibility a plain public post uses) and at least one of the two
+		// federate targets above.
+		ExternalOnly bool `json:"external_only"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -1165,6 +1170,26 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		federateATProto = *req.FederateATProto
 	}
 
+	// AGORA-371: external_only posts follow the AGORA-342 pattern — stored
+	// visibility = 'private' so every existing feed/profile/search/hashtag/
+	// notification exclusion that already keys off 'private' hides it for
+	// free, delivered outbound anyway. req.Visibility itself is left alone
+	// (storedVisibility carries the override) so the "public" branches below
+	// that decide whether to fire the two broadcasts still fire exactly as
+	// they would for a plain public post.
+	storedVisibility := req.Visibility
+	if req.ExternalOnly {
+		if req.Visibility != "public" {
+			writeError(w, 400, "external_only requires public visibility")
+			return
+		}
+		if !federateAP && !federateATProto {
+			writeError(w, 400, "external_only requires at least one external network")
+			return
+		}
+		storedVisibility = "private"
+	}
+
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
@@ -1172,15 +1197,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
-		                   poll_expires_at, federate_ap, federate_atproto)
+		                   poll_expires_at, federate_ap, federate_atproto, external_only)
 		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END, $20, $21)
+		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END, $20, $21, $22)
 		RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
+	`, userID, req.Content, req.ImageURL, storedVisibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
 		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
-		req.VideoURL, req.VideoThumbURL, federateAP, federateATProto).Scan(&id)
+		req.VideoURL, req.VideoThumbURL, federateAP, federateATProto, req.ExternalOnly).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -1203,7 +1228,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	go s.notifyMentions(req.Content, userID, id)
 	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
-		go s.notifyPostFollowers(userID, id)
+		// AGORA-371: nobody on Agora should be notified about a post that
+		// isn't on Agora — notifyMentions above still fires for people
+		// actually @-mentioned, since that's a deliberate address, not a
+		// "someone you follow posted" fan-out.
+		if !req.ExternalOnly {
+			go s.notifyPostFollowers(userID, id)
+		}
 	} else if wallStatus == "approved" {
 		// Notify the wall owner
 		s.notif.Create(*wallUserID, userID, "wall_post", id, "")

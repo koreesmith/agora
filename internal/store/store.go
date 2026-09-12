@@ -1679,4 +1679,12 @@ var schema = []string{
 	// exactly as before.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_ap BOOLEAN NOT NULL DEFAULT true`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_atproto BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-371: marks a post that was never meant to appear on Agora at all
+	// — only delivered outbound to the Fediverse and/or Bluesky. Stored
+	// alongside visibility = 'private' (see CreatePost) rather than as a new
+	// visibility value, so it inherits every existing feed/profile/search/
+	// hashtag/notification exclusion that already keys off 'private' instead
+	// of needing its own case in each of those switch statements.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS external_only BOOLEAN NOT NULL DEFAULT false`,
 }

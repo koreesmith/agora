@@ -4063,20 +4063,25 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple, federateAP bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP, externalOnly bool
 	var createdAt time.Time
 	var repostOfID *string
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt, &federateAP)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt, &federateAP, &externalOnly)
 	// AGORA-370: federateAP is this post's own choice of whether to send it to
 	// the Fediverse at all — re-checked here, not just at the CreatePost call
 	// site, for the same defense-in-depth reason every other flag here is.
-	if err != nil || visibility != "public" || profilePrivate || !apEnabled || !federateAP {
-		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v federateAP=%v", postID, err, visibility, profilePrivate, apEnabled, federateAP)
+	//
+	// AGORA-371: an external_only post is stored visibility = 'private' (so
+	// every Agora-facing surface hides it) but is addressed to the outside
+	// exactly like a public post — externalOnly widens the gate below to let
+	// it through despite that stored visibility.
+	if err != nil || (visibility != "public" && !externalOnly) || profilePrivate || !apEnabled || !federateAP {
+		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q externalOnly=%v profilePrivate=%v apEnabled=%v federateAP=%v", postID, err, visibility, externalOnly, profilePrivate, apEnabled, federateAP)
 		return
 	}
 

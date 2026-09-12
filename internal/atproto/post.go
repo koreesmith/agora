@@ -144,22 +144,26 @@ func (s *Service) BroadcastPost(userID, postID string) {
 
 	var username, content, contentWarning, did, storedPriv, repoHead, repoRev string
 	var visibility string
-	var profilePrivate, isRemote, atprotoEnabled, federateATProto bool
+	var profilePrivate, isRemote, atprotoEnabled, federateATProto, externalOnly bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.content_warning, p.created_at, p.federate_atproto
+		       p.visibility, p.content, p.content_warning, p.created_at, p.federate_atproto, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &federateATProto)
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &federateATProto, &externalOnly)
 	// AGORA-370: federateATProto is this post's own choice of whether to send
 	// it to Bluesky at all, re-checked here for the same defense-in-depth
 	// reason every other flag here is.
-	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled || !federateATProto {
-		log.Printf("atproto: BroadcastPost %s skipped — err=%v visibility=%q profilePrivate=%v isRemote=%v atprotoEnabled=%v federateATProto=%v",
-			postID, err, visibility, profilePrivate, isRemote, atprotoEnabled, federateATProto)
+	//
+	// AGORA-371: an external_only post is stored visibility = 'private' but
+	// addressed to the outside exactly like a public post — externalOnly
+	// widens the gate below to let it through despite that stored visibility.
+	if err != nil || (visibility != "public" && !externalOnly) || profilePrivate || isRemote || !atprotoEnabled || !federateATProto {
+		log.Printf("atproto: BroadcastPost %s skipped — err=%v visibility=%q externalOnly=%v profilePrivate=%v isRemote=%v atprotoEnabled=%v federateATProto=%v",
+			postID, err, visibility, externalOnly, profilePrivate, isRemote, atprotoEnabled, federateATProto)
 		return
 	}
 

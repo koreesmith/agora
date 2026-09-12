@@ -1027,6 +1027,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -1439,6 +1440,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -2849,6 +2851,13 @@ type Post struct {
 	ContentEmojis       json.RawMessage `json:"content_emojis,omitempty"`
 	RepostAuthorEmojis  json.RawMessage `json:"repost_author_emojis,omitempty"`
 	RepostContentEmojis json.RawMessage `json:"repost_content_emojis,omitempty"`
+	// AGORA-372: set only on the author's own view of an external_only post
+	// (filled in by enrichExternalOnly, not scanned by scanPosts itself —
+	// see that function's comment). Never true for any other viewer: a
+	// 'private' + external_only row never reaches anyone else's post list
+	// in the first place, so there's nothing for enrichExternalOnly to find.
+	ExternalOnly bool   `json:"external_only,omitempty"`
+	OnlyOn       string `json:"only_on,omitempty"`
 }
 
 // nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
@@ -2977,6 +2986,69 @@ func derefOr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// onlyOnLabel derives AGORA-372's "only on ..." badge text from which
+// external network(s) an external_only post was sent to.
+func onlyOnLabel(federateAP, federateATProto bool) string {
+	switch {
+	case federateAP && federateATProto:
+		return "Only on the Fediverse and Bluesky"
+	case federateAP:
+		return "Only on the Fediverse"
+	case federateATProto:
+		return "Only on Bluesky"
+	default:
+		return ""
+	}
+}
+
+// enrichExternalOnly attaches AGORA-372's external_only flag and "only on
+// ..." label the same way enrichCustomHandles does: one extra targeted query
+// over the already-scanned ids, rather than adding two more columns to every
+// one of scanPosts' many SELECTs (and its single positional Scan call) for a
+// flag that's non-empty on exactly the viewer's own external-only posts.
+//
+// Safe to call after any scanPosts result, not just GetPost/GetUserPosts's:
+// a 'private' + external_only row only ever reaches its own author's post
+// list in the first place (see those two handlers' own access checks), so
+// for every other caller this simply finds nothing to attach.
+func (s *Service) enrichExternalOnly(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]any, len(posts))
+	idxByID := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxByID[p.ID] = i
+	}
+	ph := make([]string, len(ids))
+	for i := range ids {
+		ph[i] = fmt.Sprintf("$%d", i+1)
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT id, federate_ap, federate_atproto
+		FROM posts
+		WHERE external_only = true AND id IN (%s)
+	`, strings.Join(ph, ",")), ids...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var federateAP, federateATProto bool
+		if rows.Scan(&id, &federateAP, &federateATProto) != nil {
+			continue
+		}
+		i, ok := idxByID[id]
+		if !ok {
+			continue
+		}
+		posts[i].ExternalOnly = true
+		posts[i].OnlyOn = onlyOnLabel(federateAP, federateATProto)
+	}
 }
 
 // enrichReactions loads reaction counts and the current user's reaction for a slice of posts.

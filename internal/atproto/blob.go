@@ -10,10 +10,16 @@ import (
 
 	"github.com/bluesky-social/indigo/api/bsky"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
+	"github.com/agora-social/agora/internal/media"
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
 )
+
+// maxImageBlobBytes is Bluesky's cap on an image blob (app.bsky.embed.images
+// declares maxSize 1000000). Larger blobs are accepted by the record but the
+// AppView refuses to serve them, so the image renders as a black box.
+const maxImageBlobBytes = 1000000
 
 // blobCID computes the content-addressed CID a blob is referenced by —
 // CIDv1, raw codec (not dag-cbor, since a blob isn't an MST/record node —
@@ -84,6 +90,13 @@ func (s *Service) uploadBlob(ctx context.Context, bs *pgBlockstore, url string) 
 	data, mimeType, err := readLocalUpload(s.cfg.UploadDir, url)
 	if err != nil {
 		return nil, err
+	}
+	if strings.HasPrefix(mimeType, "image/") && len(data) > maxImageBlobBytes {
+		shrunk, mt, err := media.ShrinkToFit(data, maxImageBlobBytes)
+		if err != nil {
+			return nil, err
+		}
+		data, mimeType = shrunk, mt
 	}
 	c, err := blobCID(data)
 	if err != nil {

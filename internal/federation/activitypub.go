@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/linkify"
 	"github.com/agora-social/agora/internal/store"
 )
 
@@ -928,26 +929,25 @@ func plainTextToHTML(s string) string {
 	return linkifyURLs(strings.ReplaceAll(html.EscapeString(s), "\n", "<br>"))
 }
 
-// federationURLRe matches a bare URL in already-HTML-escaped text — same
-// character class renderContent (frontend) uses to linkify locally, so a
-// post looks the same whether viewed on Agora or on a remote Mastodon-style
-// client.
-var federationURLRe = regexp.MustCompile(`https?://[^\s<>"']+`)
-
 // linkifyURLs wraps a bare URL in an anchor tag (AGORA-211) — Mastodon-style
 // clients render a Note's "content" HTML close to verbatim rather than
 // auto-linking plain-text URLs themselves (the same reasoning
 // linkifyMentionTags already documents for @mentions), so without this a
 // URL in a federated post displays as inert text on every remote client
 // even though Agora's own renderContent already linkifies it locally.
+// linkify.Find (AGORA-375) is the same detection renderContent uses, so a
+// scheme-less "bit.ly/..." links here too, to https://. contentHTML is
+// already HTML-escaped, so the matched text is safe to reuse as the href.
 func linkifyURLs(contentHTML string) string {
-	return federationURLRe.ReplaceAllStringFunc(contentHTML, func(u string) string {
-		// Trailing punctuation likely belongs to the sentence, not the URL —
-		// same trim renderContent (frontend) already does for the same reason.
-		trimmed := strings.TrimRight(u, ".,!?)")
-		trailing := u[len(trimmed):]
-		return fmt.Sprintf(`<a href="%s" rel="nofollow noopener noreferrer" target="_blank">%s</a>%s`, trimmed, trimmed, trailing)
-	})
+	var b strings.Builder
+	last := 0
+	for _, m := range linkify.Find(contentHTML) {
+		b.WriteString(contentHTML[last:m.Start])
+		fmt.Fprintf(&b, `<a href="%s" rel="nofollow noopener noreferrer" target="_blank">%s</a>`, m.Href, contentHTML[m.Start:m.End])
+		last = m.End
+	}
+	b.WriteString(contentHTML[last:])
+	return b.String()
 }
 
 // linkifyMentionTags rewrites each resolved fediverse mention's plain-text
@@ -2572,23 +2572,15 @@ func HTMLToPlainText(s string) string {
 	// Mastodon etc. wrap auto-linked URLs in nested <span>s (to CSS-truncate
 	// the visible portion), so link text is usually already the URL once its
 	// own tags are stripped; @mentions/#hashtags are likewise already
-	// meaningful as bare text. Only a manually authored link whose text
-	// differs from its href (e.g. "click here") needs the href appended so
-	// renderContent's bare-URL linkifier still picks it up.
+	// meaningful as bare text. linkify.PlainTextLink decides the rest: link
+	// text that renderContent would not link back to the same href on its
+	// own (a scheme-less or shortened URL, AGORA-375, or "click here") is
+	// replaced by, or followed by, the real href.
 	s = htmlATagRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := htmlATagRe.FindStringSubmatch(m)
 		href := strings.TrimSpace(html.UnescapeString(parts[1]))
 		text := strings.TrimSpace(html.UnescapeString(htmlTagRe.ReplaceAllString(parts[2], "")))
-		switch {
-		case text == "":
-			return href
-		case strings.HasPrefix(text, "@"), strings.HasPrefix(text, "#"):
-			return text
-		case strings.Contains(strings.ToLower(href), strings.ToLower(text)), strings.HasPrefix(strings.ToLower(text), "http"):
-			return text
-		default:
-			return text + " (" + href + ")"
-		}
+		return linkify.PlainTextLink(text, href)
 	})
 	s = htmlTagRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(s))

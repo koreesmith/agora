@@ -8,9 +8,8 @@ import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
+import { findFirstUrl } from '../../utils/linkify'
 
-// Detect the first URL in a string
-const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/i
 
 interface Preview {
   url: string
@@ -108,8 +107,9 @@ export default function CreatePost() {
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
 
-    const match = content.match(URL_RE)
-    const url = match ? match[0].replace(/[.,!?)]+$/, '') : '' // strip trailing punctuation
+    // First URL, scheme-less ones like bit.ly/... included (AGORA-375).
+    const found = findFirstUrl(content)
+    const url = found?.href ?? ''
 
     if (!url) {
       setPreview(null)
@@ -125,7 +125,7 @@ export default function CreatePost() {
       if (imageUrls.length === 0) {
         setImageUrls([url])
         // Strip the URL from the content so it doesn't show as text
-        setContent(c => c.replace(url, '').trim())
+        setContent(c => c.replace(found!.text, '').trim())
       }
       return
     }

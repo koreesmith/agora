@@ -8,6 +8,7 @@ import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, T
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
+import { URL_TOKEN, linkHref, trimUrl } from '../../utils/linkify'
 import ReportModal from './ReportModal'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
@@ -134,6 +135,8 @@ function emojiImg(shortcode: string, url: string, key: string | number) {
   )
 }
 
+const CONTENT_TOKEN_RE = new RegExp(`(${URL_TOKEN}|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+(?:\\.[a-zA-Z0-9_-]+)+|@[a-zA-Z0-9_-]+|\\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)`, 'g')
+
 // Render text with @mentions as profile links, URLs as clickable links, and
 // (AGORA-258) recognized :shortcode: custom emoji as inline images.
 export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap) {
@@ -145,8 +148,9 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
   // is captured as one token, not truncated at the first dot. No nested
   // capturing groups within any alternative — String.split splices every
   // capture group's result into the output, so an inner group here would
-  // corrupt the parts array.
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)/g)
+  // corrupt the parts array. URLs include scheme-less ones like bit.ly/...
+  // (AGORA-375, see utils/linkify).
+  const parts = text.split(CONTENT_TOKEN_RE)
   return parts.map((part, i) => {
     // Fediverse mention (@handle@instance.tld) — links to the same
     // synthetic-username profile route already used everywhere else a
@@ -180,12 +184,14 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     if (emojis && /^:[a-zA-Z0-9_]+:$/.test(part) && emojis[part]) {
       return emojiImg(part, emojis[part], i)
     }
-    if (/^https?:\/\//i.test(part)) {
-      const url = part.replace(/[.,!?)]+$/, '')
+    // Odd indexes are the captured tokens; even ones are the text between.
+    const url = trimUrl(part)
+    const href = i % 2 === 1 && url ? linkHref(url, parts[i - 1] || parts[i - 2] || '') : null
+    if (href) {
       const trailing = part.slice(url.length)
       return (
         <span key={i}>
-          <a href={url} target="_blank" rel="noreferrer noopener" className={linkClassName}>{url}</a>
+          <a href={href} target="_blank" rel="noreferrer noopener" className={linkClassName}>{url}</a>
           {trailing}
         </span>
       )

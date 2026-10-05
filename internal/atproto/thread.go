@@ -156,7 +156,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 			VALUES ($1, $2, 'public', $3, true, $4, 'bsky.app', $5, $6, $7)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, localParentID, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&commentID)
+		`, authorID, textWithLinks(rec), localParentID, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&commentID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}

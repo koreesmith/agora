@@ -4,10 +4,14 @@ import (
 	"context"
 	"log"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bluesky-social/indigo/api/bsky"
+
+	"github.com/agora-social/agora/internal/linkify"
 )
 
 // blueskyRootRef pulls the thread root's strong ref off an ingested record
@@ -235,7 +239,7 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
 			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt),
+	`, authorID, textWithLinks(post), rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt),
 		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return ""
@@ -331,6 +335,54 @@ func (s *Service) storeInboundVideo(postID string, v *bsky.EmbedVideo_View) {
 	s.db.Exec(`UPDATE posts SET video_url = $1, video_thumb_url = $2 WHERE id = $3`, v.Playlist, thumb, postID)
 }
 
+// textWithLinks (AGORA-375) is the plain text Agora stores for an ingested
+// record: rec.Text with each #link facet's real URI folded back in. Bluesky
+// clients display a link however the author's app chose to shorten it
+// ("bit.ly/4jFFzI0", "example.com/long/pa..."), and only the facet holds the
+// actual URI, so storing rec.Text as-is would leave renderContent nothing
+// to link. linkify.PlainTextLink keeps the visible text whenever it already
+// links to the facet's URI on its own, and otherwise substitutes or appends
+// the URI. Facets are applied last-to-first so earlier byte offsets stay
+// valid; one that is malformed, overlaps another, or points at a non-web
+// URI is skipped rather than trusted.
+func textWithLinks(rec *bsky.FeedPost) string {
+	text := rec.Text
+	type link struct {
+		start, end int
+		uri        string
+	}
+	var links []link
+	for _, f := range rec.Facets {
+		if f == nil || f.Index == nil {
+			continue
+		}
+		start, end := int(f.Index.ByteStart), int(f.Index.ByteEnd)
+		if start < 0 || end > len(text) || start >= end || !utf8.RuneStart(text[start]) || (end < len(text) && !utf8.RuneStart(text[end])) {
+			continue
+		}
+		for _, feat := range f.Features {
+			if feat == nil || feat.RichtextFacet_Link == nil {
+				continue
+			}
+			uri := feat.RichtextFacet_Link.Uri
+			if l := strings.ToLower(uri); strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "http://") {
+				links = append(links, link{start, end, uri})
+			}
+			break
+		}
+	}
+	sort.SliceStable(links, func(i, j int) bool { return links[i].start > links[j].start })
+	limit := len(text)
+	for _, l := range links {
+		if l.end > limit {
+			continue // overlaps the facet after it
+		}
+		text = text[:l.start] + linkify.PlainTextLink(text[l.start:l.end], l.uri) + text[l.end:]
+		limit = l.start
+	}
+	return text
+}
+
 // storeHashtagsFromFacets (AGORA-213) mirrors federation's storeHashtags/
 // hashtagsFromAPTags pair, but reads an AT Proto record's own "facets"
 // array directly — a #tag facet's Tag field is already bare (no leading #
@@ -423,7 +475,7 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+		`, authorID, textWithLinks(rec), post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
 			rootURI, rootCID).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
@@ -511,7 +563,7 @@ func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *
 			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
 			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+	`, authorID, textWithLinks(rec), post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
 		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return

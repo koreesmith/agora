@@ -138,6 +138,18 @@ func TestCanFriend(t *testing.T) {
 		}
 	})
 
+	t.Run("a fediverse actor with a preferredUsername is refused, not mistaken for a legacy stub", func(t *testing.T) {
+		// upsertRemoteAPUser has set remote_user_id from the actor's
+		// preferredUsername (or "user") for every ingested actor since
+		// AGORA-147, Agora and plain fediverse alike, so a non-empty
+		// remote_user_id alongside an ap_actor_url is the normal shape of any
+		// remote row today, not a signal that the far end is Agora.
+		id := mkRemote(t, "mastwithhandle", "mastodon.example", "https://mastodon.example/users/x", "x")
+		if s.CanFriend(id) {
+			t.Error("allowed a fediverse actor because it has a remote_user_id, which upsertRemoteAPUser sets for everyone")
+		}
+	})
+
 	t.Run("an actor on a known Agora peer is friendable", func(t *testing.T) {
 		domain := fmt.Sprintf("knownpeer329-%d.example", unique)
 		db.Exec(`INSERT INTO federated_instances (domain, name, public_key, instance_url, status)

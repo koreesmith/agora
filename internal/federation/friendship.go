@@ -155,12 +155,17 @@ func (s *Service) remoteUserIDForActor(actorURL string) string {
 // would sit pending forever. AGORA-329 makes that too broad: an Agora user on
 // another instance now has an actor URL too, and is exactly who this is for.
 //
-// The distinction is whether the far end is Agora. A legacy stub always is,
-// since only the Agora-to-Agora protocol creates one. Otherwise the domain has
-// to be a known, unblocked peer. That is deliberately conservative: it will
-// refuse an Agora instance nobody has peered with or heard from, which is a
-// worse error message than it is a broken feature, where wrongly allowing it
-// produces a request that silently never resolves.
+// The distinction is whether the far end is Agora. A legacy stub (remote_user_id
+// set, no ap_actor_url) always is, since the pre-ActivityPub Agora-to-Agora
+// protocol is the only thing that ever left a row in that shape. It is NOT
+// enough on its own to check remote_user_id is set: upsertRemoteAPUser has
+// populated remote_user_id for every ingested ActivityPub actor since AGORA-147
+// (Mastodon, Pleroma, and Agora alike), so a row can have both fields set
+// without being Agora. For those, and for every other row with an actor URL,
+// the domain has to be a known, unblocked peer. That is deliberately
+// conservative: it will refuse an Agora instance nobody has peered with or
+// heard from, which is a worse error message than it is a broken feature,
+// where wrongly allowing it produces a request that silently never resolves.
 func (s *Service) CanFriend(remoteUserID string) bool {
 	var isRemote bool
 	var apActorURL, remoteInstance, remoteUserHandle string
@@ -174,8 +179,8 @@ func (s *Service) CanFriend(remoteUserID string) bool {
 	if !isRemote {
 		return true // a local account, not this function's business
 	}
-	if remoteUserHandle != "" {
-		return true // legacy stub: only Agora creates these
+	if remoteUserHandle != "" && apActorURL == "" {
+		return true // legacy stub: pre-ActivityPub Agora rows have a handle but no actor URL
 	}
 	if apActorURL == "" || remoteInstance == "" {
 		return false

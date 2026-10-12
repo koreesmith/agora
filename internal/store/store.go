@@ -233,7 +233,15 @@ var schema = []string{
 		-- position everywhere else in the federation layer; the setting is the
 		-- lever for an admin receiving sprayed requests, so they do not need a
 		-- code change to respond.
-		('friend_requests_from', 'anyone')
+		('friend_requests_from', 'anyone'),
+		-- AGORA-361: 'true' or 'false'. Lets the sole user of a single-user
+		-- instance claim the instance's own domain as their AT Proto handle
+		-- with no DNS setup, since the instance's own web server already
+		-- answers for that domain. Defaults false: it only ever does anything
+		-- when the instance also genuinely has exactly one real user, but an
+		-- admin should still turn it on deliberately rather than have it
+		-- appear automatically on every upgrade.
+		('single_user_domain_handle', 'false')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────
@@ -1607,4 +1615,76 @@ var schema = []string{
 		PRIMARY KEY (user_id, post_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_hidden_posts_post ON hidden_posts(post_id)`,
+
+	// AGORA-354: cache a remote actor's HTTP-Signature public key instead of
+	// re-fetching it (a live, signed HTTP GET) on every single inbound
+	// federated request. Keyed by actor URL rather than folded into `users`
+	// because a signer doesn't necessarily have a local stub row yet (e.g. a
+	// Like from an account nobody here follows) — decoupling the cache from
+	// that upsert lifecycle means it works for every signer, not just ones
+	// we've already ingested. fetched_at drives the TTL check in
+	// fetchActorPublicKeySigned; a signature that fails to verify against a
+	// cached key triggers one live re-fetch before failing, so key rotation
+	// on the remote side doesn't get stuck on a stale cache entry.
+	`CREATE TABLE IF NOT EXISTS remote_actor_keys (
+		actor_url      TEXT        PRIMARY KEY,
+		public_key_pem TEXT        NOT NULL,
+		fetched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-353: a row that exhausts maxDeliveryAttempts used to just sit
+	// excluded from the drain query's own `attempts < 10` filter forever —
+	// abandoned but with nothing distinguishing it from "still pending" to
+	// anyone querying the table. dead_at makes that state explicit and
+	// queryable (`WHERE dead_at IS NOT NULL`) instead of implicit in an
+	// attempts count nobody thought to check.
+	`ALTER TABLE ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE page_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE instance_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+
+	// AGORA-355: GetProfile used to synchronously fetch a remote account's
+	// live follower/following/post stats on every single profile view — for
+	// a fediverse actor, four sequential signed HTTP round trips (an actor
+	// doc fetch plus three collection totals), each up to fedHTTPClient's
+	// 10s timeout, with no caching at all. Shared by both the ActivityPub
+	// and AT Proto stats fetchers (actor_key holds either an ap_actor_url or
+	// a Bluesky DID — the two never collide in practice, one is always an
+	// https:// URL and the other always starts with "did:") since both are
+	// keyed by the same kind of opaque remote-identity string and need
+	// identical TTL/staleness handling.
+	`CREATE TABLE IF NOT EXISTS remote_actor_stats (
+		actor_key  TEXT        PRIMARY KEY,
+		followers  INT         NOT NULL DEFAULT 0,
+		following  INT         NOT NULL DEFAULT 0,
+		posts      INT         NOT NULL DEFAULT 0,
+		bio        TEXT        NOT NULL DEFAULT '',
+		locked     BOOLEAN     NOT NULL DEFAULT false,
+		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-360: caches whether a remote domain is confirmed to be running
+	// Agora (via FetchInstanceInfo's existing .well-known/agora-instance
+	// check, previously only used for admin-initiated peering), so
+	// DeliverLike can decide whether to send a reaction's exact type
+	// without a live fetch on every single reaction.
+	`CREATE TABLE IF NOT EXISTS remote_instance_software (
+		domain     TEXT        PRIMARY KEY,
+		is_agora   BOOLEAN     NOT NULL,
+		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-370: per-post network targeting. DEFAULT true keeps every
+	// existing post, and every client that never sends the new
+	// federate_activitypub/federate_atproto request fields, federating
+	// exactly as before.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_ap BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_atproto BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-371: marks a post that was never meant to appear on Agora at all
+	// — only delivered outbound to the Fediverse and/or Bluesky. Stored
+	// alongside visibility = 'private' (see CreatePost) rather than as a new
+	// visibility value, so it inherits every existing feed/profile/search/
+	// hashtag/notification exclusion that already keys off 'private' instead
+	// of needing its own case in each of those switch statements.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS external_only BOOLEAN NOT NULL DEFAULT false`,
 }

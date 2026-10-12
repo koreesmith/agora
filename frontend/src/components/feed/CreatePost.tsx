@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video, Info } from 'lucide-react'
-import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
+import { feedApi, friendsApi, previewApi, pagesApi, authApi } from '../../api'
 import api from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
@@ -42,6 +42,13 @@ export default function CreatePost() {
   const [groupTagQuery, setGroupTagQuery] = useState('')
   const groupDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [friendListId, setFriendListId] = useState('')
+  // AGORA-374: per-post network targeting, only meaningful for Public.
+  // Defaults to "on" for every network — the untouched state that produces
+  // the same payload (no federate_activitypub/federate_atproto/
+  // external_only fields at all) as before this control existed.
+  const [agoraEnabled, setAgoraEnabled] = useState(true)
+  const [federateAP, setFederateAP] = useState(true)
+  const [federateATProto, setFederateATProto] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [showUploadModal, setShowUploadModal] = useState(false)
   const uploadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -67,6 +74,21 @@ export default function CreatePost() {
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
   const friendLists = groupsData?.groups || []
+
+  // AGORA-374: activitypub_enabled/atproto_enabled aren't part of the login
+  // response the auth store is seeded from (see SettingsPage's own
+  // 'my-profile' query, which this shares a cache key with), so a user who
+  // hasn't visited Settings this session would otherwise never see either
+  // chip even with both networks on. Falls back to the store's copy so a
+  // component that already populated it (e.g. Settings, visited earlier in
+  // the session) doesn't flash the chips away while this query is in flight.
+  const { data: freshProfile } = useQuery({
+    queryKey: ['my-profile'],
+    queryFn: () => authApi.me().then(r => r.data),
+    staleTime: 60_000,
+  })
+  const apEnabled = freshProfile?.activitypub_enabled ?? user?.activitypub_enabled
+  const atprotoEnabled = freshProfile?.atproto_enabled ?? user?.atproto_enabled
   // AGORA-345: only the list actually being posted to, so the reach notice
   // below tracks the picker rather than describing every list at once.
   const selectedList = visibility === 'group'
@@ -160,6 +182,14 @@ export default function CreatePost() {
           image_urls: imageUrls,
         })
       }
+      // AGORA-374: omit the targeting fields entirely when the author left
+      // the control at its default (everything on) — the payload for anyone
+      // who never touches it is byte-for-byte what it was before this
+      // control existed.
+      const usingDefaultTargeting = agoraEnabled && federateAP && federateATProto
+      const targeting = visibility === 'public' && !usingDefaultTargeting
+        ? { federate_activitypub: federateAP, federate_atproto: federateATProto, external_only: !agoraEnabled }
+        : {}
       return feedApi.createPost({
         content,
         image_urls: imageUrls,
@@ -177,6 +207,7 @@ export default function CreatePost() {
         poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
         poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
         poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
+        ...targeting,
       })
     },
     onSuccess: () => {
@@ -187,6 +218,7 @@ export default function CreatePost() {
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
       setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
+      setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true)
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
   })
@@ -315,9 +347,14 @@ export default function CreatePost() {
   ]
 
   const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
+  // AGORA-374: at least one of Agora/Fediverse/Bluesky must stay on — turning
+  // all of them off would post nowhere at all. Irrelevant outside Public,
+  // where the targeting control isn't shown and the three flags stay at
+  // their default "on".
+  const validTargeting = visibility !== 'public' || agoraEnabled || federateAP || federateATProto
   const canPost = (content.trim() || imageUrls.length > 0 || videoUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
     && !create.isPending && !uploading && !uploadingVideo && !videoProcessing
-    && (!twEnabled || twLabel.trim()) && validPoll
+    && (!twEnabled || twLabel.trim()) && validPoll && validTargeting
 
   return (
     <>
@@ -691,7 +728,14 @@ export default function CreatePost() {
         </button>
 
         {/* Visibility */}
-        <select value={visibility} onChange={e => setVisibility(e.target.value)}
+        <select value={visibility} onChange={e => {
+            const v = e.target.value
+            setVisibility(v)
+            // AGORA-374: the targeting control only ever applies to Public —
+            // reset it going into or out of that visibility so a choice made
+            // earlier can't linger and silently apply to a later post.
+            if (v !== 'public') { setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true) }
+          }}
           className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
           {visOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -712,12 +756,60 @@ export default function CreatePost() {
         </button>
       </div>
 
+      {/* AGORA-374: per-post network targeting, offered only for Public —
+          Friends/Friend List posts can't reach an external network at all
+          (AGORA-369's own out-of-scope), so the control stays hidden there
+          rather than offering choices that would do nothing. Hidden entirely
+          when the account has neither network enabled: there is nothing to
+          choose between, only Agora. */}
+      {visibility === 'public' && (apEnabled || atprotoEnabled) && (
+        <div className="flex items-center gap-1.5 flex-wrap pl-13">
+          <span className="text-xs text-agora-400">Post to:</span>
+          <NetworkChip label="Agora" active={agoraEnabled} onClick={() => setAgoraEnabled(v => !v)} />
+          {apEnabled && (
+            <NetworkChip label="Fediverse" active={federateAP} onClick={() => setFederateAP(v => !v)} />
+          )}
+          {atprotoEnabled && (
+            <NetworkChip label="Bluesky" active={federateATProto} onClick={() => setFederateATProto(v => !v)} />
+          )}
+        </div>
+      )}
+      {visibility === 'public' && !agoraEnabled && (
+        <p className={`text-xs pl-13 ${validTargeting ? 'text-agora-400' : 'text-red-500'}`}>
+          {!validTargeting
+            ? 'Pick at least one place for this post to go.'
+            : federateAP && federateATProto
+            ? 'This post will only appear on the Fediverse and Bluesky, not on Agora.'
+            : federateAP
+            ? 'This post will only appear on the Fediverse, not on Agora.'
+            : 'This post will only appear on Bluesky, not on Agora.'}
+        </p>
+      )}
+
       {/* AGORA-345: quiet unless lossy. Nothing is shown for the ordinary case,
           because a standing warning on every limited post trains people to
           ignore it and costs it its value on the one post that needs it. */}
       <AudienceReach list={selectedList} />
     </div>
     </>
+  )
+}
+
+// NetworkChip is one toggle in AGORA-374's network-targeting control.
+function NetworkChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${
+        active
+          ? 'bg-agora-100 dark:bg-agora-700 border-agora-400 text-agora-700 dark:text-agora-200'
+          : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
 

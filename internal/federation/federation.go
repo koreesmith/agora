@@ -42,6 +42,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/users/{handle}",  s.GetUser)
 	r.Get("/federation/users/{handle}/outbox",    s.Outbox)
 	r.Get("/federation/users/{handle}/followers", s.Followers)
+	// AGORA-357: a post's own object URL (the "id" buildNoteObject mints for
+	// every Create/Update/Announce) never had anything serving a GET on it.
+	r.Get("/federation/users/{handle}/posts/{postID}", s.GetPost)
 	// AGORA-255: FEP-044f dereferenceable quote-authorization stamp — other
 	// servers fetch this to verify a quote of one of this user's posts was
 	// actually granted, not just claimed by the quoting post.
@@ -360,11 +363,13 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AGORA-364: an empty q is a peer instance asking for a sample of local
+	// users to offer as Discover suggestions, rather than a keyword search.
+	// The wildcard below already matches everything when q is empty, so no
+	// separate query path is needed, and a caller could already enumerate
+	// nearly the same list today with a single common letter, so this is not
+	// a meaningfully bigger exposure than what the endpoint already allows.
 	q := r.URL.Query().Get("q")
-	if q == "" {
-		writeError(w, 400, "q required")
-		return
-	}
 
 	rows, err := s.db.Query(`
 		SELECT username, display_name, avatar_url
@@ -372,6 +377,7 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 		WHERE is_remote = false AND profile_private = false
 		  AND (username ILIKE '%'||$1||'%' OR display_name ILIKE '%'||$1||'%')
 		  AND deletion_scheduled_at IS NULL
+		ORDER BY random()
 		LIMIT 20
 	`, q)
 	if err != nil {
@@ -403,17 +409,24 @@ func (s *Service) Search(w http.ResponseWriter, r *http.Request) {
 // LookupUser resolves a user@instance handle by fetching their profile from the
 // remote instance and creating/updating the local stub. Returns the local profile.
 // Query param: handle=username@instance.com
+//
+// AGORA-363: deliberately not gated on federationEnabled(). That setting is
+// this instance's own opt-in to being discoverable by other Agora instances
+// (InstanceInfo, Search). It says nothing about whether this instance's own
+// users may look someone else up, which exposes nothing about this instance
+// to anyone. APLookup, which resolves the identical kind of handle over the
+// identical WebFinger path, has never had this gate.
 func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
-	if !s.federationEnabled() {
-		writeError(w, 404, "federation not enabled")
-		return
-	}
-
-	raw := r.URL.Query().Get("handle")
+	raw := strings.TrimSpace(r.URL.Query().Get("handle"))
 	if raw == "" {
 		writeError(w, 400, "handle required — format: username@instance.com")
 		return
 	}
+	// AGORA-362: a fediverse handle is conventionally typed and displayed
+	// with a leading @ (@user@instance.com). Left in place, the split below
+	// sees an empty string before the first @ and 400s on the one format
+	// everyone actually types. APLookup already does this same trim.
+	raw = strings.TrimPrefix(raw, "@")
 
 	parts := strings.SplitN(raw, "@", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

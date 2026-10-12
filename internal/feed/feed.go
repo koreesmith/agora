@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -96,7 +97,10 @@ type fedSender interface {
 	// DeliverLike/DeliverUnlike (AGORA-158): outbound Like/Undo(Like) when
 	// liking/unliking a remote post — the reverse of handleInboundLike
 	// (AGORA-153), which only ever handled a remote actor liking one of ours.
-	DeliverLike(userID, postID string)
+	// reactionType (AGORA-360) is the exact reaction chosen — sent as-is to
+	// a confirmed Agora peer, or collapsed/retracted per AGORA-359's valence
+	// split for anyone else; DeliverLike itself decides which.
+	DeliverLike(userID, postID, reactionType string)
 	DeliverUnlike(userID, postID string)
 	// DeliverAnnounce/DeliverUnannounce (AGORA-159): outbound Announce/
 	// Undo(Announce) when reposting/un-reposting a remote post — the reverse
@@ -1033,6 +1037,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -1059,6 +1064,20 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		PollMultipleChoice   bool     `json:"poll_multiple_choice"`
 		PollAllowsNewOptions bool     `json:"poll_allows_new_options"`
 		WallUserID           string   `json:"wall_user_id"`
+		// AGORA-370: per-post network targeting. Pointers so "omitted" (keep
+		// today's behaviour: respect the account's own activitypub_enabled /
+		// atproto_enabled plus the instance switch) is distinguishable from an
+		// explicit false (skip that network for this post) or true (attempt it,
+		// still subject to the same account/instance gates — a true from an
+		// account with the network off is a no-op, not an error). Only
+		// meaningful when Visibility is "public"; ignored otherwise.
+		FederateActivityPub *bool `json:"federate_activitypub"`
+		FederateATProto     *bool `json:"federate_atproto"`
+		// AGORA-371: a post that should never appear on Agora at all, only
+		// delivered outbound. Requires Visibility "public" (the same
+		// visibility a plain public post uses) and at least one of the two
+		// federate targets above.
+		ExternalOnly bool `json:"external_only"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -1150,6 +1169,38 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
+	// AGORA-370: default true, matching today's behaviour (respect the
+	// account's own opt-in plus the instance switch), for every client that
+	// doesn't send these fields at all.
+	federateAP := true
+	if req.FederateActivityPub != nil {
+		federateAP = *req.FederateActivityPub
+	}
+	federateATProto := true
+	if req.FederateATProto != nil {
+		federateATProto = *req.FederateATProto
+	}
+
+	// AGORA-371: external_only posts follow the AGORA-342 pattern — stored
+	// visibility = 'private' so every existing feed/profile/search/hashtag/
+	// notification exclusion that already keys off 'private' hides it for
+	// free, delivered outbound anyway. req.Visibility itself is left alone
+	// (storedVisibility carries the override) so the "public" branches below
+	// that decide whether to fire the two broadcasts still fire exactly as
+	// they would for a plain public post.
+	storedVisibility := req.Visibility
+	if req.ExternalOnly {
+		if req.Visibility != "public" {
+			writeError(w, 400, "external_only requires public visibility")
+			return
+		}
+		if !federateAP && !federateATProto {
+			writeError(w, 400, "external_only requires at least one external network")
+			return
+		}
+		storedVisibility = "private"
+	}
+
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
@@ -1157,15 +1208,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
-		                   poll_expires_at)
+		                   poll_expires_at, federate_ap, federate_atproto, external_only)
 		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
+		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END, $20, $21, $22)
 		RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
+	`, userID, req.Content, req.ImageURL, storedVisibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
 		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
-		req.VideoURL, req.VideoThumbURL).Scan(&id)
+		req.VideoURL, req.VideoThumbURL, federateAP, federateATProto, req.ExternalOnly).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -1188,7 +1239,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	go s.notifyMentions(req.Content, userID, id)
 	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
-		go s.notifyPostFollowers(userID, id)
+		// AGORA-371: nobody on Agora should be notified about a post that
+		// isn't on Agora — notifyMentions above still fires for people
+		// actually @-mentioned, since that's a deliberate address, not a
+		// "someone you follow posted" fan-out.
+		if !req.ExternalOnly {
+			go s.notifyPostFollowers(userID, id)
+		}
 	} else if wallStatus == "approved" {
 		// Notify the wall owner
 		s.notif.Create(*wallUserID, userID, "wall_post", id, "")
@@ -1212,7 +1269,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// the two keyed ingested posts differently, so a recipient who was both a
 	// legacy friend and an ActivityPub follower received the same post twice as
 	// two rows the dedup index could not collapse. See ADR-002.
-	if req.Visibility == "public" && s.fed != nil {
+	if req.Visibility == "public" && s.fed != nil && federateAP {
 		go s.fed.BroadcastPublicPost(userID, id)
 	}
 
@@ -1234,7 +1291,7 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// AGORA-190: federate as an app.bsky.feed.post record, independent of
 	// the AP broadcast above — a separate protocol with its own opt-in.
-	if req.Visibility == "public" && s.atproto != nil {
+	if req.Visibility == "public" && s.atproto != nil && federateATProto {
 		go s.atproto.BroadcastPost(userID, id)
 	}
 
@@ -1393,6 +1450,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	s.enrichCustomHandles(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -1480,9 +1538,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
-	// AGORA-158: federate the like if the target is a remote post.
+	// AGORA-158: federate the like if the target is a remote post. The
+	// plain heart button is always exactly a "like" reaction (AGORA-360).
 	if s.fed != nil {
-		go s.fed.DeliverLike(userID, postID)
+		go s.fed.DeliverLike(userID, postID, "like")
 	}
 	// AGORA-201: same reasoning as the fediverse call above, for a Bluesky target.
 	if s.atproto != nil {
@@ -1523,6 +1582,23 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Type = reactionType
 
+	// AGORA-359/360: captured before the upsert below overwrites it. The fed
+	// call site below needs to know only whether anything changed at all —
+	// federation.Service.DeliverLike decides for itself what (if anything)
+	// that change is worth sending, since only it knows whether the target
+	// is a confirmed Agora peer. The atproto call site still needs the
+	// federates-as-Like boundary directly, since Bluesky is never "another
+	// Agora instance" and keeps AGORA-359's plain valence gate. Falls back
+	// to a legacy plain `likes` row when there's no existing `reactions`
+	// row, since that's the other place a prior "like" could be recorded —
+	// the upsert below always clears it once a `reactions` row exists.
+	var prevType string
+	s.db.QueryRow(`SELECT reaction_type FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID).Scan(&prevType)
+	wasFederatedLike := store.FederatesAsLike[prevType]
+	if prevType == "" {
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)`, userID, postID).Scan(&wasFederatedLike)
+	}
+
 	// Upsert — replaces any existing reaction from this user on this post
 	s.db.Exec(`
 		INSERT INTO reactions (user_id, post_id, reaction_type)
@@ -1554,16 +1630,31 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
-	// AGORA-158: standard ActivityPub only has a plain Like, no concept of
-	// emoji reaction types — federate only when the reaction is exactly
-	// "like", the same restriction Mastodon's own favourite maps to.
-	if s.fed != nil && req.Type == "like" {
-		go s.fed.DeliverLike(userID, postID)
-	}
-	// AGORA-201: app.bsky.feed.like is likewise a plain like with no emoji
-	// concept, same restriction as the fediverse call above.
-	if s.atproto != nil && req.Type == "like" {
-		go s.atproto.DeliverLike(userID, postID)
+	if prevType != req.Type {
+		// AGORA-360: always tell the fediverse side about a genuine change,
+		// on every switch — including between two reactions on the same
+		// side of the valence boundary (love -> pride), and including a
+		// negative one (sad -> angry). DeliverLike itself decides what (if
+		// anything) that's worth sending: the exact reaction to a confirmed
+		// Agora peer, a plain Like to anyone else if it's positive/neutral,
+		// or a retraction if it's negative and there's nothing truthful to
+		// send. ReactPost has no way to know which of those applies, so it
+		// no longer tries to.
+		if s.fed != nil {
+			go s.fed.DeliverLike(userID, postID, req.Type)
+		}
+		// AGORA-359: Bluesky is never "another Agora instance" to send the
+		// precise reaction to, so this side keeps the plain valence gate —
+		// send/retract only on actually crossing the boundary.
+		if s.atproto != nil {
+			nowFederatesAsLike := store.FederatesAsLike[req.Type]
+			switch {
+			case nowFederatesAsLike && !wasFederatedLike:
+				go s.atproto.DeliverLike(userID, postID)
+			case !nowFederatesAsLike && wasFederatedLike:
+				go s.atproto.DeliverUnlike(userID, postID)
+			}
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
@@ -2770,6 +2861,13 @@ type Post struct {
 	ContentEmojis       json.RawMessage `json:"content_emojis,omitempty"`
 	RepostAuthorEmojis  json.RawMessage `json:"repost_author_emojis,omitempty"`
 	RepostContentEmojis json.RawMessage `json:"repost_content_emojis,omitempty"`
+	// AGORA-372: set only on the author's own view of an external_only post
+	// (filled in by enrichExternalOnly, not scanned by scanPosts itself —
+	// see that function's comment). Never true for any other viewer: a
+	// 'private' + external_only row never reaches anyone else's post list
+	// in the first place, so there's nothing for enrichExternalOnly to find.
+	ExternalOnly bool   `json:"external_only,omitempty"`
+	OnlyOn       string `json:"only_on,omitempty"`
 }
 
 // nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
@@ -2793,7 +2891,7 @@ func scanPosts(rows interface {
 	for rows.Next() {
 		var p Post
 		var authorEmojis, contentEmojis, repostAuthorEmojis, repostContentEmojis string
-		rows.Scan(
+		if err := rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
@@ -2808,7 +2906,18 @@ func scanPosts(rows interface {
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,
 			&authorEmojis, &contentEmojis, &repostAuthorEmojis, &repostContentEmojis,
-		)
+		); err != nil {
+			// AGORA-355: this error used to be discarded, which meant a
+			// column-list drift between a query and this Scan call (e.g. a
+			// future federation/atproto column addition to one but not the
+			// other) would silently append a mostly-zero-valued Post instead
+			// of failing anywhere visible. Skipping the row and logging is
+			// strictly better than either silently corrupting it or blowing
+			// up every caller's signature for what should never happen in
+			// practice.
+			log.Printf("feed: scanPosts: skipping row after Scan error: %v", err)
+			continue
+		}
 		p.ReactionCounts = map[string]int{}
 		p.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
 		p.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
@@ -2887,6 +2996,69 @@ func derefOr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// onlyOnLabel derives AGORA-372's "only on ..." badge text from which
+// external network(s) an external_only post was sent to.
+func onlyOnLabel(federateAP, federateATProto bool) string {
+	switch {
+	case federateAP && federateATProto:
+		return "Only on the Fediverse and Bluesky"
+	case federateAP:
+		return "Only on the Fediverse"
+	case federateATProto:
+		return "Only on Bluesky"
+	default:
+		return ""
+	}
+}
+
+// enrichExternalOnly attaches AGORA-372's external_only flag and "only on
+// ..." label the same way enrichCustomHandles does: one extra targeted query
+// over the already-scanned ids, rather than adding two more columns to every
+// one of scanPosts' many SELECTs (and its single positional Scan call) for a
+// flag that's non-empty on exactly the viewer's own external-only posts.
+//
+// Safe to call after any scanPosts result, not just GetPost/GetUserPosts's:
+// a 'private' + external_only row only ever reaches its own author's post
+// list in the first place (see those two handlers' own access checks), so
+// for every other caller this simply finds nothing to attach.
+func (s *Service) enrichExternalOnly(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]any, len(posts))
+	idxByID := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxByID[p.ID] = i
+	}
+	ph := make([]string, len(ids))
+	for i := range ids {
+		ph[i] = fmt.Sprintf("$%d", i+1)
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT id, federate_ap, federate_atproto
+		FROM posts
+		WHERE external_only = true AND id IN (%s)
+	`, strings.Join(ph, ",")), ids...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var federateAP, federateATProto bool
+		if rows.Scan(&id, &federateAP, &federateATProto) != nil {
+			continue
+		}
+		i, ok := idxByID[id]
+		if !ok {
+			continue
+		}
+		posts[i].ExternalOnly = true
+		posts[i].OnlyOn = onlyOnLabel(federateAP, federateATProto)
+	}
 }
 
 // enrichReactions loads reaction counts and the current user's reaction for a slice of posts.

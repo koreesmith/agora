@@ -230,7 +230,7 @@ func isAddressedPublicly(audiences ...[]string) bool {
 //   - the thread must be limited-audience, since a public thread needs no
 //     forwarding and should not gain a bypass it has no use for.
 func (s *Service) isThreadOwnerForwarding(verifiedActor, inReplyTo string) bool {
-	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(inReplyTo)
+	parentID, rootPostID, visibility, postAuthorID, _, ok := s.resolveReplyTarget(inReplyTo)
 	if !ok || parentID == "" || postAuthorID == "" {
 		return false
 	}
@@ -501,9 +501,10 @@ func (s *Service) isAddressedListMember(postID, actorURL string) bool {
 func (s *Service) limitedPostAudience(userID, postID string) (recipients []friendRecipient, limited bool) {
 	var visibility string
 	var groupID, parentID *string
+	var externalOnly bool
 	if err := s.db.QueryRow(`
-		SELECT visibility, group_id, parent_id FROM posts WHERE id = $1 AND author_id = $2
-	`, postID, userID).Scan(&visibility, &groupID, &parentID); err != nil {
+		SELECT visibility, group_id, parent_id, external_only FROM posts WHERE id = $1 AND author_id = $2
+	`, postID, userID).Scan(&visibility, &groupID, &parentID, &externalOnly); err != nil {
 		return nil, false
 	}
 
@@ -521,6 +522,13 @@ func (s *Service) limitedPostAudience(userID, postID string) (recipients []frien
 	}
 
 	switch {
+	// AGORA-373: an external_only post is stored 'private' but was delivered
+	// to the Fediverse exactly like a public post — its edit/delete must take
+	// the same public path (deliverToFollowers + relays), not the limited
+	// path below, which would otherwise report an empty, no-op audience and
+	// leave the withdrawal or correction never sent.
+	case externalOnly:
+		return nil, false
 	case visibility == "friends":
 		return s.remoteFriendRecipients(userID), true
 	case visibility == "group" && groupID != nil:
@@ -528,9 +536,10 @@ func (s *Service) limitedPostAudience(userID, postID string) (recipients []frien
 	case visibility == "public":
 		return nil, false
 	default:
-		// 'private' and anything unrecognised: limited, with no federated
-		// audience. Returning limited=true is the point, since it keeps the
-		// caller off the public path rather than broadcasting to followers.
+		// Plain 'private' and anything unrecognised: limited, with no
+		// federated audience. Returning limited=true is the point, since it
+		// keeps the caller off the public path rather than broadcasting to
+		// followers.
 		return nil, true
 	}
 }

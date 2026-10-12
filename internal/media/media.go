@@ -424,6 +424,33 @@ func convertHEIC(data []byte) ([]byte, error) {
 	return os.ReadFile(outPath)
 }
 
+// ShrinkToFit re-encodes an image as a JPEG of at most maxBytes, lowering
+// quality and then dimensions until it fits. Data already under the limit is
+// returned untouched. Used where a downstream network caps blob size (Bluesky
+// rejects image blobs over 1,000,000 bytes).
+func ShrinkToFit(data []byte, maxBytes int) ([]byte, string, error) {
+	if len(data) <= maxBytes {
+		return data, "", nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", err
+	}
+	for _, dim := range []int{2000, 1600, 1280, 1000, 800} {
+		resized := resizeToFit(img, dim, dim)
+		for _, q := range []int{85, 75, 65} {
+			var buf bytes.Buffer
+			if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: q}); err != nil {
+				return nil, "", err
+			}
+			if buf.Len() <= maxBytes {
+				return buf.Bytes(), "image/jpeg", nil
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("image cannot be shrunk under %d bytes", maxBytes)
+}
+
 // resizeToFit scales img down to fit within maxW×maxH preserving aspect ratio.
 // Uses a fast box-filter (average of source pixels) for large downscales,
 // and bilinear for small adjustments.

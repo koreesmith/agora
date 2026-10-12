@@ -9,11 +9,28 @@ docker compose up -d --build
 ```
 
 Services started:
-- `postgres:16` on internal port 5432
+- `postgres:16` on internal port 5432 (also published on the host per `POSTGRES_PORT`, loopback-only by default)
 - `redis:7` on internal port 6379
 - `agora-backend` on internal port 8080
 - `agora-frontend` (React + nginx) on internal port 80
-- `nginx` reverse proxy on **port 80** (public)
+- `nginx` reverse proxy on **port 80 / 443** (public)
+
+### Host ports
+
+The public and database host ports are set in `.env`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HTTP_PORT` | `80` | Host port for nginx plain HTTP |
+| `HTTPS_PORT` | `443` | Host port for nginx HTTPS |
+| `POSTGRES_PORT` | `127.0.0.1:5432` | Host binding for Postgres; use a bare port to expose on all interfaces |
+
+Only change `HTTP_PORT` / `HTTPS_PORT` when running behind an external load
+balancer / TLS-terminating proxy or alongside another web server. Two
+caveats: `setup-ssl.sh` needs the host reachable on port 80 for the
+Let's Encrypt HTTP-01 challenge, and a non-standard port becomes part of
+every federated URL, so `INSTANCE_DOMAIN` must include it (e.g.
+`https://yourdomain.com:8443`).
 
 ## SSL / HTTPS
 

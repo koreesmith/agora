@@ -326,6 +326,8 @@ export const customDomainApi = {
   claim:   (domain: string) => api.post('/custom-domain', { domain }),
   verify:  ()               => api.post('/custom-domain/verify'),
   release: ()               => api.delete('/custom-domain'),
+  // AGORA-361: claim + verify + approve the instance's own domain in one call.
+  useInstanceDomain: () => api.post('/custom-domain/use-instance-domain'),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────

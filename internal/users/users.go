@@ -766,7 +766,18 @@ func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
 	if results == nil {
 		results = []DiscoverUser{}
 	}
-	writeJSON(w, 200, map[string]any{"users": results})
+
+	// AGORA-364: a second, clearly separate source, users on instances this
+	// one is directly federated with. These are light previews, not local
+	// user rows, so they carry no id, mutual-friend, or friend-status
+	// information the way the local suggestions above do, adding one goes
+	// through the federated lookup first.
+	peerSuggestions := federation.SuggestPeerUsers(s.db)
+	if peerSuggestions == nil {
+		peerSuggestions = []federation.PeerUserSuggestion{}
+	}
+
+	writeJSON(w, 200, map[string]any{"users": results, "federated_suggestions": peerSuggestions})
 }
 
 // ── Mention search (for @tagging autocomplete) ────────────────────────────────

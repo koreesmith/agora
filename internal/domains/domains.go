@@ -83,6 +83,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.With(limitByUser(10, time.Hour)).Post("/custom-domain", s.Claim)
 	r.With(limitByUser(20, time.Hour)).Post("/custom-domain/verify", s.Verify)
 	r.Delete("/custom-domain", s.Release)
+	// AGORA-361: one action instead of the claim/verify pair above, since the
+	// instance's own web server is what would answer the challenge anyway.
+	r.With(limitByUser(10, time.Hour)).Post("/custom-domain/use-instance-domain", s.ClaimInstanceDomain)
 }
 
 // RegisterAdminRoutes wires the approval queue (AGORA-286). Mounted by main
@@ -156,6 +159,40 @@ func (s *Service) fallbackHandle(username string) string {
 	return username + "." + domainFromURL(s.cfg.InstanceDomain)
 }
 
+// singleUserDomainHandleEnabled reads the AGORA-361 instance-wide switch.
+// Same absent-key-means-off convention as approvalMode.
+func (s *Service) singleUserDomainHandleEnabled() bool {
+	var val string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'single_user_domain_handle'`).Scan(&val)
+	return val == "true"
+}
+
+// soleRealUserID returns the id of this instance's one real (local,
+// non-deleted) user, and false if there is anything other than exactly one:
+// zero, or more than one. Called on every use, not cached: the whole point is
+// that a second signup makes this stop being true immediately, without
+// anyone having to notice and turn a setting off.
+func (s *Service) soleRealUserID() (string, bool) {
+	rows, err := s.db.Query(`
+		SELECT id FROM users WHERE is_remote = false AND deletion_scheduled_at IS NULL LIMIT 2
+	`)
+	if err != nil {
+		return "", false
+	}
+	defer rows.Close()
+
+	var id string
+	n := 0
+	for rows.Next() {
+		n++
+		if n > 1 {
+			return "", false
+		}
+		rows.Scan(&id)
+	}
+	return id, n == 1
+}
+
 func domainFromURL(u string) string {
 	u = strings.TrimPrefix(u, "https://")
 	u = strings.TrimPrefix(u, "http://")
@@ -176,12 +213,19 @@ func (s *Service) GetMine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	instanceDomain := domainFromURL(s.cfg.InstanceDomain)
+	solo, soleUser := s.soleRealUserID()
+
 	resp := map[string]any{
 		"approval_mode":   s.approvalMode(),
 		"fallback_handle": s.fallbackHandle(username),
 		"current_handle":  s.fallbackHandle(username),
 		"claim":           nil,
 		"available":       true,
+		// AGORA-361: whether the "use this instance's own domain" shortcut
+		// should be offered at all, and what domain it would claim.
+		"instance_domain":              instanceDomain,
+		"single_user_domain_available": s.singleUserDomainHandleEnabled() && soleUser && solo == userID,
 	}
 
 	// A DID the user doesn't have yet is not an error here — it just means
@@ -296,6 +340,71 @@ func (s *Service) Claim(w http.ResponseWriter, r *http.Request) {
 		"did":          did,
 		"instructions": instructionsFor(domain, did),
 	})
+}
+
+// ClaimInstanceDomain is AGORA-361's shortcut for the one case where DNS
+// verification is a formality: a single-user instance's own domain, which
+// its own web server already answers for. It claims, verifies, and approves
+// in one call instead of the claim/add-a-record/verify sequence a real
+// third-party domain needs, and skips normalizeDomain's refusal of the
+// instance's own domain and assertClaimable's race-with-other-accounts
+// check on purpose: neither applies when there is, and can only ever be, one
+// account this could possibly belong to.
+func (s *Service) ClaimInstanceDomain(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+
+	if !s.singleUserDomainHandleEnabled() {
+		writeError(w, 403, "this instance has not turned on using its own domain as a handle")
+		return
+	}
+	solo, ok := s.soleRealUserID()
+	if !ok {
+		writeError(w, 409, "this instance does not have exactly one user, so its domain can't be claimed by just one of them")
+		return
+	}
+	if solo != userID {
+		writeError(w, 403, "forbidden")
+		return
+	}
+
+	domain := domainFromURL(s.cfg.InstanceDomain)
+
+	did, err := s.atp.EnsureUserDID(userID)
+	if err != nil {
+		writeError(w, 409, err.Error())
+		return
+	}
+
+	// Pre-approved before the verify call below, so runCheck's own
+	// live-transition bookkeeping (AnnounceHandleChange, the custom_domain_live
+	// notification) fires exactly once, the same way it would for a claim an
+	// admin approved before the DNS caught up.
+	var claim *Claim
+	err = s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM custom_domains WHERE user_id = $1 AND protocol = $2`,
+			userID, ProtocolATProto); err != nil {
+			return err
+		}
+		var err error
+		claim, err = scanClaim(tx.QueryRow(`
+			INSERT INTO custom_domains (user_id, domain, protocol, approval_status, reviewed_at)
+			VALUES ($1, $2, $3, 'approved', NOW())
+			RETURNING `+claimCols, userID, domain, ProtocolATProto))
+		return err
+	})
+	if err != nil {
+		log.Printf("domains: instance-domain claim failed for user %s: %v", userID, err)
+		writeError(w, 500, "could not save claim")
+		return
+	}
+
+	updated, err := s.runCheck(r.Context(), userID, claim, did, false)
+	if err != nil {
+		writeError(w, 500, "could not verify this instance's own domain")
+		return
+	}
+
+	writeJSON(w, 200, map[string]any{"claim": updated, "did": did})
 }
 
 // assertClaimable enforces AGORA-290's "not two accounts at once" rule. A
@@ -507,7 +616,12 @@ func (s *Service) AdminList(w http.ResponseWriter, r *http.Request) {
 		c.Live = isLive(c.VerificationStatus, c.ApprovalStatus)
 		claims = append(claims, c)
 	}
-	writeJSON(w, 200, map[string]any{"domains": claims, "approval_mode": s.approvalMode()})
+	writeJSON(w, 200, map[string]any{
+		"domains":                   claims,
+		"approval_mode":             s.approvalMode(),
+		"single_user_domain_handle": s.singleUserDomainHandleEnabled(),
+		"instance_domain":           domainFromURL(s.cfg.InstanceDomain),
+	})
 }
 
 // AdminApprove makes a verified claim live. It refuses to approve a claim

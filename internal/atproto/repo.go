@@ -162,14 +162,14 @@ func (s *Service) SyncProfile(userID string) {
 		rec.Description = &bio
 	}
 	if avatarURL != "" {
-		if blob, err := s.uploadImageBlob(ctx, bs, avatarURL); err != nil {
+		if blob, err := s.uploadBlob(ctx, bs, avatarURL); err != nil {
 			log.Printf("atproto: could not upload avatar blob for user %s: %v", userID, err)
 		} else {
 			rec.Avatar = blob
 		}
 	}
 	if coverURL != "" {
-		if blob, err := s.uploadImageBlob(ctx, bs, coverURL); err != nil {
+		if blob, err := s.uploadBlob(ctx, bs, coverURL); err != nil {
 			log.Printf("atproto: could not upload cover blob for user %s: %v", userID, err)
 		} else {
 			rec.Banner = blob

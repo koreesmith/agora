@@ -83,7 +83,26 @@ func (s *Service) resolveBlueskyActor(ctx context.Context, actor string) (*blues
 // this instance's own follows of them), so there's no local count to read;
 // the AppView's own profile view already returns all four fields in one
 // call, the same one resolveBlueskyActor already uses.
+// remoteActorStatsTTL mirrors federation's own constant of the same name
+// (AGORA-355) — kept as a separate copy rather than a shared import since
+// the two packages don't otherwise depend on each other, only on the same
+// underlying remote_actor_stats table.
+const remoteActorStatsTTL = 30 * time.Minute
+
 func (s *Service) GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
+	if followers, following, posts, bio, _, fetchedAt, hit := s.cachedRemoteActorStats(did); hit {
+		if time.Since(fetchedAt) >= remoteActorStatsTTL {
+			go s.fetchAndCacheRemoteActorStats(did)
+		}
+		return followers, following, posts, bio, true
+	}
+	return s.fetchAndCacheRemoteActorStats(did)
+}
+
+// fetchAndCacheRemoteActorStats does the live AppView call GetRemoteActorStats
+// used to do unconditionally on every call (AGORA-355) — now only reached on
+// a cache miss or background refresh.
+func (s *Service) fetchAndCacheRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
 	profile, err := bsky.ActorGetProfile(context.Background(), s.appviewClient(), did)
 	if err != nil || profile == nil {
 		return 0, 0, 0, "", false
@@ -100,7 +119,32 @@ func (s *Service) GetRemoteActorStats(did string) (followers, following, posts i
 	if profile.Description != nil {
 		bio = *profile.Description
 	}
+	s.cacheRemoteActorStats(did, followers, following, posts, bio)
 	return followers, following, posts, bio, true
+}
+
+// cachedRemoteActorStats/cacheRemoteActorStats share the remote_actor_stats
+// table with federation's own identically-named helpers (see that package's
+// activitypub.go) — the same table, keyed by either an ap_actor_url or a
+// Bluesky DID, which never collide in practice (one always starts with
+// "https://", the other always with "did:"). locked has no AT Proto
+// equivalent, so it's always written/read as false here.
+func (s *Service) cachedRemoteActorStats(actorKey string) (followers, following, posts int, bio string, locked bool, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`
+		SELECT followers, following, posts, bio, locked, fetched_at FROM remote_actor_stats WHERE actor_key = $1
+	`, actorKey).Scan(&followers, &following, &posts, &bio, &locked, &fetchedAt)
+	return followers, following, posts, bio, locked, fetchedAt, err == nil
+}
+
+func (s *Service) cacheRemoteActorStats(actorKey string, followers, following, posts int, bio string) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_stats (actor_key, followers, following, posts, bio, locked, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, false, NOW())
+		ON CONFLICT (actor_key) DO UPDATE
+		  SET followers = $2, following = $3, posts = $4, bio = $5, fetched_at = NOW()
+	`, actorKey, followers, following, posts, bio); err != nil {
+		log.Printf("atproto: failed to cache remote actor stats for %s: %v", actorKey, err)
+	}
 }
 
 // ResolveBlueskyHandle serves the "search a Bluesky handle" step (AGORA-195)

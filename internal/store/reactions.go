@@ -18,6 +18,21 @@ var ValidReactions = map[string]bool{
 // older shapes described below.
 func IsValidReaction(t string) bool { return ValidReactions[t] }
 
+// FederatesAsLike is the valence split (AGORA-359/360): neither ActivityPub
+// nor Bluesky has any concept of a named/emoji reaction, only a plain Like.
+// A positive-or-neutral reaction is close enough to that plain Like that
+// showing one there beats showing nothing at all, but a negative reaction
+// (sad/angry/dislike) has no equivalent on either protocol, and mapping it
+// to a Like would misrepresent what actually happened, so it stays
+// local-only for a target that can't represent it honestly. Shared by
+// internal/feed (deciding what to send at all) and internal/federation
+// (falling back to this exact split for any target that isn't a confirmed
+// Agora peer, which gets the real reaction type instead — see AGORA-360).
+var FederatesAsLike = map[string]bool{
+	"like": true, "love": true, "laugh": true, "wow": true, "care": true,
+	"thankful": true, "pride": true,
+}
+
 // Shapes older clients still send, mapped onto their canonical replacements.
 //
 // The mobile app ships through the App Store with no minimum-version check or

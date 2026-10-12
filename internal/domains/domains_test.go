@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/ctxkeys"
 	"github.com/agora-social/agora/internal/store"
 )
 
@@ -99,6 +100,114 @@ func TestNormalizeDomain(t *testing.T) {
 			t.Errorf("normalizeDomain(%q) = %q, want an error", in, got)
 		}
 	}
+}
+
+// setInstanceSetting sets an instance_settings value for the duration of the
+// test and restores whatever was there before, the same save/restore pattern
+// internal/atproto's enableATProto uses. instance_settings is one shared
+// table, not something a test gets its own copy of.
+func setInstanceSetting(t *testing.T, db *store.DB, key, value string) {
+	t.Helper()
+	var prev string
+	db.QueryRow(`SELECT value FROM instance_settings WHERE key = $1`, key).Scan(&prev)
+	db.Exec(`INSERT INTO instance_settings (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = $2`, key, value)
+	t.Cleanup(func() { db.Exec(`UPDATE instance_settings SET value = $1 WHERE key = $2`, prev, key) })
+}
+
+// TestSingleUserDomainHandleEnabled covers the AGORA-361 instance-wide switch
+// itself: off by default, and reading back whatever an admin sets it to.
+func TestSingleUserDomainHandleEnabled(t *testing.T) {
+	db := testDB(t)
+	s := testService(db)
+
+	setInstanceSetting(t, db, "single_user_domain_handle", "false")
+	if s.singleUserDomainHandleEnabled() {
+		t.Error("expected the switch to read false")
+	}
+
+	setInstanceSetting(t, db, "single_user_domain_handle", "true")
+	if !s.singleUserDomainHandleEnabled() {
+		t.Error("expected the switch to read true")
+	}
+}
+
+// TestSoleRealUserID checks the count-based gate against whatever the shared
+// test database's real user count actually is, rather than assuming it:
+// hundreds of accounts seeded and cleaned up by other tests already live in
+// this table, so asserting "exactly one" here would mean either trusting that
+// no other test left something behind, or unsafely quarantining every
+// existing row for the duration of this one. Comparing the function's answer
+// to an independently-computed count is exact either way.
+func TestSoleRealUserID(t *testing.T) {
+	db := testDB(t)
+	s := testService(db)
+
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM users WHERE is_remote = false AND deletion_scheduled_at IS NULL
+	`).Scan(&count); err != nil {
+		t.Fatalf("count real users: %v", err)
+	}
+
+	id, ok := s.soleRealUserID()
+	if count == 1 {
+		if !ok {
+			t.Error("soleRealUserID() = false, want true when exactly one real user exists")
+		}
+	} else {
+		if ok {
+			t.Errorf("soleRealUserID() = true (id %q), want false with %d real users", id, count)
+		}
+	}
+
+	// A second real user must flip a currently-true answer to false: the one
+	// transition the whole feature depends on noticing without anyone having
+	// to turn a setting off by hand.
+	if count == 1 && ok {
+		seedUser(t, db, "agora361_second")
+		if _, stillOK := s.soleRealUserID(); stillOK {
+			t.Error("soleRealUserID() stayed true after a second real user was added")
+		}
+	}
+}
+
+// TestClaimInstanceDomainGating covers the refusals that don't depend on the
+// instance actually being single-user, since the shared test database
+// already has far more than one real user and there is no safe way to make
+// it fewer for this test's duration.
+func TestClaimInstanceDomainGating(t *testing.T) {
+	db := testDB(t)
+	s := testService(db)
+	userID, _ := seedUser(t, db, "agora361_gating")
+
+	authedRequest := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/custom-domain/use-instance-domain", nil)
+		return req.WithContext(context.WithValue(req.Context(), ctxkeys.UserID, userID))
+	}
+
+	t.Run("switch off", func(t *testing.T) {
+		setInstanceSetting(t, db, "single_user_domain_handle", "false")
+		w := httptest.NewRecorder()
+		s.ClaimInstanceDomain(w, authedRequest())
+		if w.Code != 403 {
+			t.Errorf("status = %d, want 403 with the switch off", w.Code)
+		}
+	})
+
+	t.Run("more than one real user", func(t *testing.T) {
+		var count int
+		db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false AND deletion_scheduled_at IS NULL`).Scan(&count)
+		if count == 1 {
+			t.Skip("this test database happens to have exactly one real user right now")
+		}
+		setInstanceSetting(t, db, "single_user_domain_handle", "true")
+		w := httptest.NewRecorder()
+		s.ClaimInstanceDomain(w, authedRequest())
+		if w.Code != 409 {
+			t.Errorf("status = %d, want 409 with more than one real user", w.Code)
+		}
+	})
 }
 
 // TestAssertClaimableBlocksOtherAccounts is AGORA-290's core rule: while one

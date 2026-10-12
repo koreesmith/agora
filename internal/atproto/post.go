@@ -129,6 +129,12 @@ func (s *Service) pollOptions(ctx context.Context, postID string) ([]string, err
 // Images are AGORA-194.
 func (s *Service) BroadcastPost(userID, postID string) {
 	if !s.atprotoEnabled() {
+		// AGORA-357: this used to return with no trace anywhere, so an
+		// instance that simply never had AT Proto turned on in Admin >
+		// Settings (it defaults off, unlike activitypub_enabled) looked
+		// identical in the logs to one where broadcasting was working
+		// correctly and just had nothing to send.
+		log.Printf("atproto: BroadcastPost %s skipped — AT Proto disabled instance-wide", postID)
 		return
 	}
 	ctx := context.Background()
@@ -138,17 +144,26 @@ func (s *Service) BroadcastPost(userID, postID string) {
 
 	var username, content, contentWarning, did, storedPriv, repoHead, repoRev string
 	var visibility string
-	var profilePrivate, isRemote, atprotoEnabled bool
+	var profilePrivate, isRemote, atprotoEnabled, federateATProto, externalOnly bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.content_warning, p.created_at
+		       p.visibility, p.content, p.content_warning, p.created_at, p.federate_atproto, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt)
-	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &federateATProto, &externalOnly)
+	// AGORA-370: federateATProto is this post's own choice of whether to send
+	// it to Bluesky at all, re-checked here for the same defense-in-depth
+	// reason every other flag here is.
+	//
+	// AGORA-371: an external_only post is stored visibility = 'private' but
+	// addressed to the outside exactly like a public post — externalOnly
+	// widens the gate below to let it through despite that stored visibility.
+	if err != nil || (visibility != "public" && !externalOnly) || profilePrivate || isRemote || !atprotoEnabled || !federateATProto {
+		log.Printf("atproto: BroadcastPost %s skipped — err=%v visibility=%q externalOnly=%v profilePrivate=%v isRemote=%v atprotoEnabled=%v federateATProto=%v",
+			postID, err, visibility, externalOnly, profilePrivate, isRemote, atprotoEnabled, federateATProto)
 		return
 	}
 
@@ -174,7 +189,7 @@ func (s *Service) BroadcastPost(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
-		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Embed:         s.buildMediaEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
 		Facets:        linkFacetsForURLs(finalText),
 	}
@@ -222,19 +237,28 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 
 	var username, content, contentWarning, did, storedPriv, repoHead, repoRev, rkey, oldCidStr string
 	var visibility string
-	var profilePrivate, isRemote, atprotoEnabled bool
+	var profilePrivate, isRemote, atprotoEnabled, federateATProto, externalOnly bool
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.username, u.profile_private, u.is_remote, u.atproto_enabled,
 		       u.atproto_did, u.atproto_private_key, u.atproto_repo_head, u.atproto_repo_rev,
-		       p.visibility, p.content, p.content_warning, p.created_at, ap.rkey, ap.record_cid
+		       p.visibility, p.content, p.content_warning, p.created_at, ap.rkey, ap.record_cid, p.federate_atproto, p.external_only
 		FROM posts p
 		JOIN users u ON u.id = p.author_id
 		JOIN atproto_posts ap ON ap.post_id = p.id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
 	`, postID, userID).Scan(&username, &profilePrivate, &isRemote, &atprotoEnabled,
-		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &rkey, &oldCidStr)
-	if err != nil || visibility != "public" || profilePrivate || isRemote || !atprotoEnabled {
+		&did, &storedPriv, &repoHead, &repoRev, &visibility, &content, &contentWarning, &createdAt, &rkey, &oldCidStr, &federateATProto, &externalOnly)
+	// AGORA-370: federateATProto only governs whether an edit continues to
+	// reach Bluesky. In practice this is unreachable today — turning the
+	// flag off after creation isn't offered anywhere — but matches
+	// BroadcastPost's own gate so a future edit-time toggle needs no change
+	// here.
+	//
+	// AGORA-373: an external_only post is stored 'private' but was delivered
+	// to Bluesky exactly like a public post — externalOnly widens the gate
+	// below to let its edit through despite that stored visibility.
+	if err != nil || (visibility != "public" && !externalOnly) || profilePrivate || isRemote || !atprotoEnabled || !federateATProto {
 		return
 	}
 
@@ -260,7 +284,7 @@ func (s *Service) BroadcastPostUpdate(userID, postID string) {
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          finalText,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
-		Embed:         s.buildImageEmbed(ctx, bs, postID),
+		Embed:         s.buildMediaEmbed(ctx, bs, postID),
 		Labels:        labelsForContentWarning(contentWarning),
 		Facets:        linkFacetsForURLs(finalText),
 	}

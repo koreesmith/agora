@@ -165,15 +165,25 @@ func (s *Service) verifyInboundSignature(r *http.Request, body []byte) (string, 
 		}
 	}
 
-	pubKey, err := s.fetchActorPublicKeySigned(sp.keyID)
+	pubKey, fromCache, err := s.fetchActorPublicKeySigned(sp.keyID)
 	if err != nil {
 		return "", fmt.Errorf("fetch actor public key: %w", err)
 	}
 
 	signingString := buildSigningString(r, sp.headers)
 	hashed := sha256.Sum256([]byte(signingString))
-	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed[:], sp.signature); err != nil {
-		return "", fmt.Errorf("signature verification failed: %w", err)
+	verifyErr := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed[:], sp.signature)
+	if verifyErr != nil && fromCache {
+		// The cached key may simply be stale (the remote rotated it since we
+		// last fetched) rather than the signature being forged — one live
+		// re-fetch before giving up, so a rotation doesn't sit broken until
+		// remoteActorKeyTTL expires.
+		if liveKey, liveErr := s.fetchActorPublicKeyLive(sp.keyID); liveErr == nil {
+			verifyErr = rsa.VerifyPKCS1v15(liveKey, crypto.SHA256, hashed[:], sp.signature)
+		}
+	}
+	if verifyErr != nil {
+		return "", fmt.Errorf("signature verification failed: %w", verifyErr)
 	}
 	return strings.SplitN(sp.keyID, "#", 2)[0], nil
 }

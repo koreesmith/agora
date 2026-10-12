@@ -812,10 +812,15 @@ func (s *Service) InstanceRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"rules": rules})
 }
 
+// AGORA-356: both counts below used to have no is_remote filter at all,
+// unlike every other user/post count in the codebase (admin's GetStats,
+// federation's instance-info endpoints) — so this instance's public landing
+// page reported every cached federated/Bluesky user stub and every ingested
+// remote post as if they were accounts and posts of this instance.
 func (s *Service) PublicStats(w http.ResponseWriter, r *http.Request) {
 	var userCount, postCount int
-	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE deletion_scheduled_at IS NULL`).Scan(&userCount)
-	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL AND parent_id IS NULL`).Scan(&postCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE deletion_scheduled_at IS NULL AND is_remote = false`).Scan(&userCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL AND parent_id IS NULL AND is_remote = false`).Scan(&postCount)
 	writeJSON(w, 200, map[string]any{
 		"user_count": userCount,
 		"post_count": postCount,

@@ -14,10 +14,12 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/store"
 )
 
 // Standard ActivityPub support — WebFinger, actor documents, HTTP-Signature
@@ -37,16 +39,41 @@ type apUser struct {
 	CoverURL    string
 	PubKeyPEM   string
 	PrivKeyPEM  string
+	// Private is only ever true when this row came back from
+	// apEligibleUserIdentityOnly (AGORA-366). apEligibleUser itself never
+	// returns a private profile at all, so callers using that one can ignore
+	// this field entirely.
+	Private bool
 }
 
 // apEligibleUser returns the given local username if it's eligible to be
-// federated: exists, local, not private, not scheduled for deletion, and
-// hasn't opted out via the per-account activitypub_enabled column. Also
-// checks the instance-wide activityPubEnabled() setting (AGORA-156) — not
-// the same thing despite the similar name: that one is an admin-controlled
-// instance_settings key, this column is a per-user opt-out. Used by every AP
-// endpoint (WebFinger, actor doc, Outbox, Followers, inbound Follow) so both
-// eligibility rules stay in exactly one place.
+// resolved as an ActivityPub actor: exists, local, not private, not
+// scheduled for deletion. Also checks the instance-wide activityPubEnabled()
+// setting (AGORA-156), not the same thing despite the similar name: that
+// one is an admin-controlled instance_settings key, a full kill switch for
+// the whole instance. Used by every AP discovery endpoint (WebFinger, actor
+// doc, Outbox, Followers, inbound Follow) so this eligibility rule stays in
+// exactly one place.
+//
+// AGORA-365: deliberately does NOT check the per-account activitypub_enabled
+// opt-out. That flag's own Settings copy is framed entirely as "talk to
+// Mastodon and the rest of the fediverse", but WebFinger and actor
+// resolution are also the only mechanism Agora-to-Agora federation has for
+// finding someone on a directly peered instance (there is no separate,
+// signed "this GET came from a trusted Agora peer, not a random fediverse
+// server" channel; both are the identical anonymous, unauthenticated
+// request). Gating discovery on it meant a user who opted out of Mastodon
+// specifically also became unfindable by an instance their own admin chose
+// to peer with deliberately, which is a narrower, admin-curated trust
+// relationship, not the same thing.
+//
+// activitypub_enabled keeps its effect everywhere else: DeliverLike,
+// broadcasting posts/DMs/reposts, and every outbound path still check it, so
+// turning it off still means "my content and activity are never pushed out
+// over ActivityPub." It no longer also means "nobody can find or friend me,"
+// which profile_private already covers and is the actual privacy control
+// every other discovery surface in this codebase (search/users,
+// federation/search) already keys on.
 func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 	if !s.activityPubEnabled() {
 		return nil, false
@@ -57,8 +84,44 @@ func (s *Service) apEligibleUser(handle string) (*apUser, bool) {
 		       federation_public_key, federation_private_key
 		FROM users
 		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND profile_private = false
-		  AND activitypub_enabled = true AND deletion_scheduled_at IS NULL
+		  AND deletion_scheduled_at IS NULL
 	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM)
+	if err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// apEligibleUserIdentityOnly is apEligibleUser without the profile_private
+// requirement (AGORA-366): a private profile is invisible to browsing or
+// search either way (neither ever queried through here), but someone who
+// already has the exact handle should be able to confirm the account exists
+// and send a friend request, the same way a private account elsewhere still
+// turns up for an exact-username lookup even though it never appears in
+// search results.
+//
+// Deliberately narrow in what uses it. WebFinger and the actor document
+// (redacting content for a private profile, see writeActorObject) are safe:
+// neither ever handed out more than identity. A friend request is safe for
+// the same reason apEligibleUser's own doc comment gives for dropping
+// activitypub_enabled: it creates a pending request Agora's own model
+// already requires the recipient to accept before anything is shared, not an
+// automatic relationship. Outbox, Followers, Following, and a plain
+// (non-friend-request) Follow all keep using apEligibleUser instead, on
+// purpose: those hand out actual posts and social-graph data, or would let
+// a private profile be auto-followed by any fediverse account, which is a
+// real content exposure this function is not meant to allow.
+func (s *Service) apEligibleUserIdentityOnly(handle string) (*apUser, bool) {
+	if !s.activityPubEnabled() {
+		return nil, false
+	}
+	var u apUser
+	err := s.db.QueryRow(`
+		SELECT id, username, display_name, bio, avatar_url, cover_url,
+		       federation_public_key, federation_private_key, profile_private
+		FROM users
+		WHERE LOWER(username) = LOWER($1) AND is_remote = false AND deletion_scheduled_at IS NULL
+	`, handle).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Bio, &u.AvatarURL, &u.CoverURL, &u.PubKeyPEM, &u.PrivKeyPEM, &u.Private)
 	if err != nil {
 		return nil, false
 	}
@@ -101,9 +164,9 @@ type apPage struct {
 	PrivKeyPEM  string
 }
 
-// apEligiblePage mirrors apEligibleUser: requires the instance-wide
-// activityPubEnabled() toggle, the page to be public, and the page's own
-// activitypub_enabled opt-out (owner-controlled) to be true.
+// apEligiblePage mirrors apEligibleUser (see AGORA-365 there for why it no
+// longer checks the per-account/page activitypub_enabled opt-out): requires
+// the instance-wide activityPubEnabled() toggle and the page to be public.
 func (s *Service) apEligiblePage(slug string) (*apPage, bool) {
 	if !s.activityPubEnabled() {
 		return nil, false
@@ -113,7 +176,7 @@ func (s *Service) apEligiblePage(slug string) (*apPage, bool) {
 		SELECT id, slug, display_name, bio, avatar_url,
 		       federation_public_key, federation_private_key
 		FROM pages
-		WHERE LOWER(slug) = LOWER($1) AND privacy = 'public' AND activitypub_enabled = true
+		WHERE LOWER(slug) = LOWER($1) AND privacy = 'public'
 	`, slug).Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Bio, &p.AvatarURL, &p.PubKeyPEM, &p.PrivKeyPEM)
 	if err != nil {
 		return nil, false
@@ -232,7 +295,12 @@ func (s *Service) WebFinger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u, ok := s.apEligibleUser(username); ok {
+	// AGORA-366: identity-only resolution, not apEligibleUser. This response
+	// is already just a subject and an actor URL, nothing a private profile
+	// would consider content, so a caller who already has the exact handle
+	// gets the same "yes, this exists" answer a private account elsewhere
+	// gives an exact-username lookup, without ever turning up in search.
+	if u, ok := s.apEligibleUserIdentityOnly(username); ok {
 		actor := s.actorURL(u.Username)
 		profile := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username
 
@@ -290,8 +358,15 @@ func (s *Service) HostMeta(w http.ResponseWriter, r *http.Request) {
 // ActivityPub JSON. The legacy flat-JSON response GetUser returns otherwise is
 // untouched.
 
+// AGORA-366: identity-only resolution, not apEligibleUser, so a private
+// profile's actor document resolves too, rather than the friend-request flow
+// having a WebFinger entry that then 404s on the very next step. A private
+// profile's object below is stripped of everything but the protocol-required
+// fields, no name, no bio, no avatar or cover, so the fact that this
+// resolves at all costs it nothing beyond confirming the handle exists,
+// which the caller already knew going in.
 func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
-	u, ok := s.apEligibleUser(handle)
+	u, ok := s.apEligibleUserIdentityOnly(handle)
 	if !ok {
 		writeError(w, 404, "user not found")
 		return
@@ -312,8 +387,6 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 		"id":                 actor,
 		"type":               "Person",
 		"preferredUsername":  u.Username,
-		"name":               u.DisplayName,
-		"summary":            u.Bio,
 		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
 		"outbox":             actor + "/outbox",
 		"followers":          actor + "/followers",
@@ -324,15 +397,19 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 			"publicKeyPem": pubPEM,
 		},
 	}
-	if u.AvatarURL != "" {
-		obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
-	}
-	// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
-	// the profile header/banner, the "icon" field's counterpart — was never
-	// set at all, so a remote follower's client never had a cover photo to
-	// show for this user regardless of anything on the receiving end.
-	if u.CoverURL != "" {
-		obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+	if !u.Private {
+		obj["name"] = u.DisplayName
+		obj["summary"] = u.Bio
+		if u.AvatarURL != "" {
+			obj["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
+		}
+		// "image" is the ActivityStreams Actor field Mastodon/Pleroma render as
+		// the profile header/banner, the "icon" field's counterpart. It was never
+		// set at all, so a remote follower's client never had a cover photo to
+		// show for this user regardless of anything on the receiving end.
+		if u.CoverURL != "" {
+			obj["image"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.CoverURL)}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
@@ -554,6 +631,52 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetPost serves a single local post's ActivityPub object representation at
+// its own object URL (.../federation/users/{handle}/posts/{postID}).
+//
+// AGORA-357: this route never existed — buildNoteObject has always minted
+// that exact URL as objID (the "id" of every Create/Update/Announce this
+// instance sends), but nothing ever served a GET on it, so any remote
+// server dereferencing a post by its own object id got a 404. That breaks
+// more than a direct lookup: Mastodon fetches a boosted, quoted, or
+// mentioned object by its id to render it, so a boost of one of this
+// instance's own posts could deliver successfully as an Announce activity
+// and still never display anything on the receiving end, because the
+// object it pointed at was unfetchable.
+//
+// Scoped to top-level posts only (parent_id IS NULL), mirroring Outbox's
+// own scope restriction just above — serving a reply/comment's object here
+// too is a separate follow-up, not attempted here.
+func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	postID := chi.URLParam(r, "postID")
+
+	u, ok := s.apEligibleUser(handle)
+	if !ok {
+		writeError(w, 404, "user not found")
+		return
+	}
+
+	var content, contentWarning, visibility, authorID string
+	var isRemote bool
+	var createdAt time.Time
+	err := s.db.QueryRow(`
+		SELECT content, content_warning, visibility, author_id, is_remote, created_at
+		FROM posts
+		WHERE id = $1 AND parent_id IS NULL AND deleted_at IS NULL
+	`, postID).Scan(&content, &contentWarning, &visibility, &authorID, &isRemote, &createdAt)
+	if err != nil || authorID != u.ID || isRemote || visibility != "public" {
+		writeError(w, 404, "post not found")
+		return
+	}
+
+	note := s.buildNoteObject(s.actorURL(u.Username), postID, content, createdAt, "", contentWarning)
+	note["@context"] = "https://www.w3.org/ns/activitystreams"
+
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(note)
+}
+
 // buildCreateActivity builds a Create activity wrapping a Note, used by the
 // Outbox (historical posts), BroadcastPublicPost (new top-level posts), and
 // DeliverReply (comment replies — inReplyTo set, to targeted at the
@@ -612,6 +735,23 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		}
 		note["attachment"] = attachments
 	}
+	// AGORA-368: same reasoning as the image block above, video was never
+	// attached at all, so a video post federated as text-only. Independent
+	// of the image check (not an else) rather than a replacement for it,
+	// since a post could in principle carry both; the compose UI keeps them
+	// mutually exclusive today, but nothing here needs to assume that.
+	if videoURL, thumbURL := s.postVideoURL(postID); videoURL != "" {
+		video := map[string]any{
+			"type":      "Video",
+			"mediaType": "video/mp4",
+			"url":       videoURL,
+		}
+		if thumbURL != "" {
+			video["icon"] = map[string]string{"type": "Image", "url": thumbURL}
+		}
+		existing, _ := note["attachment"].([]map[string]any)
+		note["attachment"] = append(existing, video)
+	}
 	return note
 }
 
@@ -640,6 +780,23 @@ func (s *Service) postImageURLs(postID string) []string {
 		return []string{s.absoluteURL(imageURL)}
 	}
 	return nil
+}
+
+// postVideoURL returns a post's attached video (and its poster thumbnail, if
+// any) as absolute URLs, mirroring postImageURLs (AGORA-368). A post has at
+// most one video (AGORA-137's own composer treats video and photos as
+// mutually exclusive), so unlike post_photos there's no ordered multi-row
+// table behind it, just the posts row's own two columns.
+func (s *Service) postVideoURL(postID string) (videoURL, thumbURL string) {
+	var v, t string
+	s.db.QueryRow(`SELECT video_url, video_thumb_url FROM posts WHERE id = $1`, postID).Scan(&v, &t)
+	if v == "" {
+		return "", ""
+	}
+	if t != "" {
+		t = s.absoluteURL(t)
+	}
+	return s.absoluteURL(v), t
 }
 
 func guessImageMediaType(url string) string {
@@ -1140,7 +1297,18 @@ func (s *Service) recordAPFollower(followedUserID, followerActor, followerInbox 
 }
 
 func (s *Service) handleInboundFollowUser(followID, followerActor, objectURL, username string, friendRequest bool) {
-	u, ok := s.apEligibleUser(username)
+	// AGORA-366: a friend request may reach a private profile (it only ever
+	// creates a pending request Agora's own model requires the recipient to
+	// accept, never an automatic relationship or shared content); a plain
+	// fediverse Follow may not, since that would let a private profile be
+	// auto-followed by any random account.
+	var u *apUser
+	var ok bool
+	if friendRequest {
+		u, ok = s.apEligibleUserIdentityOnly(username)
+	} else {
+		u, ok = s.apEligibleUser(username)
+	}
 	if !ok {
 		return
 	}
@@ -1853,7 +2021,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		return
 	}
 
-	parentID, rootPostID, visibility, postAuthorID, ok := s.resolveReplyTarget(note.InReplyTo)
+	parentID, rootPostID, visibility, postAuthorID, externalOnly, ok := s.resolveReplyTarget(note.InReplyTo)
 	if !ok {
 		return
 	}
@@ -1888,7 +2056,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	switch {
 	case forwarded:
 		// Authorised by thread ownership, verified above.
-	case visibility == "public":
+	case visibility == "public", externalOnly:
+		// AGORA-373: an external_only thread is stored 'private' but was
+		// delivered to the Fediverse exactly like a public thread, so a
+		// reply into it is opened the same way a public thread's is.
 		if profilePrivate {
 			return
 		}
@@ -1905,9 +2076,10 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 			return
 		}
 	default:
-		// A 'private' thread has no federated audience: locally that means a
-		// post the author addressed to nobody, and inbound it means a remote
-		// list post whose own instance is the one place a reply is authorised.
+		// A plain 'private' thread has no federated audience: locally that
+		// means a post the author addressed to nobody, and inbound it means a
+		// remote list post whose own instance is the one place a reply is
+		// authorised.
 		return
 	}
 
@@ -2244,19 +2416,19 @@ func (s *Service) storeInboundVideo(postID, videoURL string) {
 // so inbound replies can't create threads deeper than the UI supports.
 // inReplyTo may point at either one of our own post/comment AP object URLs,
 // or a previously-ingested remote reply (looked up by remote_post_id).
-func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, visibility, postAuthorID string, ok bool) {
+func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, visibility, postAuthorID string, externalOnly bool, ok bool) {
 	targetID := localPostIDFromURL(inReplyTo, s.cfg.InstanceDomain)
 	if targetID == "" {
 		s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND is_remote = true`, inReplyTo).Scan(&targetID)
 	}
 	if targetID == "" {
-		return "", "", "", "", false
+		return "", "", "", "", false, false
 	}
 
 	var targetParentID *string
 	if err := s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, targetID).
 		Scan(&targetParentID); err != nil {
-		return "", "", "", "", false
+		return "", "", "", "", false, false
 	}
 
 	if targetParentID == nil {
@@ -2268,17 +2440,17 @@ func (s *Service) resolveReplyTarget(inReplyTo string) (parentID, rootPostID, vi
 		var grandParentID *string
 		s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, *targetParentID).Scan(&grandParentID)
 		if grandParentID != nil {
-			return "", "", "", "", false
+			return "", "", "", "", false, false
 		}
 		rootPostID = *targetParentID
 	}
 	parentID = targetID
 
-	if err := s.db.QueryRow(`SELECT visibility, author_id FROM posts WHERE id = $1 AND deleted_at IS NULL`, rootPostID).
-		Scan(&visibility, &postAuthorID); err != nil || postAuthorID == "" {
-		return "", "", "", "", false
+	if err := s.db.QueryRow(`SELECT visibility, author_id, external_only FROM posts WHERE id = $1 AND deleted_at IS NULL`, rootPostID).
+		Scan(&visibility, &postAuthorID, &externalOnly); err != nil || postAuthorID == "" {
+		return "", "", "", "", false, false
 	}
-	return parentID, rootPostID, visibility, postAuthorID, true
+	return parentID, rootPostID, visibility, postAuthorID, externalOnly, true
 }
 
 // localPostIDFromURL extracts the trailing post/comment UUID from one of our
@@ -2450,12 +2622,12 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 		return "", "", false
 	}
 	var visibility string
-	var profilePrivate, apEnabled bool
+	var profilePrivate, apEnabled, externalOnly bool
 	err := s.db.QueryRow(`
-		SELECT p.author_id, p.visibility, u.profile_private, u.activitypub_enabled
+		SELECT p.author_id, p.visibility, u.profile_private, u.activitypub_enabled, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.deleted_at IS NULL
-	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled)
+	`, postID).Scan(&postAuthorID, &visibility, &profilePrivate, &apEnabled, &externalOnly)
 	if err != nil || !apEnabled {
 		return "", "", false
 	}
@@ -2468,14 +2640,18 @@ func (s *Service) resolveFederatableTargetFor(verifiedActor, authorizeAs, object
 	//
 	// Friends-only opens to the author's accepted friends and nobody else,
 	// which is the same rule that decided who could see the post. Everything
-	// with no federated audience yet ('group', 'private') stays closed.
+	// with no federated audience yet ('group', plain 'private') stays closed.
+	//
+	// AGORA-373: an external_only post is stored 'private' but was delivered
+	// to the Fediverse exactly like a public post, so a Like/Announce
+	// targeting it is opened the same way a public post's is.
 	switch {
 	case authorizeAs == "":
 		// Forwarded: authorised by thread ownership, verified by the caller.
 		if visibility != "friends" && visibility != "group" {
 			return "", "", false
 		}
-	case visibility == "public":
+	case visibility == "public", externalOnly:
 		if profilePrivate {
 			return "", "", false
 		}
@@ -2531,23 +2707,51 @@ func (s *Service) handleInboundLike(verifiedActor, activityActor string, objectR
 		return
 	}
 
-	// AGORA-157: write to reactions (reaction_type='like'), not the legacy
-	// likes table — the UI's like button (ReactPost) writes there, and
-	// enrichReactions (feed.go) only falls back to likes for a post that has
-	// zero reactions rows at all, so a Like landing in likes is invisible to
-	// the reaction count/list for virtually every real post. Mirrors
-	// ReactPost's own upsert + legacy-row cleanup exactly.
+	// AGORA-360: another Agora instance carries the exact reaction chosen in
+	// this custom property (see DeliverLike's outbound side) — real
+	// fediverse software never sets it, and this defaults to a plain "like"
+	// exactly as before when it's absent. Trusting a claimed value from an
+	// unconfirmed sender costs nothing worse than showing the wrong (but
+	// still validly normalized) reaction type locally, so this doesn't
+	// independently re-verify the sender's software the way DeliverLike
+	// checks isAgoraInstance on the way out.
+	reactionType := "like"
+	if len(rawActivity) > 0 {
+		var likeExt struct {
+			AgoraReaction string `json:"agoraReaction"`
+		}
+		if json.Unmarshal(rawActivity, &likeExt) == nil && likeExt.AgoraReaction != "" {
+			if normalized, ok := store.NormalizeReaction(likeExt.AgoraReaction); ok {
+				reactionType = normalized
+			}
+		}
+	}
+
+	// AGORA-157: write to reactions, not the legacy likes table — the UI's
+	// like button (ReactPost) writes there, and enrichReactions (feed.go)
+	// only falls back to likes for a post that has zero reactions rows at
+	// all, so a Like landing in likes is invisible to the reaction
+	// count/list for virtually every real post. Mirrors ReactPost's own
+	// upsert + legacy-row cleanup exactly.
+	//
+	// AGORA-360: DO UPDATE instead of the old DO NOTHING, but only when the
+	// type actually changed — WHERE reactions.reaction_type IS DISTINCT
+	// FROM $3 keeps a genuine redelivery of the same reaction a true no-op
+	// (RowsAffected=0 below, preserving the anti-redelivery-spam guard)
+	// while a real change (love -> pride from the same Agora peer) reports
+	// as affected and updates.
 	res, err := s.db.Exec(`
 		INSERT INTO reactions (user_id, post_id, reaction_type)
-		VALUES ($1, $2, 'like')
-		ON CONFLICT (user_id, post_id) DO NOTHING
-	`, remoteUserID, postID)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, post_id) DO UPDATE SET reaction_type = $3
+		WHERE reactions.reaction_type IS DISTINCT FROM $3
+	`, remoteUserID, postID, reactionType)
 	if err != nil {
 		return
 	}
 	s.db.Exec(`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, remoteUserID, postID)
 	if n, _ := res.RowsAffected(); n == 0 {
-		return // already liked — redelivery, don't re-notify
+		return // already recorded this exact reaction — redelivery, don't re-notify
 	}
 
 	// AGORA-341: forward to the rest of the audience, so a reaction count means
@@ -2930,22 +3134,16 @@ type remoteActorProfile struct {
 	ManuallyApprovesFollowers bool
 }
 
-// fetchActorPublicKeySigned dereferences an actor (or actor#key) URL to
-// obtain its publicKeyPem, signed as a local user's own actor. Instances
-// that enforce "authorized fetch" (Threads chief among them) blanket-404
-// unsigned actor GETs — which used to break verifying the HTTP Signature on
-// every inbound activity they send us, including the Accept(Follow) that
-// confirms an outbound follow, leaving it stuck "Requested" forever
-// (AGORA-175). Prefers whichever local user has a pending follow of this
-// exact actor (the common case: verifying that follow's own Accept), falling
-// back to any local user with an existing keypair, then any local user at
-// all, so inbound activities from authorized-fetch instances still verify
-// even without a matching ap_following row.
 // signerUserIDForActorFetch picks which local user's key to sign an
-// authorized-fetch actor GET with: whichever local user has a pending (or
-// past) follow of actorURL, since we already have a legitimate reason to
-// query them; failing that, any local user with an existing keypair; failing
-// that, any local user at all (getOrCreateUserKeyPair lazily generates one).
+// authorized-fetch actor GET with. Instances that enforce "authorized fetch"
+// (Threads chief among them) blanket-404 unsigned actor GETs — which used to
+// break verifying the HTTP Signature on every inbound activity they send us,
+// including the Accept(Follow) that confirms an outbound follow, leaving it
+// stuck "Requested" forever (AGORA-175). Prefers whichever local user has a
+// pending (or past) follow of actorURL, since we already have a legitimate
+// reason to query them; failing that, any local user with an existing
+// keypair; failing that, any local user at all (getOrCreateUserKeyPair
+// lazily generates one).
 func (s *Service) signerUserIDForActorFetch(actorURL string) string {
 	var userID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
@@ -2958,7 +3156,63 @@ func (s *Service) signerUserIDForActorFetch(actorURL string) string {
 	return userID
 }
 
-func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error) {
+// remoteActorKeyTTL bounds how long a cached actor public key (AGORA-354) is
+// trusted before fetchActorPublicKeySigned falls back to a live fetch again,
+// independent of whether verifyInboundSignature's own refresh-on-mismatch
+// ever triggers for that actor.
+const remoteActorKeyTTL = 24 * time.Hour
+
+// fetchActorPublicKeySigned resolves an actor's HTTP-Signature public key,
+// preferring a cached copy (remote_actor_keys, AGORA-354) over a live signed
+// fetch. Before this cache existed, every inbound federated request paid for
+// a live actor-document GET here — up to fedHTTPClient's 10s timeout — and
+// any transient failure of that fetch (timeout, remote 5xx, DNS hiccup)
+// failed signature verification outright, which the sender's delivery queue
+// then recorded as a failed attempt and backed off on (see AGORA-353's
+// exponential retry schedule). fromCache tells the caller whether this
+// result came from the cache, so it knows whether a subsequent verification
+// failure is worth one live re-fetch (the remote side may have rotated its
+// key) rather than being a genuine forgery.
+func (s *Service) fetchActorPublicKeySigned(keyID string) (key *rsa.PublicKey, fromCache bool, err error) {
+	actorURL := strings.SplitN(keyID, "#", 2)[0]
+
+	if pubPEM, fetchedAt, ok := s.cachedActorPublicKeyPEM(actorURL); ok && time.Since(fetchedAt) < remoteActorKeyTTL {
+		if key, err := parseRSAPublicKeyPEM(pubPEM); err == nil {
+			return key, true, nil
+		}
+		// Fall through and refetch live if the cached PEM is somehow unparseable.
+	}
+
+	key, err = s.fetchActorPublicKeyLive(keyID)
+	return key, false, err
+}
+
+// cachedActorPublicKeyPEM looks up a previously-cached actor public key.
+// Returns ok=false on a cache miss; the caller is responsible for checking
+// fetchedAt against remoteActorKeyTTL since a stale-but-present row is still
+// useful as the pre-refresh key in the refresh-on-mismatch path.
+func (s *Service) cachedActorPublicKeyPEM(actorURL string) (pubPEM string, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`SELECT public_key_pem, fetched_at FROM remote_actor_keys WHERE actor_url = $1`, actorURL).
+		Scan(&pubPEM, &fetchedAt)
+	return pubPEM, fetchedAt, err == nil
+}
+
+func (s *Service) cacheActorPublicKeyPEM(actorURL, pubPEM string) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_keys (actor_url, public_key_pem, fetched_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (actor_url) DO UPDATE SET public_key_pem = $2, fetched_at = NOW()
+	`, actorURL, pubPEM); err != nil {
+		log.Printf("federation: failed to cache actor public key for %s: %v", actorURL, err)
+	}
+}
+
+// fetchActorPublicKeyLive always dereferences the actor document over the
+// network (never the cache) — the original behavior of this file's
+// fetchActorPublicKeySigned before AGORA-354 added caching in front of it.
+// Used both for a cache miss and for verifyInboundSignature's
+// refresh-on-mismatch retry when a cached key fails to verify.
+func (s *Service) fetchActorPublicKeyLive(keyID string) (*rsa.PublicKey, error) {
 	actorURL := strings.SplitN(keyID, "#", 2)[0]
 
 	userID := s.signerUserIDForActorFetch(actorURL)
@@ -3004,7 +3258,12 @@ func (s *Service) fetchActorPublicKeySigned(keyID string) (*rsa.PublicKey, error
 	if actor.PublicKey.PublicKeyPem == "" {
 		return nil, fmt.Errorf("actor has no publicKeyPem")
 	}
-	return parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
+	key, err := parseRSAPublicKeyPEM(actor.PublicKey.PublicKeyPem)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheActorPublicKeyPEM(actorURL, actor.PublicKey.PublicKeyPem)
+	return key, nil
 }
 
 // fetchActorProfileSigned dereferences a remote actor URL (via the SSRF-safe
@@ -3203,7 +3462,32 @@ func (s *Service) fetchCollectionTotal(userID, collectionURL string) (int, bool)
 // than in a method of its own precisely because this call already dereferences
 // the actor document on every remote profile view — a separate accessor would
 // double the fetches to read a field the response already contains.
+// remoteActorStatsTTL bounds how long cached remote actor stats
+// (remote_actor_stats, AGORA-355) are served without a refresh.
+const remoteActorStatsTTL = 30 * time.Minute
+
 func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool) {
+	if followers, following, posts, bio, locked, fetchedAt, hit := s.cachedRemoteActorStats(actorURL); hit {
+		if time.Since(fetchedAt) >= remoteActorStatsTTL {
+			// Stale: still serve it immediately (better than blocking the
+			// request on a live fetch) and refresh in the background so the
+			// next viewer gets current numbers.
+			go s.fetchAndCacheRemoteActorStats(actorURL)
+		}
+		return followers, following, posts, bio, locked, true
+	}
+	// Cache miss (an actor nobody here has viewed before) — nothing to show
+	// yet, so this one has to be a live fetch. Rare in steady state; every
+	// later view of this same actor is served from cache.
+	return s.fetchAndCacheRemoteActorStats(actorURL)
+}
+
+// fetchAndCacheRemoteActorStats does the live network fetch GetRemoteActorStats
+// used to do unconditionally on every call (AGORA-355) — now only reached on
+// a cache miss or background refresh. The three collection-total fetches run
+// concurrently rather than sequentially, cutting the worst case (each up to
+// fedHTTPClient's 10s timeout) from ~30s to ~10s.
+func (s *Service) fetchAndCacheRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool) {
 	signerID := s.signerUserIDForActorFetch(actorURL)
 	if signerID == "" {
 		return 0, 0, 0, "", false, false
@@ -3212,10 +3496,36 @@ func (s *Service) GetRemoteActorStats(actorURL string) (followers, following, po
 	if err != nil {
 		return 0, 0, 0, "", false, false
 	}
-	followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL)
-	following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL)
-	posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL)
-	return followers, following, posts, HTMLToPlainText(profile.Summary), profile.ManuallyApprovesFollowers, true
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); followers, _ = s.fetchCollectionTotal(signerID, profile.FollowersURL) }()
+	go func() { defer wg.Done(); following, _ = s.fetchCollectionTotal(signerID, profile.FollowingURL) }()
+	go func() { defer wg.Done(); posts, _ = s.fetchCollectionTotal(signerID, profile.OutboxURL) }()
+	wg.Wait()
+
+	bio = HTMLToPlainText(profile.Summary)
+	locked = profile.ManuallyApprovesFollowers
+	s.cacheRemoteActorStats(actorURL, followers, following, posts, bio, locked)
+	return followers, following, posts, bio, locked, true
+}
+
+func (s *Service) cachedRemoteActorStats(actorKey string) (followers, following, posts int, bio string, locked bool, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`
+		SELECT followers, following, posts, bio, locked, fetched_at FROM remote_actor_stats WHERE actor_key = $1
+	`, actorKey).Scan(&followers, &following, &posts, &bio, &locked, &fetchedAt)
+	return followers, following, posts, bio, locked, fetchedAt, err == nil
+}
+
+func (s *Service) cacheRemoteActorStats(actorKey string, followers, following, posts int, bio string, locked bool) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_stats (actor_key, followers, following, posts, bio, locked, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (actor_key) DO UPDATE
+		  SET followers = $2, following = $3, posts = $4, bio = $5, locked = $6, fetched_at = NOW()
+	`, actorKey, followers, following, posts, bio, locked); err != nil {
+		log.Printf("federation: failed to cache remote actor stats for %s: %v", actorKey, err)
+	}
 }
 
 // resolveActorURLViaWebFinger is the client-side counterpart of the WebFinger
@@ -3761,17 +4071,25 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP, externalOnly bool
 	var createdAt time.Time
 	var repostOfID *string
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.repost_of_id, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt)
-	if err != nil || visibility != "public" || profilePrivate || !apEnabled {
-		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q profilePrivate=%v apEnabled=%v", postID, err, visibility, profilePrivate, apEnabled)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &repostOfID, &pollMultiple, &pollExpiresAt, &federateAP, &externalOnly)
+	// AGORA-370: federateAP is this post's own choice of whether to send it to
+	// the Fediverse at all — re-checked here, not just at the CreatePost call
+	// site, for the same defense-in-depth reason every other flag here is.
+	//
+	// AGORA-371: an external_only post is stored visibility = 'private' (so
+	// every Agora-facing surface hides it) but is addressed to the outside
+	// exactly like a public post — externalOnly widens the gate below to let
+	// it through despite that stored visibility.
+	if err != nil || (visibility != "public" && !externalOnly) || profilePrivate || !apEnabled || !federateAP {
+		log.Printf("federation: BroadcastPublicPost %s skipped — err=%v visibility=%q externalOnly=%v profilePrivate=%v apEnabled=%v federateAP=%v", postID, err, visibility, externalOnly, profilePrivate, apEnabled, federateAP)
 		return
 	}
 
@@ -3923,27 +4241,35 @@ func (s *Service) BroadcastUpdatePost(userID, postID string) {
 	}
 
 	var username, visibility, content, contentWarning string
-	var profilePrivate, apEnabled, pollMultiple bool
+	var profilePrivate, apEnabled, pollMultiple, federateAP, externalOnly bool
 	var createdAt time.Time
 	var pollExpiresAt *time.Time
 	err := s.db.QueryRow(`
-		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at
+		SELECT u.username, u.profile_private, u.activitypub_enabled, p.visibility, p.content, p.content_warning, p.created_at, p.poll_multiple_choice, p.poll_expires_at, p.federate_ap, p.external_only
 		FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1 AND p.author_id = $2 AND p.deleted_at IS NULL
-	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt)
+	`, postID, userID).Scan(&username, &profilePrivate, &apEnabled, &visibility, &content, &contentWarning, &createdAt, &pollMultiple, &pollExpiresAt, &federateAP, &externalOnly)
 	// AGORA-343: this read `visibility != "public"` and returned. Since
 	// AGORA-337 and AGORA-342 a limited post federates, so that turned every
 	// edit of one into a silent no-op: the author saw their correction and the
 	// people it was addressed to kept the original text forever, with nothing
 	// logged. A correction is usually the whole reason for an edit.
 	//
-	// profile_private is only consulted on the public path, matching
-	// BroadcastFriendsPost: it governs whether strangers can see a profile, and
-	// a limited post's recipients are not strangers.
+	// profile_private is only consulted on the public (and AGORA-373:
+	// external_only) path, matching BroadcastFriendsPost: it governs whether
+	// strangers can see a profile, and a limited post's recipients are not
+	// strangers.
 	if err != nil || !apEnabled {
 		return
 	}
-	if visibility == "public" && profilePrivate {
+	if (visibility == "public" || externalOnly) && profilePrivate {
+		return
+	}
+	// AGORA-370/373: federateAP only governs the public and external_only
+	// paths — a limited (friends or list) post's federation is unconditional
+	// and unaffected by it, same as CreatePost never consults it for those
+	// visibilities either.
+	if (visibility == "public" || externalOnly) && !federateAP {
 		return
 	}
 
@@ -4061,6 +4387,16 @@ func (s *Service) BroadcastDeletePost(userID, postID string) {
 	}
 
 	if profilePrivate {
+		return
+	}
+	// AGORA-370: a public post created with federate_ap: false never reached
+	// a single Fediverse follower in the first place, so its delete has
+	// nowhere to withdraw anything from. Defaults true so a query failure
+	// doesn't newly suppress a delete that would have gone out before this
+	// column existed.
+	federateAP := true
+	s.db.QueryRow(`SELECT federate_ap FROM posts WHERE id = $1`, postID).Scan(&federateAP)
+	if !federateAP {
 		return
 	}
 	s.deliverToFollowers(userID, activity)
@@ -4268,13 +4604,60 @@ func (s *Service) lookupRemoteTarget(postID string) (actorURL, inboxURL, remoteP
 	return actorURL, inboxURL, remotePostID, true
 }
 
-func (s *Service) DeliverLike(userID, postID string) {
+// instanceSoftwareCacheTTL bounds how long a remote domain's confirmed
+// software (remote_instance_software, AGORA-360) is trusted before
+// isAgoraInstance re-checks it. Long-lived on purpose — which software an
+// instance runs essentially never changes, unlike the actor/profile data
+// the other caches in this file hold.
+const instanceSoftwareCacheTTL = 24 * time.Hour
+
+// isAgoraInstance reports whether domain is confirmed to be running Agora,
+// caching the result so DeliverLike doesn't pay for a live fetch on every
+// single reaction. Reuses FetchInstanceInfo (federation.go) — the same
+// .well-known/agora-instance check already used for admin-initiated
+// peering — rather than a second, parallel way of asking the same question.
+func (s *Service) isAgoraInstance(domain string) bool {
+	var isAgora bool
+	var checkedAt time.Time
+	err := s.db.QueryRow(`SELECT is_agora, checked_at FROM remote_instance_software WHERE domain = $1`, domain).
+		Scan(&isAgora, &checkedAt)
+	if err == nil && time.Since(checkedAt) < instanceSoftwareCacheTTL {
+		return isAgora
+	}
+
+	_, _, _, fetchErr := s.FetchInstanceInfo(domain)
+	isAgora = fetchErr == nil
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_instance_software (domain, is_agora, checked_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (domain) DO UPDATE SET is_agora = $2, checked_at = NOW()
+	`, domain, isAgora); err != nil {
+		log.Printf("federation: failed to cache instance software for %s: %v", domain, err)
+	}
+	return isAgora
+}
+
+// DeliverLike sends a Like for userID's reactionType on postID, whose
+// author lives on a remote AP-tracked instance. AGORA-360: a confirmed
+// Agora peer gets the exact reaction (any valence — Agora-to-Agora can
+// represent all of them honestly) via the agoraReaction extension property;
+// real fediverse/unconfirmed software instead gets AGORA-359's valence
+// split — a plain Like for a positive/neutral reaction, or nothing at all
+// (retracting any Like already sent) for a negative one, since there's no
+// truthful way to send that anywhere but Agora.
+func (s *Service) DeliverLike(userID, postID, reactionType string) {
 	if !s.activityPubEnabled() {
 		return
 	}
 	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(postID)
 	if !ok {
 		log.Printf("federation: DeliverLike %s: not a remote target, skipping", postID)
+		return
+	}
+
+	isAgoraPeer := s.isAgoraInstance(domainFromURL(targetInboxURL))
+	if !isAgoraPeer && !store.FederatesAsLike[reactionType] {
+		s.DeliverUnlike(userID, postID)
 		return
 	}
 
@@ -4293,6 +4676,9 @@ func (s *Service) DeliverLike(userID, postID string) {
 		"type":     "Like",
 		"actor":    actor,
 		"object":   targetRemotePostID,
+	}
+	if isAgoraPeer {
+		activity["agoraReaction"] = reactionType
 	}
 	s.enqueueAPDelivery(userID, targetInboxURL, activity)
 }
@@ -4342,17 +4728,26 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 	if !s.activityPubEnabled() {
 		return
 	}
-	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
-	if !ok {
-		log.Printf("federation: DeliverAnnounce %s: original post %s is not a remote target, skipping direct delivery", repostID, originalPostID)
-		return
-	}
-
 	var username string
 	var apEnabled bool
 	if err := s.db.QueryRow(`SELECT username, activitypub_enabled FROM users WHERE id = $1`, userID).
 		Scan(&username, &apEnabled); err != nil || !apEnabled {
 		log.Printf("federation: DeliverAnnounce %s: reposter %s lookup failed or activitypub disabled (err=%v)", repostID, userID, err)
+		return
+	}
+
+	// AGORA-357: object used to be targetRemotePostID, computed only after
+	// requiring lookupRemoteTarget to succeed — which meant reposting
+	// anything without its own ap_actor_url (a local Agora post, or a
+	// Bluesky-origin post) returned here before ever calling
+	// deliverToFollowers, so the boost never reached the reposter's own
+	// fediverse followers at all. quotedPostURL resolves an object URL for
+	// any origin (local, AP-remote, or Bluesky), so the follower fan-out
+	// below can now always happen regardless of where the original came
+	// from.
+	objectURL := s.quotedPostURL(originalPostID)
+	if objectURL == "" {
+		log.Printf("federation: DeliverAnnounce %s: could not resolve an object URL for original post %s", repostID, originalPostID)
 		return
 	}
 
@@ -4362,33 +4757,44 @@ func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
 		"id":       actor + "/announces/" + repostID,
 		"type":     "Announce",
 		"actor":    actor,
-		"object":   targetRemotePostID,
+		"object":   objectURL,
 		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"cc":       []string{actor + "/followers"},
 	}
 	// Fan out to the reposting user's own followers (so the boost shows up
-	// in their timelines, same as any other outbound activity) and also
-	// deliver directly to the original post's author — most Agora users
-	// won't yet have fediverse followers who'd otherwise relay it, and
-	// without a direct copy the origin server would never register the
-	// boost at all.
+	// in their timelines, same as any other outbound activity) — always,
+	// regardless of the original's origin.
 	s.deliverToFollowers(userID, activity)
-	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	// Additionally deliver directly to the original post's author when it
+	// has its own AP-remote inbox — most Agora users won't yet have
+	// fediverse followers who'd otherwise relay it, and without a direct
+	// copy the origin server would never register the boost at all. Not
+	// applicable (and not an error) for a local or Bluesky-origin original,
+	// which has no AP inbox to deliver a direct copy to.
+	if _, targetInboxURL, _, ok := s.lookupRemoteTarget(originalPostID); ok {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
 }
 
 func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 	if !s.activityPubEnabled() {
 		return
 	}
-	_, targetInboxURL, targetRemotePostID, ok := s.lookupRemoteTarget(originalPostID)
-	if !ok {
-		log.Printf("federation: DeliverUnannounce %s: original post %s is not a remote target, skipping", repostID, originalPostID)
-		return
-	}
 
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil || username == "" {
 		log.Printf("federation: DeliverUnannounce %s: unreposter %s lookup failed (err=%v)", repostID, userID, err)
+		return
+	}
+
+	// AGORA-357: mirrors DeliverAnnounce's own fix — must always reach the
+	// unreposter's own followers (whatever origin the Announce being
+	// retracted pointed at), not just when the original has its own
+	// AP-remote inbox, or an Undo for a boost of a local/Bluesky-origin post
+	// would never go out even though the Announce it retracts now does.
+	objectURL := s.quotedPostURL(originalPostID)
+	if objectURL == "" {
+		log.Printf("federation: DeliverUnannounce %s: could not resolve an object URL for original post %s", repostID, originalPostID)
 		return
 	}
 
@@ -4402,11 +4808,13 @@ func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
 			"id":     actor + "/announces/" + repostID,
 			"type":   "Announce",
 			"actor":  actor,
-			"object": targetRemotePostID,
+			"object": objectURL,
 		},
 	}
 	s.deliverToFollowers(userID, activity)
-	s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	if _, targetInboxURL, _, ok := s.lookupRemoteTarget(originalPostID); ok {
+		s.enqueueAPDelivery(userID, targetInboxURL, activity)
+	}
 }
 
 // ── Outbound / Inbound Poll Vote (AGORA-268) ─────────────────────────────────
@@ -4632,15 +5040,21 @@ func (s *Service) enqueuePageAPDelivery(pageID, inboxURL string, activity any) {
 	`, pageID, inboxURL, string(payload))
 }
 
-// drainPageAPQueue mirrors drainAPQueue for page-authored deliveries.
+// drainPageAPQueue mirrors drainAPQueue for page-authored deliveries,
+// including its AGORA-353 claiming/backoff/concurrency fix.
 func (s *Service) drainPageAPQueue() {
 	rows, err := s.db.Query(`
-		SELECT id, actor_page_id, inbox_url, activity
-		FROM page_ap_delivery_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`)
+		UPDATE page_ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM page_ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, actor_page_id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
 		return
 	}
@@ -4649,30 +5063,43 @@ func (s *Service) drainPageAPQueue() {
 	type job struct {
 		id, pageID, inboxURL string
 		activity             []byte
+		attempts             int
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		if rows.Scan(&j.id, &j.pageID, &j.inboxURL, &j.activity) == nil {
+		if rows.Scan(&j.id, &j.pageID, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
 	rows.Close()
 
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
 	for _, j := range jobs {
-		sendErr := s.deliverPageAPActivity(j.pageID, j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM page_ap_delivery_queue WHERE id = $1`, j.id)
-		} else {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverPageAPActivity(j.pageID, j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM page_ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
 			s.db.Exec(`
 				UPDATE page_ap_delivery_queue
 				SET attempts = attempts + 1,
 				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
-		}
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+		}(j)
 	}
+	wg.Wait()
 }
 
 func (s *Service) deliverPageAPActivity(pageID, inboxURL string, activity []byte) error {
@@ -4765,6 +5192,36 @@ func (s *Service) enqueueAPDelivery(userID, inboxURL string, activity any) {
 // the last thing that needed it besides this one.
 const maxDeliveryAttempts = 10
 
+// deliveryBackoffCapMinutes bounds the wait between two delivery attempts.
+// AGORA-353: this used to cap at 1440 (24h), and with maxDeliveryAttempts's
+// doubling schedule (1, 2, 4, 8, 16, 32, ...) that meant a delivery stuck on
+// its 7th-9th attempt wouldn't retry again for 2-8.5 hours — indistinguishable
+// from "broken" to anyone waiting on it. 30 minutes keeps the same eventual
+// give-up point (still maxDeliveryAttempts tries) without any single wait
+// ballooning past what a transient outage should plausibly need.
+const deliveryBackoffCapMinutes = 30
+
+// apDeliveryConcurrency bounds how many outbound deliveries a single drain
+// pass sends in parallel. AGORA-353: delivery used to run strictly
+// sequentially, so one slow or dead inbox (held open up to fedHTTPClient's
+// 10s timeout) stalled every other job behind it in the same batch and held
+// this goroutine's DB connection open for the duration.
+const apDeliveryConcurrency = 8
+
+// apDeliveryClaimLease is how long a claimed row is protected from being
+// picked up again before its real outcome (success/failure) is written back.
+// AGORA-353: apQueueTicker fires every 20s regardless of whether the prior
+// drainAPQueue call finished, and drainAPQueue itself had no row locking —
+// an overrunning batch (plausible with several slow/dead inboxes in it) could
+// have its still-in-flight rows picked up a second time by the next tick's
+// goroutine, double-delivering them and doubling the DB connections held
+// blocked on outbound HTTP. The claiming UPDATE below (FOR UPDATE SKIP
+// LOCKED) prevents a literal concurrent double-claim; this lease additionally
+// covers the case where a claimed batch just takes longer than one tick to
+// finish. Comfortably above apDeliveryConcurrency's worst case (20 jobs /
+// 8 concurrent * fedHTTPClient's 10s timeout ≈ 25s).
+const apDeliveryClaimLease = 3 * time.Minute
+
 func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) {
 	var blocked bool
 	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ap_blocked_by WHERE local_user_id = $1 AND blocker_inbox_url = $2 AND blocker_inbox_url != '')`,
@@ -4784,64 +5241,98 @@ func (s *Service) enqueueAPDeliveryRaw(userID, inboxURL string, payload []byte) 
 // separate from the legacy drainQueue (federation.go) because HTTP Signatures
 // must be computed at send time (a fresh Date header each attempt), not once
 // at enqueue time like the custom protocol's embedded-signature scheme.
-func (s *Service) drainAPQueue() {
+// apDeliveryJob is one claimed row from ap_delivery_queue.
+type apDeliveryJob struct {
+	id, userID, inboxURL string
+	activity             []byte
+	attempts             int
+}
+
+// claimAPDeliveryJobs atomically claims up to 20 due rows from
+// ap_delivery_queue for this drain pass. AGORA-353: FOR UPDATE SKIP LOCKED
+// means an overlapping drain from a slow-running previous tick can't grab
+// the same rows, and the next_attempt lease it writes (apDeliveryClaimLease)
+// keeps a claimed-but-still-in-flight row from being picked up again by the
+// next tick before this batch finishes. Split out from drainAPQueue so the
+// exclusivity guarantee is directly testable without going through
+// deliverAPActivity's network call.
+func (s *Service) claimAPDeliveryJobs() ([]apDeliveryJob, error) {
 	rows, err := s.db.Query(`
-		SELECT id, actor_user_id, inbox_url, activity, attempts
-		FROM ap_delivery_queue
-		WHERE attempts < $1 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`, maxDeliveryAttempts)
+		UPDATE ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, actor_user_id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
-	type job struct {
-		id, userID, inboxURL string
-		activity             []byte
-		attempts             int
-	}
-	var jobs []job
+	var jobs []apDeliveryJob
 	for rows.Next() {
-		var j job
+		var j apDeliveryJob
 		if rows.Scan(&j.id, &j.userID, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
-	rows.Close()
+	return jobs, rows.Err()
+}
 
-	for _, j := range jobs {
-		sendErr := s.deliverAPActivity(j.userID, j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM ap_delivery_queue WHERE id = $1`, j.id)
-			continue
-		}
-		s.db.Exec(`
-			UPDATE ap_delivery_queue
-			SET attempts = attempts + 1,
-			    last_error = $1,
-			    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-			WHERE id = $2
-		`, sendErr.Error(), j.id)
-
-		// AGORA-338: this queue recorded failures to last_error and logged
-		// nothing, so a delivery path failing every time looked exactly like
-		// one with nothing to send. AGORA-325 closed that on the legacy queue;
-		// this is the same gap on the queue that now carries everything,
-		// including friend requests and friends-only posts.
-		//
-		// First failure and final abandonment only. A peer down for a day would
-		// otherwise produce a line per activity per retry, and the noise is what
-		// makes a log stop being read.
-		switch {
-		case j.attempts == 0:
-			log.Printf("federation: ap delivery to %s failed (first attempt): %v", j.inboxURL, sendErr)
-		case j.attempts >= maxDeliveryAttempts-1:
-			log.Printf("federation: giving up on ap delivery to %s after %d attempts, last error: %v",
-				j.inboxURL, j.attempts+1, sendErr)
-		}
+func (s *Service) drainAPQueue() {
+	jobs, err := s.claimAPDeliveryJobs()
+	if err != nil {
+		return
 	}
+
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j apDeliveryJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverAPActivity(j.userID, j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
+			s.db.Exec(`
+				UPDATE ap_delivery_queue
+				SET attempts = attempts + 1,
+				    last_error = $1,
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+
+			// AGORA-338: this queue recorded failures to last_error and logged
+			// nothing, so a delivery path failing every time looked exactly like
+			// one with nothing to send. AGORA-325 closed that on the legacy queue;
+			// this is the same gap on the queue that now carries everything,
+			// including friend requests and friends-only posts.
+			//
+			// First failure and final abandonment only. A peer down for a day would
+			// otherwise produce a line per activity per retry, and the noise is what
+			// makes a log stop being read.
+			switch {
+			case j.attempts == 0:
+				log.Printf("federation: ap delivery to %s failed (first attempt): %v", j.inboxURL, sendErr)
+			case givingUp:
+				log.Printf("federation: giving up on ap delivery to %s after %d attempts, last error: %v",
+					j.inboxURL, j.attempts+1, sendErr)
+			}
+		}(j)
+	}
+	wg.Wait()
 }
 
 func (s *Service) deliverAPActivity(userID, inboxURL string, activity []byte) error {
@@ -4899,12 +5390,17 @@ func (s *Service) enqueueInstanceAPDelivery(inboxURL string, activity any) {
 
 func (s *Service) drainInstanceAPQueue() {
 	rows, err := s.db.Query(`
-		SELECT id, inbox_url, activity
-		FROM instance_ap_delivery_queue
-		WHERE attempts < 10 AND next_attempt <= NOW()
-		ORDER BY next_attempt ASC
-		LIMIT 20
-	`)
+		UPDATE instance_ap_delivery_queue
+		SET next_attempt = NOW() + $1
+		WHERE id IN (
+			SELECT id FROM instance_ap_delivery_queue
+			WHERE dead_at IS NULL AND attempts < $2 AND next_attempt <= NOW()
+			ORDER BY next_attempt ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, inbox_url, activity, attempts
+	`, apDeliveryClaimLease, maxDeliveryAttempts)
 	if err != nil {
 		return
 	}
@@ -4913,30 +5409,43 @@ func (s *Service) drainInstanceAPQueue() {
 	type instanceJob struct {
 		id, inboxURL string
 		activity     []byte
+		attempts     int
 	}
 	var jobs []instanceJob
 	for rows.Next() {
 		var j instanceJob
-		if rows.Scan(&j.id, &j.inboxURL, &j.activity) == nil {
+		if rows.Scan(&j.id, &j.inboxURL, &j.activity, &j.attempts) == nil {
 			jobs = append(jobs, j)
 		}
 	}
 	rows.Close()
 
+	sem := make(chan struct{}, apDeliveryConcurrency)
+	var wg sync.WaitGroup
 	for _, j := range jobs {
-		sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
-		if sendErr == nil {
-			s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
-		} else {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j instanceJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sendErr := s.deliverInstanceAPActivity(j.inboxURL, j.activity)
+			if sendErr == nil {
+				s.db.Exec(`DELETE FROM instance_ap_delivery_queue WHERE id = $1`, j.id)
+				return
+			}
+			givingUp := j.attempts+1 >= maxDeliveryAttempts
 			s.db.Exec(`
 				UPDATE instance_ap_delivery_queue
 				SET attempts = attempts + 1,
 				    last_error = $1,
-				    next_attempt = NOW() + (LEAST(POWER(2, attempts), 1440) * INTERVAL '1 minute')
-				WHERE id = $2
-			`, sendErr.Error(), j.id)
-		}
+				    next_attempt = NOW() + (LEAST(POWER(2, attempts), $2) * INTERVAL '1 minute'),
+				    dead_at = CASE WHEN $3 THEN NOW() ELSE dead_at END
+				WHERE id = $4
+			`, sendErr.Error(), deliveryBackoffCapMinutes, givingUp, j.id)
+		}(j)
 	}
+	wg.Wait()
 }
 
 func (s *Service) deliverInstanceAPActivity(inboxURL string, activity []byte) error {

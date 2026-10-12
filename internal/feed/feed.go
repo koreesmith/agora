@@ -745,6 +745,11 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 // guests and members alike: authored by non-profile_private users, top-level
 // (no comments), and not scoped to a wall/group/page. Unlike GetFeed this is
 // not personalized to a friend graph.
+//
+// Remote posts are limited to peered Agora instances (federated_instances only
+// ever holds Agora peers). Relay subscriptions and follows pull in posts from
+// the wider fediverse and Bluesky; those belong in the home feed of whoever
+// followed them, not in a showcase of this instance and its peers.
 func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
 	limit, offset := pageParams(r)
@@ -798,6 +803,11 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		  AND p.wall_user_id IS NULL
 		  AND p.community_group_id IS NULL
 		  AND p.page_id IS NULL
+		  AND (p.is_remote = false OR EXISTS (
+		    SELECT 1 FROM federated_instances fi
+		     WHERE LOWER(fi.domain) = LOWER(p.remote_instance)
+		       AND fi.status != 'blocked'
+		  ))
 		  %s
 		ORDER BY p.published_at DESC
 		LIMIT $2 OFFSET $3

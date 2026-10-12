@@ -24,8 +24,8 @@ import (
 //
 //   - It lands in Explore, never the home feed. The home feed is friends and
 //     follows, and nothing an admin does should put content there. Explore
-//     already carries remote posts from any account this instance knows about,
-//     so peer content there is consistent with what that surface already means
+//     carries local posts plus posts from peered Agora instances, so peer
+//     content there is consistent with what that surface already means
 //     rather than a new kind of thing.
 //   - The two directions are independent. Our pulling a peer's timeline says
 //     nothing about whether they want ours, and vice versa. Conflating them

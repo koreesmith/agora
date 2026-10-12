@@ -382,7 +382,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	// A relay surfaces accounts nobody locally follows — useful for
-	// top-level posts (discoverable via explore/search), but a reply into
+	// top-level posts (discoverable via search; Explore is limited to Agora peers), but a reply into
 	// some thread Agora has no other context for isn't independently
 	// useful the same way, and resolveReplyTarget has no local thread to
 	// attach it to anyway.
@@ -480,9 +480,8 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // from accounts a local user has no reason to already know about. Mirrors
 // ingestFollowedPost's idempotent-insert/attachment-storage shape, but with
 // no ap_following gate and no per-follower notification loop, since there's
-// no follower list to notify — a relay post surfaces via explore/search
-// instead (its visibility='public', parent_id=NULL shape already qualifies
-// it for PublicFeed same as any other top-level public post). The existing
+// no follower list to notify — a relay post surfaces via search
+// instead (PublicFeed/Explore only carries local and Agora-peer posts). The existing
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.

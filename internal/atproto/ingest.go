@@ -295,17 +295,24 @@ func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) 
 }
 
 // isBlueskyGifURL reports whether an external embed's URI is a GIF from
-// Bluesky's GIF picker, which always embeds a direct Tenor media file
-// (https://media.tenor.com/<id>/<name>.gif?hh=..&ww=..). The same test
-// Bluesky's own clients use to play a link card as a GIF, so any other
-// .gif link keeps rendering as the link card its author shared.
+// Bluesky's GIF picker, which embeds a direct media file from its GIF
+// provider: Tenor (https://media.tenor.com/<id>/<name>.gif?hh=..&ww=..)
+// originally, KLIPY (https://static.klipy.com/ii/.../<slug>.gif?hh=..&ww=..)
+// since Bluesky switched providers. The same hosts Bluesky's own clients
+// accept before playing a link card as a GIF, so any other .gif link keeps
+// rendering as the link card its author shared.
 func isBlueskyGifURL(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Scheme != "https" || !strings.HasSuffix(strings.ToLower(u.Path), ".gif") {
 		return false
 	}
-	return u.Scheme == "https" && strings.EqualFold(u.Hostname(), "media.tenor.com") &&
-		strings.HasSuffix(strings.ToLower(u.Path), ".gif")
+	switch strings.ToLower(u.Hostname()) {
+	case "media.tenor.com":
+		return true
+	case "static.klipy.com":
+		return strings.HasPrefix(u.Path, "/ii/")
+	}
+	return false
 }
 
 // storeInboundVideo maps a native app.bsky.embed.video onto Agora's own

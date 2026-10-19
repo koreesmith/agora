@@ -11,9 +11,13 @@ import (
 	"github.com/agora-social/agora/internal/store"
 )
 
-// TestIsBlueskyGifURL is AGORA-377: only a Tenor media file counts as a
-// picked GIF. A tenor.com share page or a .gif hosted anywhere else is a
-// link someone shared, and stays a link card.
+// klipyGif is the URL a real Bluesky GIF reply carried after Bluesky moved
+// its picker from Tenor to KLIPY.
+const klipyGif = "https://static.klipy.com/ii/d7aec6f6f171607374b2065c836f92f4/2f/58/8tYwhggJ.gif?hh=373&ww=498&mp4=WAJ6FyIjRFIBHIT&webm=U2Hifd7pp4ZwP0VtZ4"
+
+// TestIsBlueskyGifURL is AGORA-377: only a Tenor or KLIPY media file counts
+// as a picked GIF. A share page or a .gif hosted anywhere else is a link
+// someone shared, and stays a link card.
 func TestIsBlueskyGifURL(t *testing.T) {
 	cases := []struct {
 		url  string
@@ -22,6 +26,10 @@ func TestIsBlueskyGifURL(t *testing.T) {
 		{"https://media.tenor.com/abc123AAAAC/happy-dance.gif?hh=280&ww=498", true},
 		{"https://media.tenor.com/abc123AAAAC/happy-dance.gif", true},
 		{"https://MEDIA.TENOR.COM/abc123AAAAC/Happy-Dance.GIF", true},
+		{klipyGif, true},
+		{"https://static.klipy.com/ii/d7aec6f6/2f/58/8tYwhggJ.gif", true},
+		{"https://static.klipy.com/other/8tYwhggJ.gif", false},
+		{"https://static.klipy.com/ii/d7aec6f6/2f/58/WAJ6FyIjRFIBHIT.mp4", false},
 		{"http://media.tenor.com/abc123AAAAC/happy-dance.gif", false},
 		{"https://tenor.com/view/happy-dance-gif-12345", false},
 		{"https://media.tenor.com/abc123AAAPo/happy-dance.mp4", false},
@@ -94,18 +102,22 @@ func TestStoreInboundEmbedGifGoesToImageURL(t *testing.T) {
 		return
 	}
 
-	t.Run("gif", func(t *testing.T) {
-		const gif = "https://media.tenor.com/abc123AAAAC/happy-dance.gif?hh=280&ww=498"
-		id := newPost(t)
-		s.storeInboundEmbed(context.Background(), id, external(gif))
-		imageURL, linkURL, linkImage := columns(t, id)
-		if imageURL != gif {
-			t.Errorf("image_url = %q, want the GIF %q", imageURL, gif)
-		}
-		if linkURL != "" || linkImage != "" {
-			t.Errorf("link_url = %q, link_image = %q, want both empty for a GIF", linkURL, linkImage)
-		}
-	})
+	for name, gif := range map[string]string{
+		"tenor": "https://media.tenor.com/abc123AAAAC/happy-dance.gif?hh=280&ww=498",
+		"klipy": klipyGif,
+	} {
+		t.Run(name, func(t *testing.T) {
+			id := newPost(t)
+			s.storeInboundEmbed(context.Background(), id, external(gif))
+			imageURL, linkURL, linkImage := columns(t, id)
+			if imageURL != gif {
+				t.Errorf("image_url = %q, want the GIF %q", imageURL, gif)
+			}
+			if linkURL != "" || linkImage != "" {
+				t.Errorf("link_url = %q, link_image = %q, want both empty for a GIF", linkURL, linkImage)
+			}
+		})
+	}
 
 	t.Run("link", func(t *testing.T) {
 		const link = "https://example.com/article"

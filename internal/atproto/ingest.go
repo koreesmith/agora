@@ -3,6 +3,7 @@ package atproto
 import (
 	"context"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
@@ -131,10 +132,10 @@ func (s *Service) storeInboundImages(postID string, imageURLs []string) {
 
 // storeInboundEmbed persists whatever richer content a Bluesky post's embed
 // carries beyond plain text. Images were already handled (AGORA-197); a
-// shared link and a picked GIF are indistinguishable at the lexicon level —
+// shared link and a picked GIF both arrive as app.bsky.embed.external —
 // Bluesky has no native GIF attachment type, its GIF picker just embeds a
-// Tenor URL as a normal app.bsky.embed.external, same as any link card — so
-// both fall out of the External case with no special-casing (AGORA-250).
+// Tenor URL as a normal link card (AGORA-250). storeInboundLink tells the
+// two apart by URL (AGORA-377).
 //
 // A quote-post embed (EmbedRecord_View, or the Record half of
 // RecordWithMedia) resolves the quoted post and wires it up exactly the way
@@ -269,11 +270,20 @@ func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_V
 // already populates. Thumb/Uri are already fully-resolved CDN URLs on the
 // hydrated View type the AppView returns, not blob refs needing a separate
 // fetch, the same way EmbedImages_View.Fullsize already is.
+//
+// A GIF goes to image_url instead (AGORA-377), the column a locally-picked
+// GIF already lands in. Stored as a link card, a GIF reply rendered as an
+// empty comment, since comments carry image_url and no link preview at all,
+// and a GIF post rendered as a static thumbnail rather than the GIF itself.
 func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) {
 	if ext == nil || ext.External == nil || ext.External.Uri == "" {
 		return
 	}
 	e := ext.External
+	if isBlueskyGifURL(e.Uri) {
+		s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, e.Uri, postID)
+		return
+	}
 	var thumb string
 	if e.Thumb != nil {
 		thumb = *e.Thumb
@@ -282,6 +292,20 @@ func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) 
 		UPDATE posts SET link_url = $1, link_title = $2, link_description = $3, link_image = $4, link_domain = $5
 		WHERE id = $6
 	`, e.Uri, e.Title, e.Description, thumb, domainFromURL(e.Uri), postID)
+}
+
+// isBlueskyGifURL reports whether an external embed's URI is a GIF from
+// Bluesky's GIF picker, which always embeds a direct Tenor media file
+// (https://media.tenor.com/<id>/<name>.gif?hh=..&ww=..). The same test
+// Bluesky's own clients use to play a link card as a GIF, so any other
+// .gif link keeps rendering as the link card its author shared.
+func isBlueskyGifURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && strings.EqualFold(u.Hostname(), "media.tenor.com") &&
+		strings.HasSuffix(strings.ToLower(u.Path), ".gif")
 }
 
 // storeInboundVideo maps a native app.bsky.embed.video onto Agora's own

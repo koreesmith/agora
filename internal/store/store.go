@@ -1687,4 +1687,16 @@ var schema = []string{
 	// hashtag/notification exclusion that already keys off 'private' instead
 	// of needing its own case in each of those switch statements.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS external_only BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-377: a GIF picked on Bluesky arrives as a link card to a
+	// media.tenor.com .gif, and ingest stored it in the link_* columns.
+	// Comments only carry image_url, so a GIF reply showed up empty. Ingest
+	// now writes such a GIF to image_url; this moves the rows ingested before
+	// that. Mirrors atproto.isBlueskyGifURL; image_url = '' leaves alone any
+	// row that already has an image, and makes a rerun a no-op.
+	`UPDATE posts
+	 SET image_url = link_url, link_url = '', link_title = '', link_description = '', link_image = '', link_domain = ''
+	 WHERE is_remote = true AND remote_instance = 'bsky.app' AND image_url = ''
+	   AND lower(link_url) LIKE 'https://media.tenor.com/%'
+	   AND lower(split_part(link_url, '?', 1)) LIKE '%.gif'`,
 }

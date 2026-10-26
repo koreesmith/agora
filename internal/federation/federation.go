@@ -314,16 +314,25 @@ func (s *Service) syncStaleRemoteUsers() {
 	rows.Close()
 
 	for _, e := range stale {
-		profile := s.fetchRemoteProfile(e.handle, e.instance)
-		if len(profile) == 0 { continue }
-		// AGORA-331: same guard as getOrCreateRemoteUser and
-		// handleInboundProfileUpdate. This is also the path that repairs an
-		// already-corrupted stub on its own, since it refetches from GetUser.
-		s.db.Exec(`
-			UPDATE users SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
-			WHERE remote_user_id = $4 AND remote_instance = $5
-		`, profile["display_name"], remoteAbsoluteURL(profile["avatar_url"], e.instance), profile["bio"], e.handle, e.instance)
+		s.refreshLegacyRemoteUser(e.handle, e.instance)
 	}
+}
+
+// refreshLegacyRemoteUser re-syncs one legacy Agora-protocol stub. Split out
+// of syncStaleRemoteUsers so an on-demand refresh (AGORA-381) can use it too.
+func (s *Service) refreshLegacyRemoteUser(handle, instance string) error {
+	profile := s.fetchRemoteProfile(handle, instance)
+	if len(profile) == 0 {
+		return fmt.Errorf("could not fetch %s@%s", handle, instance)
+	}
+	// AGORA-331: same guard as getOrCreateRemoteUser and
+	// handleInboundProfileUpdate. This is also the path that repairs an
+	// already-corrupted stub on its own, since it refetches from GetUser.
+	_, err := s.db.Exec(`
+		UPDATE users SET display_name = $1, avatar_url = $2, bio = $3, remote_synced_at = NOW()
+		WHERE remote_user_id = $4 AND remote_instance = $5
+	`, profile["display_name"], remoteAbsoluteURL(profile["avatar_url"], instance), profile["bio"], handle, instance)
+	return err
 }
 
 // ── Federated user profile ────────────────────────────────────────────────────
@@ -336,7 +345,7 @@ func (s *Service) GetUser(w http.ResponseWriter, r *http.Request) {
 	// a plain application/json Accept).
 	accept := r.Header.Get("Accept")
 	if strings.Contains(accept, "application/activity+json") || strings.Contains(accept, "application/ld+json") {
-		s.writeActorObject(w, handle)
+		s.writeActorObject(w, r, handle)
 		return
 	}
 

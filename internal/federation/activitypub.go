@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -15,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -367,12 +370,18 @@ func (s *Service) HostMeta(w http.ResponseWriter, r *http.Request) {
 // fields, no name, no bio, no avatar or cover, so the fact that this
 // resolves at all costs it nothing beyond confirming the handle exists,
 // which the caller already knew going in.
-func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
+//
+// AGORA-381: except to a friend. A signed fetch whose signer is an accepted
+// friend of the profile gets the full object, which is how a friend's
+// instance gets their avatar and cover at all. r may be nil (no requester),
+// which always gets the redacted object.
+func (s *Service) writeActorObject(w http.ResponseWriter, r *http.Request, handle string) {
 	u, ok := s.apEligibleUserIdentityOnly(handle)
 	if !ok {
 		writeError(w, 404, "user not found")
 		return
 	}
+	full := !u.Private || s.isFriendFetch(r, u.ID)
 
 	pubPEM, _, _, err := s.getOrCreateUserKeyPair(u.ID, u.PubKeyPEM, u.PrivKeyPEM)
 	if err != nil {
@@ -404,7 +413,7 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 		// gate" and treats the follow as done the moment it's sent.
 		"manuallyApprovesFollowers": u.Private,
 	}
-	if !u.Private {
+	if full {
 		obj["name"] = u.DisplayName
 		obj["summary"] = u.Bio
 		if u.AvatarURL != "" {
@@ -420,7 +429,43 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 	}
 
 	w.Header().Set("Content-Type", "application/activity+json")
+	if u.Private {
+		// The body depends on who signed the request, so nothing between here
+		// and the requester may cache it and hand a friend's copy to anyone else.
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Vary", "Signature")
+	}
 	json.NewEncoder(w).Encode(obj)
+}
+
+// isFriendFetch (AGORA-381) reports whether r is a signed fetch by an
+// accepted friend of localUserID. The signature is checked against cached
+// keys only (verifySignedFetchCached explains why), and the signer must be
+// the friend's own actor, not just someone on the same instance.
+func (s *Service) isFriendFetch(r *http.Request, localUserID string) bool {
+	if r == nil || r.Header.Get("Signature") == "" {
+		return false
+	}
+	signer, err := s.verifySignedFetchCached(r)
+	if err != nil {
+		return false
+	}
+	// remoteUserIDForActor rather than a plain ap_actor_url match: a friend
+	// made over the legacy protocol may only have a stub without one.
+	remoteID := s.remoteUserIDForActor(signer)
+	if remoteID == "" {
+		return false
+	}
+	return s.areFriends(localUserID, remoteID)
+}
+
+func (s *Service) areFriends(a, b string) bool {
+	var ok bool
+	s.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM friendships WHERE status = 'accepted'
+		  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)))
+	`, a, b).Scan(&ok)
+	return ok
 }
 
 // BroadcastActorUpdate delivers a signed Update(Person) activity to every
@@ -441,7 +486,10 @@ func (s *Service) BroadcastActorUpdate(userID string) {
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = $1 AND is_remote = false`, userID).Scan(&username); err != nil {
 		return
 	}
-	u, ok := s.apEligibleUser(username)
+	// AGORA-381: identity-only, so a private profile is no longer skipped
+	// outright. It goes to its friends alone (below), the same audience
+	// writeActorObject shows the full profile to.
+	u, ok := s.apEligibleUserIdentityOnly(username)
 	if !ok {
 		return
 	}
@@ -466,6 +514,7 @@ func (s *Service) BroadcastActorUpdate(userID string) {
 			"owner":        actor,
 			"publicKeyPem": pubPEM,
 		},
+		"manuallyApprovesFollowers": u.Private,
 	}
 	if u.AvatarURL != "" {
 		person["icon"] = map[string]string{"type": "Image", "url": s.absoluteURL(u.AvatarURL)}
@@ -482,7 +531,53 @@ func (s *Service) BroadcastActorUpdate(userID string) {
 		"to":       []string{"https://www.w3.org/ns/activitystreams#Public"},
 		"object":   person,
 	}
-	s.deliverToFollowers(userID, activity)
+	if !u.Private {
+		s.deliverToFollowers(userID, activity)
+		return
+	}
+
+	friends := s.remoteFriendInboxes(userID)
+	if len(friends) == 0 {
+		return
+	}
+	var to []string
+	for actorURL := range friends {
+		to = append(to, actorURL)
+	}
+	activity["to"] = to
+	delivered := map[string]bool{}
+	for _, inbox := range friends {
+		// Agora advertises one shared inbox, so several friends on the same
+		// instance would otherwise get the same activity once each.
+		if !delivered[inbox] {
+			delivered[inbox] = true
+			s.enqueueAPDelivery(userID, inbox, activity)
+		}
+	}
+}
+
+// remoteFriendInboxes (AGORA-381) maps each accepted remote friend's actor URL
+// to their inbox, for activities meant for friends and nobody else.
+func (s *Service) remoteFriendInboxes(userID string) map[string]string {
+	rows, err := s.db.Query(`
+		SELECT r.ap_actor_url, r.ap_inbox_url
+		  FROM friendships f
+		  JOIN users r ON r.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
+		 WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
+		   AND r.is_remote = true AND COALESCE(r.ap_actor_url, '') != '' AND COALESCE(r.ap_inbox_url, '') != ''
+	`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var a, inbox string
+		if rows.Scan(&a, &inbox) == nil {
+			out[a] = inbox
+		}
+	}
+	return out
 }
 
 // ── Instance actor (AGORA-219) ────────────────────────────────────────────────
@@ -2648,33 +2743,104 @@ func (s *Service) refreshRemoteActor(actorURL string) error {
 // That keeps the work bounded on an instance that has cached thousands of
 // relay authors nobody looks at.
 func (s *Service) syncStaleAPActors() {
+	for _, a := range s.staleAPActors(24*time.Hour, 50) {
+		s.refreshRemoteActor(a)
+	}
+}
+
+// staleAPActors lists up to limit ActivityPub actors, among the ones people
+// here see, that haven't been synced for at least minAge, oldest first.
+func (s *Service) staleAPActors(minAge time.Duration, limit int) []string {
 	rows, err := s.db.Query(`
 		SELECT u.ap_actor_url FROM users u
 		WHERE u.is_remote = true AND COALESCE(u.ap_actor_url, '') LIKE 'https://%'
-		  AND (u.remote_synced_at IS NULL OR u.remote_synced_at < NOW() - INTERVAL '24 hours')
+		  AND (u.remote_synced_at IS NULL OR u.remote_synced_at < NOW() - make_interval(secs => $1))
 		  AND (
 		    EXISTS (SELECT 1 FROM ap_following f WHERE f.followed_actor_url = u.ap_actor_url)
 		    OR EXISTS (SELECT 1 FROM ap_followers f WHERE f.follower_actor_url = u.ap_actor_url)
 		    OR EXISTS (SELECT 1 FROM posts p WHERE p.author_id = u.id AND p.created_at > NOW() - INTERVAL '14 days')
 		  )
 		ORDER BY u.remote_synced_at ASC NULLS FIRST
-		LIMIT 50
-	`)
+		LIMIT $2
+	`, minAge.Seconds(), limit)
 	if err != nil {
 		log.Printf("federation: listing stale actors: %v", err)
-		return
+		return nil
 	}
+	defer rows.Close()
 	var actors []string
 	for rows.Next() {
 		var a string
-		rows.Scan(&a)
-		actors = append(actors, a)
+		if rows.Scan(&a) == nil {
+			actors = append(actors, a)
+		}
 	}
-	rows.Close()
+	return actors
+}
 
-	for _, a := range actors {
-		s.refreshRemoteActor(a)
+// ErrNotRefreshable is returned for an account that isn't a cached remote one.
+var ErrNotRefreshable = errors.New("not a remote account")
+
+// remoteRefreshCooldown is how soon one remote profile may be refreshed again
+// on request, so repeated clicks don't hammer the other server.
+const remoteRefreshCooldown = 2 * time.Minute
+
+// RefreshRemoteProfile (AGORA-381) refreshes one remote account's cached
+// profile now instead of waiting for the hourly sync. Covers both an
+// ActivityPub stub and a legacy Agora-protocol one. A refresh within the
+// cooldown is a no-op: the profile is as fresh as it is going to get.
+func (s *Service) RefreshRemoteProfile(remoteUserID string) error {
+	var actorURL, handle, instance string
+	var synced sql.NullTime
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(ap_actor_url, ''), COALESCE(remote_user_id, ''), COALESCE(remote_instance, ''), remote_synced_at
+		  FROM users WHERE id = $1 AND is_remote = true
+	`, remoteUserID).Scan(&actorURL, &handle, &instance, &synced); err != nil {
+		return ErrNotRefreshable
 	}
+	if synced.Valid && time.Since(synced.Time) < remoteRefreshCooldown {
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(actorURL, "https://"):
+		return s.refreshRemoteActor(actorURL)
+	case handle != "" && instance != "":
+		return s.refreshLegacyRemoteUser(handle, instance)
+	}
+	return ErrNotRefreshable
+}
+
+// bulkRefreshRunning keeps RefreshAllRemoteProfiles to one run at a time.
+var bulkRefreshRunning atomic.Bool
+
+// RefreshAllRemoteProfiles (AGORA-381) starts a background refresh of every
+// remote account people here see, without waiting for the daily schedule. It
+// works in batches of 50 and skips anything refreshed in the last ten
+// minutes, so a second click soon after has little left to do. Reports false
+// if a run is already going.
+func (s *Service) RefreshAllRemoteProfiles() bool {
+	if !bulkRefreshRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	go func() {
+		defer bulkRefreshRunning.Store(false)
+		refreshed := 0
+		// refreshRemoteActor bumps remote_synced_at even when the fetch
+		// fails, so every batch shrinks the pool and this always ends. The
+		// batch cap is only a backstop.
+		for batch := 0; batch < 200; batch++ {
+			actors := s.staleAPActors(10*time.Minute, 50)
+			if len(actors) == 0 {
+				break
+			}
+			for _, a := range actors {
+				s.refreshRemoteActor(a)
+				refreshed++
+			}
+		}
+		log.Printf("federation: on-demand refresh of %d remote profile(s) finished", refreshed)
+	}()
+	return true
 }
 
 // cacheActorImages (AGORA-380) swaps a remote stub's hot-linked avatar and
@@ -3287,7 +3453,19 @@ type remoteActorProfile struct {
 // lazily generates one).
 func (s *Service) signerUserIDForActorFetch(actorURL string) string {
 	var userID string
-	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
+	// AGORA-381: a friend first. A private Agora profile shows its avatar and
+	// cover only to a fetch signed by one of its friends (writeActorObject), so
+	// signing as anyone else brings back the redacted profile.
+	s.db.QueryRow(`
+		SELECT l.id FROM users r
+		  JOIN friendships f ON f.status = 'accepted' AND (f.requester_id = r.id OR f.addressee_id = r.id)
+		  JOIN users l ON l.id = CASE WHEN f.requester_id = r.id THEN f.addressee_id ELSE f.requester_id END
+		 WHERE r.ap_actor_url = $1 AND r.is_remote = true AND l.is_remote = false
+		 LIMIT 1
+	`, actorURL).Scan(&userID)
+	if userID == "" {
+		s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 LIMIT 1`, actorURL).Scan(&userID)
+	}
 	if userID == "" {
 		s.db.QueryRow(`SELECT id FROM users WHERE is_remote = false AND federation_private_key <> '' ORDER BY created_at LIMIT 1`).Scan(&userID)
 	}

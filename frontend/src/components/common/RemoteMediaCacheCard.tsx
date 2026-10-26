@@ -41,6 +41,16 @@ export default function RemoteMediaCacheCard({ ok }: { ok: (msg: string) => void
     onError: () => ok('Clear failed'),
   })
 
+  // AGORA-381: refreshing is what (re)caches avatars and covers, so this is
+  // also how to repopulate the cache right after clearing it.
+  const refreshAll = useMutation({
+    mutationFn: () => adminApi.refreshRemoteProfiles(),
+    onSuccess: (res) => ok(res.data.started
+      ? 'Refreshing remote profiles in the background'
+      : 'A refresh is already running'),
+    onError: () => ok('Could not start the refresh'),
+  })
+
   const stats = data?.stats
   const limitBytes = (data?.settings.max_mb ?? 0) * 1024 * 1024
   const pct = stats && limitBytes ? Math.min(100, (stats.bytes / limitBytes) * 100) : 0
@@ -110,6 +120,16 @@ export default function RemoteMediaCacheCard({ ok }: { ok: (msg: string) => void
         <button className="btn-danger text-sm" disabled={busy || !stats?.files}
           onClick={() => { if (confirm('Remove every cached copy? Profiles fall back to the original links until they are cached again.')) clear.mutate() }}>
           {clear.isPending ? 'Clearing…' : 'Clear cache'}
+        </button>
+      </div>
+
+      <div className="pt-3 border-t border-agora-100 dark:border-agora-800 space-y-2">
+        <p className="text-sm text-agora-500">
+          Remote profiles refresh on their own every hour. To pick up new profile pictures now, refresh every
+          followed or recently active account in the background.
+        </p>
+        <button className="btn-secondary text-sm" disabled={refreshAll.isPending} onClick={() => refreshAll.mutate()}>
+          {refreshAll.isPending ? 'Starting…' : 'Refresh remote profiles now'}
         </button>
       </div>
     </div>

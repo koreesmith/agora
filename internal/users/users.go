@@ -38,6 +38,9 @@ type fedSender interface {
 	// returned here rather than by a separate accessor because this call
 	// already dereferences the actor document that carries it.
 	GetRemoteActorStats(actorURL string) (followers, following, posts int, bio string, locked, ok bool)
+	// AGORA-381: re-fetch a remote account's profile now rather than waiting
+	// for the hourly sync, for a picture or name that looks out of date.
+	RefreshRemoteProfile(remoteUserID string) error
 }
 
 // atprotoSyncer mirrors fedSender's role for the AT Proto side (AGORA-189):
@@ -93,6 +96,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
 	r.Post("/users/{username}/notify",    s.EnablePostNotify)
 	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
+	r.Post("/users/{username}/refresh",   s.RefreshRemoteProfile)
 }
 
 // RegisterPublicRoutes registers read-only routes reachable by guests.
@@ -1018,6 +1022,23 @@ func (s *Service) UnifiedMentionSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Post Notifications (AGORA-33) ─────────────────────────────────────────────
+
+// RefreshRemoteProfile (AGORA-381) re-fetches a remote account's profile,
+// avatar and cover from its own server. Any signed-in user may ask; the
+// federation side rate-limits each account so it can't be used to hammer
+// the other server.
+func (s *Service) RefreshRemoteProfile(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	var id string
+	s.db.QueryRow(`SELECT id FROM users WHERE username = $1 AND is_remote = true`, username).Scan(&id)
+	if id == "" || s.fed == nil {
+		writeError(w, 404, "remote account not found"); return
+	}
+	if err := s.fed.RefreshRemoteProfile(id); err != nil {
+		writeError(w, 502, "could not reach this account's server"); return
+	}
+	writeJSON(w, 200, map[string]string{"message": "profile refreshed"})
+}
 
 func (s *Service) EnablePostNotify(w http.ResponseWriter, r *http.Request) {
 	followerID := auth.UserIDFromCtx(r.Context())

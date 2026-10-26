@@ -91,7 +91,7 @@ func TestActorObjectRedactsPrivateProfile(t *testing.T) {
 	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://agora366.example"}}
 
 	w := httptest.NewRecorder()
-	s.writeActorObject(w, username)
+	s.writeActorObject(w, nil, username)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("writeActorObject status = %d, body = %s", w.Code, w.Body.String())
@@ -127,7 +127,7 @@ func TestActorObjectIncludesContentForPublicProfile(t *testing.T) {
 	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://agora366.example"}}
 
 	w := httptest.NewRecorder()
-	s.writeActorObject(w, username)
+	s.writeActorObject(w, nil, username)
 
 	var obj map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &obj); err != nil {

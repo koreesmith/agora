@@ -7,7 +7,7 @@ import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield, RefreshCw } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import CustomHandle from '../components/common/CustomHandle'
 import LockedBadge from '../components/common/LockedBadge'
@@ -71,6 +71,13 @@ export default function ProfilePage() {
     qc.invalidateQueries({ queryKey: ['requests'] })
     qc.invalidateQueries({ queryKey: ['notifications'] })
   }
+
+  // AGORA-381: pull a remote account's profile, avatar and cover again now,
+  // for when they look out of date, instead of waiting for the hourly sync.
+  const refreshRemote = useMutation({
+    mutationFn: () => usersApi.refreshRemoteProfile(username!),
+    onSuccess: inv,
+  })
 
   const sendReq = useMutation({
     mutationFn: () => friendsApi.sendRequest(profile.id),
@@ -441,6 +448,20 @@ export default function ProfilePage() {
           </h1>
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+            {me && !isSelf && profile.is_remote && !isBluesky && (
+              <button
+                onClick={() => refreshRemote.mutate()}
+                disabled={refreshRemote.isPending}
+                title="Refresh this profile from its server"
+                aria-label="Refresh this profile from its server"
+                className="text-agora-400 hover:text-agora-600 dark:hover:text-agora-300 disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={refreshRemote.isPending ? 'animate-spin' : ''} />
+              </button>
+            )}
+            {refreshRemote.isError && (
+              <span className="text-xs text-red-500">Couldn't reach their server</span>
+            )}
             {/* AGORA-288: the profile is where identity lives, so a verified
                 custom domain gets full size here rather than the compact
                 treatment it gets in feeds and search results. */}

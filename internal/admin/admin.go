@@ -35,6 +35,8 @@ type fedResolver interface {
 	// side owns it because turning it on sends a Follow and turning it off
 	// sends an Undo, neither of which belongs in an admin handler.
 	SetTimelineExchange(domain string, on bool) error
+	// AGORA-381: refresh every remote profile people here see, now.
+	RefreshAllRemoteProfiles() bool
 }
 
 type notifSender interface {
@@ -105,6 +107,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Put("/admin/media/remote-cache",        s.UpdateRemoteMediaCache)
 	r.Post("/admin/media/remote-cache/prune", s.PruneRemoteMediaCache)
 	r.Delete("/admin/media/remote-cache",     s.ClearRemoteMediaCache)
+	r.Post("/admin/federation/refresh-profiles", s.RefreshRemoteProfiles)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

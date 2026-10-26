@@ -83,6 +83,8 @@ export const feedApi = {
 // ── Users ─────────────────────────────────────────────────────────────────────
 export const usersApi = {
   getProfile:       (username: string) => api.get(`/users/${username}`),
+  // AGORA-381: re-fetch a remote account's profile from its own server now.
+  refreshRemoteProfile: (username: string) => api.post(`/users/${username}/refresh`),
   updateProfile:    (data: any)        => api.patch('/users/me', data),
   uploadAvatar:     (file: File)       => {
     const form = new FormData(); form.append('file', file)
@@ -265,6 +267,7 @@ export const adminApi = {
   updateRemoteMediaCache: (data: any) => api.put('/admin/media/remote-cache', data),
   pruneRemoteMediaCache:  ()          => api.post('/admin/media/remote-cache/prune'),
   clearRemoteMediaCache:  ()          => api.delete('/admin/media/remote-cache'),
+  refreshRemoteProfiles:  ()          => api.post('/admin/federation/refresh-profiles'),
   // Custom domain approval queue (AGORA-286)
   listCustomDomains:   (status?: string)            => api.get('/admin/custom-domains', { params: { status } }),
   approveCustomDomain: (id: string)                 => api.post(`/admin/custom-domains/${id}/approve`),

@@ -72,3 +72,23 @@ func (s *Service) runRemoteMediaCacheJob(w http.ResponseWriter, r *http.Request,
 		"stats":  s.remoteMediaCache().Stats(),
 	})
 }
+
+// RefreshRemoteProfiles (AGORA-381) starts a background refresh of every
+// remote profile people here see, instead of waiting for the hourly batches.
+// Refreshing is also what re-caches avatars and covers, so this is the way to
+// repopulate the cache straight after clearing it.
+func (s *Service) RefreshRemoteProfiles(w http.ResponseWriter, r *http.Request) {
+	if s.fed == nil {
+		writeError(w, 503, "federation is not available")
+		return
+	}
+	actorID := auth.UserIDFromCtx(r.Context())
+	started := s.fed.RefreshAllRemoteProfiles()
+	if started {
+		s.db.Exec(
+			`INSERT INTO audit_log (actor_id, action, target_type, details) VALUES ($1, 'refresh_remote_profiles', 'federation', 'started')`,
+			actorID,
+		)
+	}
+	writeJSON(w, 202, map[string]bool{"started": started})
+}

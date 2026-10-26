@@ -28,7 +28,17 @@ http {
     set_real_ip_from 192.168.0.0/16;
     real_ip_header X-Forwarded-For;
 
-    limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
+    # The api zone is the signed-in app's own traffic, and a single page load
+    # is a burst of it: the feed, friends, connections, notification and
+    # message counters, plus per-post requests, then 30s polling on top. At
+    # the old 30r/m with a burst of 20, a refresh or two drained the bucket
+    # and every request after that was refused until it refilled at one
+    # every two seconds, which the UI showed as an empty feed and empty
+    # friend and connection lists. Sized to absorb normal use; the endpoints
+    # that are actually expensive or abusable (login, password reset,
+    # invites, domain claims) keep their own tighter limits here and in the
+    # backend.
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
     limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
     limit_req_zone $binary_remote_addr zone=federation:10m rate=60r/m;
     # AGORA-206: AT Proto's unauthenticated-facing surface (identity
@@ -49,6 +59,10 @@ http {
     # subscription itself. A low rate is generous for legitimate relay
     # reconnects while still bounding connection-flood abuse.
     limit_req_zone $binary_remote_addr zone=firehose:10m rate=10r/m;
+
+    # 429 rather than nginx's default 503, so a client can tell "slow down"
+    # apart from the backend actually being down.
+    limit_req_status 429;
 
     server {
         listen 80;
@@ -95,7 +109,7 @@ http {
         }
 
         location /api/ {
-            limit_req zone=api burst=20 nodelay;
+            limit_req zone=api burst=100 nodelay;
             proxy_pass         http://frontend:80/api/;
             proxy_http_version 1.1;
             proxy_set_header Host               $host;

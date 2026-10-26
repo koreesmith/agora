@@ -397,6 +397,11 @@ func (s *Service) writeActorObject(w http.ResponseWriter, handle string) {
 			"owner":        actor,
 			"publicKeyPem": pubPEM,
 		},
+		// A plain Follow of a private profile is never honored (only a friend
+		// request gets through), so say so the way Mastodon does for a locked
+		// account. Without it a following server reads the omission as "no
+		// gate" and treats the follow as done the moment it's sent.
+		"manuallyApprovesFollowers": u.Private,
 	}
 	if !u.Private {
 		obj["name"] = u.DisplayName
@@ -3728,11 +3733,8 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := s.db.Exec(`
-		INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
-		VALUES ($1, $2, $3, false)
-		ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE SET followed_inbox_url = $3
-	`, userID, req.ActorURL, profile.Inbox); err != nil {
+	accepted, err := s.recordOutboundFollow(userID, req.ActorURL, profile.Inbox, profile.ManuallyApprovesFollowers)
+	if err != nil {
 		writeError(w, 500, "could not follow")
 		return
 	}
@@ -3757,7 +3759,36 @@ func (s *Service) FollowFediverseAccount(w http.ResponseWriter, r *http.Request)
 	// 20s) before the Follow even leaves this instance.
 	go s.drainAPQueue()
 
-	writeJSON(w, 201, map[string]string{"message": "follow requested"})
+	if accepted {
+		writeJSON(w, 201, map[string]any{"message": "following", "accepted": true})
+		return
+	}
+	writeJSON(w, 201, map[string]any{"message": "follow requested", "accepted": false})
+}
+
+// recordOutboundFollow writes the ap_following row for a Follow we're about to
+// send and reports whether it stands as accepted.
+//
+// An account that doesn't gate follows behind manual approval is followed the
+// moment we ask, so it's recorded as accepted now rather than waiting on the
+// remote's Accept. Leaving it pending made the follow hostage to that one
+// activity arriving and matching: a lost or unmatched Accept kept the button
+// on "Requested" and, since accepted also gates ingestion, dropped every post
+// they sent. A locked account still waits for its Accept.
+//
+// The ON CONFLICT arm never demotes an accepted follow, but does promote a
+// stuck pending one, so following again repairs a row left behind before this
+// check existed or before the account unlocked itself.
+func (s *Service) recordOutboundFollow(userID, actorURL, inboxURL string, locked bool) (bool, error) {
+	var accepted bool
+	err := s.db.QueryRow(`
+		INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (follower_user_id, followed_actor_url) DO UPDATE
+		  SET followed_inbox_url = $3, accepted = ap_following.accepted OR EXCLUDED.accepted
+		RETURNING accepted
+	`, userID, actorURL, inboxURL, !locked).Scan(&accepted)
+	return accepted, err
 }
 
 // UnfollowFediverseAccount deletes the local follow record and sends an

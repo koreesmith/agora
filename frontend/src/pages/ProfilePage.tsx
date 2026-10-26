@@ -99,7 +99,11 @@ export default function ProfilePage() {
     onMutate: async () => {
       await qc.cancelQueries({ queryKey: ['profile', username] })
       const previous = qc.getQueryData(['profile', username])
-      qc.setQueryData(['profile', username], (old: any) => old && { ...old, follow_pending: true })
+      // Only a locked account leaves the follow waiting on approval; any
+      // other is followed outright, so don't flash "Requested" for it.
+      qc.setQueryData(['profile', username], (old: any) => old && (old.manually_approves_followers
+        ? { ...old, follow_pending: true }
+        : { ...old, following: true, follow_pending: false }))
       return { previous }
     },
     onError: (_err, _vars, ctx) => { if (ctx?.previous) qc.setQueryData(['profile', username], ctx.previous) },

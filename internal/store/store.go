@@ -1699,4 +1699,29 @@ var schema = []string{
 	 WHERE is_remote = true AND remote_instance = 'bsky.app' AND image_url = ''
 	   AND (lower(link_url) LIKE 'https://media.tenor.com/%' OR lower(link_url) LIKE 'https://static.klipy.com/ii/%')
 	   AND lower(split_part(link_url, '?', 1)) LIKE '%.gif'`,
+
+	// Following an unlocked fediverse account used to sit at accepted = false
+	// until the remote's Accept arrived and matched, so any follow whose Accept
+	// went missing stayed on "Requested" and had every post dropped.
+	// FollowFediverseAccount now records such a follow as accepted up front;
+	// this repairs the ones already stuck, so nobody has to withdraw and
+	// follow again. The remote auto-accepted on its side long ago, so only our
+	// own flag was ever wrong and nothing needs resending.
+	//
+	// Scoped to accounts whose cached stub says they don't require approval.
+	// Agora actors (/federation/users/) are left alone: older Agora peers
+	// never advertised manuallyApprovesFollowers, so their omission says
+	// nothing, and friend-request follows run through that path too.
+	//
+	// Guarded: a follow left pending by an account that has since unlocked is
+	// fixed by following again, not by a rerun on every restart.
+	`UPDATE ap_following af SET accepted = true
+	 FROM users u
+	 WHERE af.accepted = false
+	   AND u.is_remote = true AND u.ap_actor_url = af.followed_actor_url
+	   AND u.manually_approves_followers = false
+	   AND af.followed_actor_url NOT LIKE '%/federation/users/%'
+	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'unlocked_fediverse_follows_accepted')`,
+	`INSERT INTO schema_backfills (name) VALUES ('unlocked_fediverse_follows_accepted')
+		ON CONFLICT (name) DO NOTHING`,
 }

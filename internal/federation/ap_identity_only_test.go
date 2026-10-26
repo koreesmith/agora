@@ -112,6 +112,9 @@ func TestActorObjectRedactsPrivateProfile(t *testing.T) {
 	if obj["inbox"] == nil || obj["publicKey"] == nil {
 		t.Error("actor object is missing protocol-required fields (inbox/publicKey) even for a private profile")
 	}
+	if obj["manuallyApprovesFollowers"] != true {
+		t.Errorf("manuallyApprovesFollowers = %v, want true: a plain Follow of a private profile is never honored", obj["manuallyApprovesFollowers"])
+	}
 }
 
 // TestActorObjectIncludesContentForPublicProfile is the control: a public
@@ -138,5 +141,8 @@ func TestActorObjectIncludesContentForPublicProfile(t *testing.T) {
 	}
 	if obj["icon"] == nil {
 		t.Error("icon is missing for a public profile with an avatar set")
+	}
+	if obj["manuallyApprovesFollowers"] != false {
+		t.Errorf("manuallyApprovesFollowers = %v, want false for a public profile", obj["manuallyApprovesFollowers"])
 	}
 }

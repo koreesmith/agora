@@ -1724,4 +1724,27 @@ var schema = []string{
 	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'unlocked_fediverse_follows_accepted')`,
 	`INSERT INTO schema_backfills (name) VALUES ('unlocked_fediverse_follows_accepted')
 		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-380: local copies of remote media (mediacache). Remote avatars and
+	// covers were hot-linked, so a Mastodon account that changed its avatar
+	// (the old file is deleted) or a Threads account (Instagram CDN links
+	// expire) showed a broken image. source_url is the remote URL a copy was
+	// made from, which is what a profile falls back to if the copy is evicted.
+	// local_url is content-addressed, so several source URLs serving the same
+	// bytes share one file.
+	`CREATE TABLE IF NOT EXISTS remote_media_cache (
+		source_url   TEXT        PRIMARY KEY,
+		local_url    TEXT        NOT NULL,
+		kind         TEXT        NOT NULL,
+		content_type TEXT        NOT NULL,
+		bytes        BIGINT      NOT NULL,
+		fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS remote_media_cache_local_url_idx ON remote_media_cache (local_url)`,
+	`CREATE INDEX IF NOT EXISTS remote_media_cache_fetched_at_idx ON remote_media_cache (fetched_at)`,
+	`INSERT INTO instance_settings (key, value) VALUES
+		('remote_media_cache_enabled',     'true'),
+		('remote_media_cache_max_mb',      '1024'),
+		('remote_media_cache_max_file_mb', '5')
+	 ON CONFLICT (key) DO NOTHING`,
 }

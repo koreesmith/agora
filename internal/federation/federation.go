@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
+	"github.com/agora-social/agora/internal/mediacache"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
@@ -25,10 +26,12 @@ type Service struct {
 	notif *notifications.Service
 	// AGORA-323: set via SetDM. Optional, see dmNotifier.
 	dm dmNotifier
+	// AGORA-380: local copies of remote avatars and covers.
+	mcache *mediacache.Cache
 }
 
 func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
-	return &Service{db: db, cfg: cfg, notif: notif}
+	return &Service{db: db, cfg: cfg, notif: notif, mcache: mediacache.New(db, cfg.UploadDir, fedHTTPClient)}
 }
 
 func RegisterRoutes(r chi.Router, s *Service) {
@@ -623,10 +626,16 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 	apQueueTicker := time.NewTicker(20 * time.Second) // drain standard-AP delivery queue
 	syncTicker   := time.NewTicker(15 * time.Minute)  // refresh instance list
 	profileTicker := time.NewTicker(6 * time.Hour)    // sync stale remote profiles
+	// AGORA-380: ActivityPub profiles refresh in small hourly batches rather
+	// than one big one, and the remote media cache is pruned on the same beat.
+	apProfileTicker := time.NewTicker(time.Hour)
+	mediaPruneTicker := time.NewTicker(mediacache.PruneInterval)
 
 	defer apQueueTicker.Stop()
 	defer syncTicker.Stop()
 	defer profileTicker.Stop()
+	defer apProfileTicker.Stop()
+	defer mediaPruneTicker.Stop()
 
 	// Run immediately on start. The delivery queues are gated by
 	// activityPubEnabled (AGORA-156); peering upkeep stays on
@@ -655,6 +664,14 @@ func (s *Service) StartBackgroundSync(ctx context.Context) {
 			if s.federationEnabled() {
 				go s.syncStaleRemoteUsers()
 			}
+		case <-apProfileTicker.C:
+			if s.activityPubEnabled() {
+				go s.syncStaleAPActors()
+			}
+		case <-mediaPruneTicker.C:
+			// Not gated on any federation toggle: turning federation off
+			// doesn't empty the cache, so it still has to stay within bounds.
+			go s.mcache.Prune()
 		}
 	}
 }

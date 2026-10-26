@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
+import RemoteMediaCacheCard from '../components/common/RemoteMediaCacheCard'
 import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign } from 'lucide-react'
 
 export default function AdminPage() {
@@ -728,6 +729,8 @@ export default function AdminPage() {
               </div>
             )}
           </div>
+
+          <RemoteMediaCacheCard ok={ok} />
         </div>
       )}
 

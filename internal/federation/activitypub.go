@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/linkify"
+	"github.com/agora-social/agora/internal/mediacache"
 	"github.com/agora-social/agora/internal/store"
 )
 
@@ -1201,6 +1202,15 @@ func (s *Service) handleStandardInbox(w http.ResponseWriter, r *http.Request, bo
 			s.handleInboundCreate(verifiedActor, a.Object, body)
 		}
 	case "Update":
+		// AGORA-380: an actor announcing changes to its own profile (Mastodon
+		// and Agora both send this when someone changes their avatar, name or
+		// bio). handleInboundUpdate only understands posts and drops anything
+		// without attributedTo, which an actor object never has, so these were
+		// all being thrown away and cached profiles never changed.
+		if isSelfActorUpdate(a.Object, verifiedActor) {
+			go s.refreshRemoteActor(verifiedActor)
+			break
+		}
 		s.handleInboundUpdate(verifiedActor, a.Object, body)
 	case "Delete":
 		s.handleInboundAPDelete(verifiedActor, a.Object, body)
@@ -2545,13 +2555,21 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	// (parse hiccup, or the remote server genuinely omitting it that time)
 	// must not blank out a previously-cached avatar/cover — NULLIF/COALESCE
 	// keeps the existing value when the freshly-fetched one is empty.
+	// AGORA-380: and keeps a local copy (mediacache) when it's a copy of the
+	// very image just fetched, rather than flipping back to the remote URL
+	// until cacheActorImages swaps it in again.
 	err := s.db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name, avatar_url, cover_url, bio,
 		                   email_verified, is_remote, remote_user_id, remote_instance, remote_synced_at,
 		                   ap_actor_url, ap_inbox_url, profile_private, emojis, manually_approves_followers)
 		VALUES ($1, $1, '', $2, $3, $4, $5, true, true, $6, $7, NOW(), $8, $9, false, $10, $11)
 		ON CONFLICT (ap_actor_url) WHERE ap_actor_url != '' DO UPDATE
-		  SET display_name = $2, avatar_url = COALESCE(NULLIF($3, ''), users.avatar_url), cover_url = COALESCE(NULLIF($4, ''), users.cover_url), bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10, manually_approves_followers = $11
+		  SET display_name = $2,
+		      avatar_url = CASE WHEN EXISTS (SELECT 1 FROM remote_media_cache c WHERE c.source_url = $3 AND c.local_url = users.avatar_url)
+		                        THEN users.avatar_url ELSE COALESCE(NULLIF($3, ''), users.avatar_url) END,
+		      cover_url  = CASE WHEN EXISTS (SELECT 1 FROM remote_media_cache c WHERE c.source_url = $4 AND c.local_url = users.cover_url)
+		                        THEN users.cover_url ELSE COALESCE(NULLIF($4, ''), users.cover_url) END,
+		      bio = $5, remote_synced_at = NOW(), ap_inbox_url = $9, profile_private = false, emojis = $10, manually_approves_followers = $11
 		RETURNING id
 	`, syntheticUsername, displayName, profile.IconURL, profile.ImageURL, HTMLToPlainText(profile.Summary),
 		handle, domain, actorURL, profile.Inbox, emojisJSON(profile.Emojis), profile.ManuallyApprovesFollowers,
@@ -2559,7 +2577,133 @@ func (s *Service) upsertRemoteAPUser(actorURL string, profile *remoteActorProfil
 	if err != nil {
 		return "", err
 	}
+	go s.cacheActorImages(id, profile.IconURL, profile.ImageURL)
 	return id, nil
+}
+
+// isSelfActorUpdate reports whether an Update's object is the sending actor
+// itself. Only the actor's own profile counts: anything else is left to
+// handleInboundUpdate, and one actor can never refresh another's profile.
+func isSelfActorUpdate(objectRaw json.RawMessage, verifiedActor string) bool {
+	var obj struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(objectRaw, &obj); err != nil || obj.ID == "" || obj.ID != verifiedActor {
+		return false
+	}
+	switch obj.Type {
+	case "Person", "Service", "Application", "Group", "Organization":
+		return true
+	}
+	return false
+}
+
+// refreshRemoteActor (AGORA-380) re-fetches a cached remote actor's profile
+// and writes it back, which also re-caches its avatar and cover. The profile
+// is fetched from the actor's own server rather than read off whatever
+// object triggered the refresh, so the result is always the authoritative
+// current one. An actor with no stub here is ignored: there's nothing to
+// refresh, and a stray Update shouldn't create one.
+//
+// remote_synced_at is bumped even when the fetch fails, so an actor whose
+// server is gone drops to the back of syncStaleAPActors' queue instead of
+// being retried on every pass.
+func (s *Service) refreshRemoteActor(actorURL string) error {
+	var id string
+	if err := s.db.QueryRow(`SELECT id FROM users WHERE ap_actor_url = $1 AND is_remote = true`, actorURL).Scan(&id); err != nil {
+		return err
+	}
+	if s.isInstanceBlocked(domainFromURL(actorURL)) {
+		return fmt.Errorf("instance is blocked")
+	}
+
+	var profile *remoteActorProfile
+	var err error
+	if signer := s.signerUserIDForActorFetch(actorURL); signer != "" {
+		profile, err = s.fetchActorProfileSigned(signer, actorURL)
+	} else {
+		profile, err = s.fetchActorProfileSignedAsInstance(actorURL)
+	}
+	if err != nil || profile == nil || profile.Inbox == "" {
+		s.db.Exec(`UPDATE users SET remote_synced_at = NOW() WHERE id = $1`, id)
+		if err == nil {
+			err = fmt.Errorf("actor has no inbox")
+		}
+		log.Printf("federation: refreshing actor %s: %v", actorURL, err)
+		return err
+	}
+	_, err = s.upsertRemoteAPUser(actorURL, profile)
+	return err
+}
+
+// syncStaleAPActors (AGORA-380) refreshes ActivityPub stubs not synced in a
+// day. Before this, a stub was fetched once on first sight and then kept
+// forever unless the account was followed again, so profile changes never
+// arrived from servers that don't send Update(Person) to us. The legacy
+// syncStaleRemoteUsers only ever covered Agora-protocol stubs (AGORA-330).
+//
+// Limited to accounts someone here actually sees: ones a local user follows
+// or is followed by, and ones that have posted here in the last two weeks.
+// That keeps the work bounded on an instance that has cached thousands of
+// relay authors nobody looks at.
+func (s *Service) syncStaleAPActors() {
+	rows, err := s.db.Query(`
+		SELECT u.ap_actor_url FROM users u
+		WHERE u.is_remote = true AND COALESCE(u.ap_actor_url, '') LIKE 'https://%'
+		  AND (u.remote_synced_at IS NULL OR u.remote_synced_at < NOW() - INTERVAL '24 hours')
+		  AND (
+		    EXISTS (SELECT 1 FROM ap_following f WHERE f.followed_actor_url = u.ap_actor_url)
+		    OR EXISTS (SELECT 1 FROM ap_followers f WHERE f.follower_actor_url = u.ap_actor_url)
+		    OR EXISTS (SELECT 1 FROM posts p WHERE p.author_id = u.id AND p.created_at > NOW() - INTERVAL '14 days')
+		  )
+		ORDER BY u.remote_synced_at ASC NULLS FIRST
+		LIMIT 50
+	`)
+	if err != nil {
+		log.Printf("federation: listing stale actors: %v", err)
+		return
+	}
+	var actors []string
+	for rows.Next() {
+		var a string
+		rows.Scan(&a)
+		actors = append(actors, a)
+	}
+	rows.Close()
+
+	for _, a := range actors {
+		s.refreshRemoteActor(a)
+	}
+}
+
+// cacheActorImages (AGORA-380) swaps a remote stub's hot-linked avatar and
+// cover for local copies. Run after the upsert rather than inside it so a
+// slow image server never holds up inbox processing; until it finishes the
+// stub simply shows the remote URL, as it always used to.
+//
+// Each swap only applies while the column still holds the URL it was copied
+// from, so a newer profile update that lands meanwhile isn't overwritten.
+func (s *Service) cacheActorImages(userID, iconURL, imageURL string) {
+	if s.mcache == nil {
+		return
+	}
+	for _, img := range []struct{ column, kind, url string }{
+		{"avatar_url", mediacache.KindAvatar, iconURL},
+		{"cover_url", mediacache.KindCover, imageURL},
+	} {
+		if img.url == "" {
+			continue
+		}
+		local, err := s.mcache.Store(img.url, img.kind)
+		if err != nil {
+			if err != mediacache.ErrDisabled {
+				log.Printf("federation: caching %s %s: %v", img.kind, img.url, err)
+			}
+			continue
+		}
+		s.db.Exec(`UPDATE users SET `+img.column+` = $2 WHERE id = $1 AND `+img.column+` = $3`, userID, local, img.url)
+	}
 }
 
 // HTMLToPlainText converts the (sanitized) HTML content fediverse software

@@ -99,6 +99,12 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// Media cleanup
 	r.Get("/admin/media/orphans",    s.ScanOrphans)
 	r.Delete("/admin/media/orphans", s.DeleteOrphans)
+
+	// AGORA-380: remote media cache
+	r.Get("/admin/media/remote-cache",        s.GetRemoteMediaCache)
+	r.Put("/admin/media/remote-cache",        s.UpdateRemoteMediaCache)
+	r.Post("/admin/media/remote-cache/prune", s.PruneRemoteMediaCache)
+	r.Delete("/admin/media/remote-cache",     s.ClearRemoteMediaCache)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

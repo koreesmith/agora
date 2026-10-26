@@ -260,6 +260,11 @@ export const adminApi = {
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
+  // Remote media cache (AGORA-380)
+  getRemoteMediaCache:    ()          => api.get('/admin/media/remote-cache'),
+  updateRemoteMediaCache: (data: any) => api.put('/admin/media/remote-cache', data),
+  pruneRemoteMediaCache:  ()          => api.post('/admin/media/remote-cache/prune'),
+  clearRemoteMediaCache:  ()          => api.delete('/admin/media/remote-cache'),
   // Custom domain approval queue (AGORA-286)
   listCustomDomains:   (status?: string)            => api.get('/admin/custom-domains', { params: { status } }),
   approveCustomDomain: (id: string)                 => api.post(`/admin/custom-domains/${id}/approve`),

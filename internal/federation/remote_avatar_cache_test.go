@@ -2,6 +2,7 @@ package federation
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -123,5 +124,79 @@ func TestUpsertCachesRemoteAvatar(t *testing.T) {
 	}
 	if got := waitForCopy(t); got == firstCopy || !strings.HasPrefix(got, mediacache.URLPrefix) {
 		t.Errorf("avatar after change = %q, want a new local copy", got)
+	}
+}
+
+// AGORA-382: the AGORA-331 startup repair turned every relative avatar on a
+// remote stub into https://{remote_instance}/{path}, including a cached copy
+// (/uploads/remote/...), which lives here and not on the remote server. Every
+// restart broke every cached avatar. Migrate must leave a cached copy alone,
+// put back the ones it already broke, and still repair a genuinely relative
+// legacy avatar the way AGORA-331 meant to.
+func TestMigrateLeavesCachedAvatarsAlone(t *testing.T) {
+	db, err := store.Open("postgres://agora:agora@localhost:15433/agora_test?sslmode=disable")
+	if err != nil {
+		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	n := time.Now().UnixNano()
+	hash := func(prefix string) string {
+		return fmt.Sprintf("%s%062x", prefix, n)
+	}
+	stub := func(name, avatar string, apActor bool) string {
+		t.Helper()
+		actor := ""
+		if apActor {
+			actor = fmt.Sprintf("https://masto.example/users/%s_%d", name, n)
+		}
+		var id string
+		// remote_user_id set on every stub, as upsertRemoteAPUser does for an
+		// ActivityPub stub too: that's what let AGORA-331 reach them.
+		if err := db.QueryRow(`
+			INSERT INTO users (username, email, password_hash, is_remote, remote_user_id, remote_instance, ap_actor_url, avatar_url, remote_synced_at)
+			VALUES ($1, $1, '', true, $2, 'masto.example', $3, $4, NOW()) RETURNING id
+		`, fmt.Sprintf("%s_%d@masto.example", name, n), name, actor, avatar).Scan(&id); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, id) })
+		return id
+	}
+	read := func(id string) (avatar string, synced bool) {
+		var s sql.NullTime
+		db.QueryRow(`SELECT avatar_url, remote_synced_at FROM users WHERE id = $1`, id).Scan(&avatar, &s)
+		return avatar, s.Valid
+	}
+
+	healthyCopy := "/uploads/remote/aa/" + hash("aa") + ".png"
+	keptCopy := "/uploads/remote/bb/" + hash("bb") + ".jpg"
+	prunedCopy := "/uploads/remote/cc/" + hash("cc") + ".jpg"
+	db.Exec(`INSERT INTO remote_media_cache (source_url, local_url, kind, content_type, bytes) VALUES ($1, $2, 'avatar', 'image/jpeg', 1)`,
+		fmt.Sprintf("https://masto.example/system/kept_%d.jpg", n), keptCopy)
+	t.Cleanup(func() { db.Exec(`DELETE FROM remote_media_cache WHERE local_url = $1`, keptCopy) })
+
+	healthy := stub("healthy", healthyCopy, true)
+	brokenKept := stub("brokenkept", "https://masto.example"+keptCopy, true)
+	brokenPruned := stub("brokenpruned", "https://masto.example"+prunedCopy, true)
+	legacy := stub("legacy", "/uploads/avatars/legacy.jpg", false)
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if got, _ := read(healthy); got != healthyCopy {
+		t.Errorf("cached avatar rewritten to %q, want it left at %q", got, healthyCopy)
+	}
+	if got, _ := read(brokenKept); got != keptCopy {
+		t.Errorf("broken avatar with its copy still cached = %q, want %q", got, keptCopy)
+	}
+	if got, synced := read(brokenPruned); got != "" || synced {
+		t.Errorf("broken avatar with no copy left = %q (synced %v), want cleared and queued for refresh", got, synced)
+	}
+	if got, _ := read(legacy); got != "https://masto.example/uploads/avatars/legacy.jpg" {
+		t.Errorf("legacy relative avatar = %q, want it absolutized as before", got)
 	}
 }

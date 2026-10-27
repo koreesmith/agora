@@ -1286,10 +1286,17 @@ var schema = []string{
 	// Unguarded and idempotent by nature: once a value starts with http it no
 	// longer matches, and nothing writes a relative avatar to a remote stub any
 	// more, so the predicate cannot become true again.
+	//
+	// AGORA-382: except a local copy from the remote media cache (AGORA-380),
+	// which is relative on purpose and lives on this instance, not the remote
+	// one. The remote_user_id scoping above never kept ActivityPub stubs out
+	// either (upsertRemoteAPUser sets it too), so without this exclusion every
+	// restart pointed every cached avatar at the remote server.
 	`UPDATE users SET avatar_url = 'https://' || remote_instance || '/' || LTRIM(avatar_url, '/')
 		WHERE is_remote = true
 		  AND remote_user_id != '' AND remote_instance != ''
-		  AND avatar_url != '' AND avatar_url NOT LIKE 'http%'`,
+		  AND avatar_url != '' AND avatar_url NOT LIKE 'http%'
+		  AND avatar_url NOT LIKE '/uploads/remote/%'`,
 
 	// AGORA-336: an accepted friendship with a remote Agora user implies a
 	// follow of them (ADR-002), because that is what makes their posts flow.
@@ -1747,4 +1754,21 @@ var schema = []string{
 		('remote_media_cache_max_mb',      '1024'),
 		('remote_media_cache_max_file_mb', '5')
 	 ON CONFLICT (key) DO NOTHING`,
+
+	// AGORA-382: repair the avatars the AGORA-331 statement above broke before
+	// it learned to leave cached copies alone. A broken one is this instance's
+	// own cache path with the remote server's host in front of it. Where the
+	// copy is still in the cache, point back at it; the hourly prune will
+	// have removed it if the row has been broken for a while, in which case
+	// clear the avatar (better a placeholder than a broken image) and put the
+	// account at the front of the refresh queue to fetch it again.
+	//
+	// Unguarded: the pattern is the cache's exact file naming behind a host,
+	// which nothing produces any more, so once repaired a row can't match.
+	`UPDATE users u SET avatar_url = c.local_url
+		FROM remote_media_cache c
+		WHERE u.is_remote = true AND u.avatar_url = 'https://' || u.remote_instance || c.local_url`,
+	`UPDATE users SET avatar_url = '', remote_synced_at = NULL
+		WHERE is_remote = true
+		  AND avatar_url ~ '^https://[^/]+/uploads/remote/[0-9a-f]{2}/[0-9a-f]{64}\.(jpg|png|gif|webp|avif)$'`,
 }

@@ -287,6 +287,11 @@ func (s *Service) fetchRemoteProfile(handle, instance string) map[string]string 
 
 // syncStaleRemoteUsers re-fetches profiles for remote users not synced in 24h.
 func (s *Service) syncStaleRemoteUsers() {
+	// AGORA-382: remote_user_id alone never actually meant "legacy", because
+	// upsertRemoteAPUser fills it in for ActivityPub stubs too. Without the
+	// ap_actor_url check this re-synced those as well, overwriting a cached
+	// avatar (AGORA-380) with the remote URL every day; syncStaleAPActors is
+	// what refreshes them.
 	// AGORA-330: scoped to legacy stubs. fetchRemoteProfile reads Agora's own
 	// /federation/users endpoint keyed on remote_user_id, which an ActivityPub
 	// row does not have, so those rows could never sync here and only consumed
@@ -298,6 +303,7 @@ func (s *Service) syncStaleRemoteUsers() {
 		WHERE is_remote = true
 		  AND COALESCE(remote_user_id, '') != ''
 		  AND COALESCE(remote_instance, '') != ''
+		  AND COALESCE(ap_actor_url, '') = ''
 		  AND (remote_synced_at IS NULL OR remote_synced_at < NOW() - INTERVAL '24 hours')
 		LIMIT 50
 	`)

@@ -298,15 +298,19 @@ func (c *Cache) totalBytes() int64 {
 	return n.Int64
 }
 
-// inUse is the SQL condition for a copy that some profile still points at.
-const inUse = `EXISTS (SELECT 1 FROM users u WHERE u.avatar_url = c.local_url OR u.cover_url = c.local_url)`
+// unused is the SQL condition for a copy no profile points at any more.
+// AGORA-394: two NOT EXISTS, not one EXISTS with an OR. The OR kept Postgres
+// from hash anti-joining, so it rescanned users once per cached file, which
+// took seconds on a larger instance; split, it's one pass over each column.
+const unused = `NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_url = c.local_url)
+	AND NOT EXISTS (SELECT 1 FROM users u WHERE u.cover_url = c.local_url)`
 
 // Stats reports the cache's current size.
 func (c *Cache) Stats() Stats {
 	var st Stats
 	c.db.QueryRow(`SELECT COUNT(DISTINCT local_url) FROM remote_media_cache`).Scan(&st.Files)
 	st.Bytes = c.totalBytes()
-	c.db.QueryRow(`SELECT COUNT(DISTINCT c.local_url) FROM remote_media_cache c WHERE NOT ` + inUse).Scan(&st.Orphan)
+	c.db.QueryRow(`SELECT COUNT(DISTINCT c.local_url) FROM remote_media_cache c WHERE ` + unused).Scan(&st.Orphan)
 	return st
 }
 
@@ -320,7 +324,7 @@ func (c *Cache) Prune() (PruneResult, error) {
 
 	var res PruneResult
 
-	rows, err := c.db.Query(`SELECT DISTINCT c.local_url FROM remote_media_cache c WHERE NOT ` + inUse)
+	rows, err := c.db.Query(`SELECT DISTINCT c.local_url FROM remote_media_cache c WHERE ` + unused)
 	if err != nil {
 		return res, err
 	}
@@ -341,22 +345,41 @@ func (c *Cache) Prune() (PruneResult, error) {
 		res.BytesFreed += freed
 	}
 
+	// AGORA-394: the copies to evict are picked in one ordered pass, oldest
+	// first until the rest fit, rather than re-reading the total and the
+	// single oldest copy before every removal. That was a few queries per
+	// file, minutes of holding pruneMu once a lowered limit left thousands
+	// of files over it.
 	target := (c.Settings().MaxMB << 20) * 9 / 10
-	for c.totalBytes() > target {
-		var oldest string
-		if err := c.db.QueryRow(`
-			SELECT local_url FROM remote_media_cache
-			GROUP BY local_url ORDER BY MAX(fetched_at) ASC LIMIT 1
-		`).Scan(&oldest); err != nil {
-			break
-		}
-		freed, err := c.remove(oldest)
+	if total := c.totalBytes(); total > target {
+		rows, err := c.db.Query(`
+			SELECT local_url, MAX(bytes) FROM remote_media_cache
+			GROUP BY local_url ORDER BY MAX(fetched_at) ASC
+		`)
 		if err != nil {
-			log.Printf("mediacache: evicting %s: %v", oldest, err)
-			break
+			log.Printf("mediacache: choosing copies to evict: %v", err)
+		} else {
+			var evict []string
+			for total > target && rows.Next() {
+				var u string
+				var size int64
+				if err := rows.Scan(&u, &size); err != nil {
+					break
+				}
+				evict = append(evict, u)
+				total -= size
+			}
+			rows.Close()
+			for _, u := range evict {
+				freed, err := c.remove(u)
+				if err != nil {
+					log.Printf("mediacache: evicting %s: %v", u, err)
+					continue
+				}
+				res.Evicted++
+				res.BytesFreed += freed
+			}
 		}
-		res.Evicted++
-		res.BytesFreed += freed
 	}
 
 	res.BytesAfter = c.totalBytes()

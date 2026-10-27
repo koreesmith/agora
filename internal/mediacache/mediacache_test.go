@@ -97,6 +97,18 @@ func remoteUser(t *testing.T, db *store.DB, avatar string) string {
 	return id
 }
 
+// countUnused is the unused-copy count worked out the slow, obvious way, to
+// check Stats' faster query against.
+func countUnused(t *testing.T, db *store.DB) int64 {
+	t.Helper()
+	var n int64
+	db.QueryRow(`
+		SELECT COUNT(DISTINCT c.local_url) FROM remote_media_cache c
+		WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_url = c.local_url OR u.cover_url = c.local_url)
+	`).Scan(&n)
+	return n
+}
+
 func avatarOf(t *testing.T, db *store.DB, id string) string {
 	t.Helper()
 	var v string
@@ -206,6 +218,68 @@ func TestPrune(t *testing.T) {
 		}
 		if avatarOf(t, db, user) != lUsed {
 			t.Error("profile using a kept copy was changed")
+		}
+	})
+
+	// AGORA-394: the unused check is split into an avatar and a cover half;
+	// this covers the cover half on its own.
+	t.Run("keeps a copy used only as a cover", func(t *testing.T) {
+		c := newCache(t, db, srv, defaults)
+		src := srv.serve(fakePNG(1024))
+		cleanupSources(t, db, src)
+		local, _ := c.Store(src, KindCover)
+		user := remoteUser(t, db, "")
+		db.Exec(`UPDATE users SET cover_url = $2 WHERE id = $1`, user, local)
+
+		if st := c.Stats(); st.Orphan != countUnused(t, db) {
+			t.Errorf("Stats counts %d unused, want %d", st.Orphan, countUnused(t, db))
+		}
+		if _, err := c.Prune(); err != nil {
+			t.Fatalf("Prune: %v", err)
+		}
+		if _, err := os.Stat(c.pathFor(local)); err != nil {
+			t.Error("a copy in use as a cover was removed")
+		}
+	})
+
+	t.Run("evicts several of the oldest in one prune when far over", func(t *testing.T) {
+		// Five 400KB copies in use against a 1MB limit: the three oldest have
+		// to go for the rest to fit under 90% of it. They're stored under the
+		// default limit, so Store doesn't start background prunes of its own
+		// that would race this one (and the next test), then pruned through a
+		// second cache over the same files with the 1MB limit.
+		fill := newCache(t, db, srv, defaults)
+		c := New(db, fill.dir, srv.Client())
+		c.fixed = &Settings{Enabled: true, MaxMB: 1, MaxFileMB: 1}
+		var sources, locals, users []string
+		for i := 0; i < 5; i++ {
+			src := srv.serve(fakePNG(400 << 10))
+			local, err := fill.Store(src, KindAvatar)
+			if err != nil {
+				t.Fatalf("Store %d: %v", i, err)
+			}
+			sources = append(sources, src)
+			locals = append(locals, local)
+			users = append(users, remoteUser(t, db, local))
+			time.Sleep(10 * time.Millisecond) // distinct fetched_at order
+		}
+		cleanupSources(t, db, sources...)
+
+		if _, err := c.Prune(); err != nil {
+			t.Fatalf("Prune: %v", err)
+		}
+		if c.totalBytes() > (1<<20)*9/10 {
+			t.Errorf("cache is %d bytes after one prune, want at most 90%% of the limit", c.totalBytes())
+		}
+		for i := 0; i < 3; i++ {
+			if got := avatarOf(t, db, users[i]); got != sources[i] {
+				t.Errorf("copy %d (old) not evicted: avatar = %q", i, got)
+			}
+		}
+		for i := 3; i < 5; i++ {
+			if got := avatarOf(t, db, users[i]); got != locals[i] {
+				t.Errorf("copy %d (new) was evicted: avatar = %q", i, got)
+			}
 		}
 	})
 

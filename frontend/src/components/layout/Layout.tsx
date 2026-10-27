@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
-import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles } from 'lucide-react'
+import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles, Compass } from 'lucide-react'
 import WhatsNewModal from '../common/WhatsNewModal'
+import { welcomeShownThisSession } from '../welcome/wizardSession'
 import SearchBar from './SearchBar'
 import { useAuthStore } from '../../store/auth'
 import { notificationsApi, instanceApi, dmApi } from '../../api'
@@ -127,6 +128,13 @@ export default function Layout() {
             className="flex-1 flex items-center justify-center py-2 rounded-lg text-agora-500 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-800 transition-colors">
             {dark ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {/* AGORA-388: replay the getting started wizard. Leaves the
+              account's onboarding state alone. */}
+          <Link to="/welcome" onClick={() => setMobileOpen(false)}
+            title="Getting started" aria-label="Getting started tour"
+            className="flex-1 flex items-center justify-center py-2 rounded-lg text-agora-500 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-800 transition-colors">
+            <Compass size={18} />
+          </Link>
           {/* AGORA-132: Help & What's New */}
           <a href="/docs#user/index" target="_blank" rel="noopener noreferrer"
             title="Help & docs" aria-label="Help and docs"
@@ -147,6 +155,13 @@ export default function Layout() {
       </div>
     </div>
   )
+
+  // AGORA-388: a new account goes through the getting started wizard before
+  // anything else. Once per browser session (see wizardSession), so leaving
+  // the wizard by a link doesn't bounce straight back to it.
+  if (user?.onboarding_completed === false && !welcomeShownThisSession()) {
+    return <Navigate to="/welcome" replace />
+  }
 
   return (
     <div className="min-h-screen flex">

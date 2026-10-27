@@ -104,6 +104,12 @@ export const usersApi = {
   disablePostNotify:(username: string) => api.delete(`/users/${username}/notify`),
 }
 
+// ── Getting started wizard (AGORA-387) ────────────────────────────────────────
+export const onboardingApi = {
+  complete:    () => api.post('/onboarding/complete'),
+  suggestions: () => api.get('/onboarding/suggestions'),
+}
+
 // ── Friends ───────────────────────────────────────────────────────────────────
 export const friendsApi = {
   listFriends:      ()                           => api.get('/friends'),

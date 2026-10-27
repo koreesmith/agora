@@ -22,7 +22,8 @@ func TestMeReportsOnboardingAndDmPrivacy(t *testing.T) {
 	if err != nil {
 		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
 	}
-	defer db.Close()
+	// Registered first so it runs last, after the row cleanups below.
+	t.Cleanup(func() { db.Close() })
 	if err := db.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -81,7 +82,8 @@ func TestInstanceInfoReportsNetworkSwitchesAndDomain(t *testing.T) {
 	if err != nil {
 		t.Skipf("skipping: agora-postgres-test not reachable: %v", err)
 	}
-	defer db.Close()
+	// Registered first so it runs last, after the row cleanups below.
+	t.Cleanup(func() { db.Close() })
 	if err := db.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

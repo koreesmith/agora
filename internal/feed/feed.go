@@ -119,6 +119,10 @@ type fedSender interface {
 // protocols are independent opt-ins with no shared lifecycle.
 type atprotoSender interface {
 	BroadcastPost(userID, postID string)
+	// AGORA-384: pull a Bluesky thread's replies in before its comments are
+	// shown. Returns at once for a post that isn't a Bluesky thread, or one
+	// synced in the last minute.
+	SyncBlueskyThread(postID string)
 	// BroadcastPostUpdate/BroadcastPostDelete (AGORA-202/203) mirror
 	// fedSender's BroadcastUpdatePost/BroadcastDeletePost, but no-op
 	// internally (rather than needing a call-site check here) if the post
@@ -2296,6 +2300,12 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
+	// AGORA-384: a thread from Bluesky only ever had the replies this
+	// instance happened to ingest. Fetch the rest from Bluesky first, so the
+	// conversation is complete when it's opened.
+	if s.atproto != nil {
+		s.atproto.SyncBlueskyThread(postID)
+	}
 	// viewerID feeds a uuid column below; an empty string (guest) is invalid
 	// input for the uuid type, so use NULL instead.
 	var viewerParam any = viewerID

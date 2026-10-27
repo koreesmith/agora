@@ -58,6 +58,7 @@ func newFakeAtprotoSender() *fakeAtprotoSender {
 func (f *fakeAtprotoSender) BroadcastPost(userID, postID string)                       {}
 func (f *fakeAtprotoSender) BroadcastPostUpdate(userID, postID string)                 {}
 func (f *fakeAtprotoSender) BroadcastPostDelete(userID, postID string)                 {}
+func (f *fakeAtprotoSender) SyncBlueskyThread(postID string) {}
 func (f *fakeAtprotoSender) DeliverReply(userID, commentID, replyToID string)          {}
 func (f *fakeAtprotoSender) DeliverReplyUpdate(userID, commentID, replyToID string)    {}
 func (f *fakeAtprotoSender) DeliverLike(userID, postID string)                         { f.likeCalls <- postID }

@@ -40,6 +40,7 @@ type recordingAtprotoSender struct{ broadcasts chan string }
 func (f *recordingAtprotoSender) BroadcastPost(userID, postID string)                     { f.broadcasts <- postID }
 func (f *recordingAtprotoSender) BroadcastPostUpdate(userID, postID string)               {}
 func (f *recordingAtprotoSender) BroadcastPostDelete(userID, postID string)               {}
+func (f *recordingAtprotoSender) SyncBlueskyThread(postID string) {}
 func (f *recordingAtprotoSender) DeliverReply(userID, commentID, replyToID string)        {}
 func (f *recordingAtprotoSender) DeliverReplyUpdate(userID, commentID, replyToID string)  {}
 func (f *recordingAtprotoSender) DeliverLike(userID, postID string)                       {}

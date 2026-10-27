@@ -1765,9 +1765,19 @@ var schema = []string{
 	//
 	// Unguarded: the pattern is the cache's exact file naming behind a host,
 	// which nothing produces any more, so once repaired a row can't match.
+	//
+	// The cache row is found by extracting the path from the broken URL and
+	// matching it to local_url, which is indexed, rather than by building
+	// 'https://' || remote_instance || local_url for every user and cache row
+	// pair. That first version compared every remote user with every cached
+	// file: 16s at 20k of each, growing with the product, long enough on a
+	// larger instance for startup to outlast the backend's health check.
 	`UPDATE users u SET avatar_url = c.local_url
 		FROM remote_media_cache c
-		WHERE u.is_remote = true AND u.avatar_url = 'https://' || u.remote_instance || c.local_url`,
+		WHERE u.is_remote = true
+		  AND u.avatar_url LIKE 'https://%/uploads/remote/%'
+		  AND c.local_url = substring(u.avatar_url from '^https://[^/]+(/uploads/remote/.+)$')
+		  AND u.avatar_url = 'https://' || u.remote_instance || c.local_url`,
 	`UPDATE users SET avatar_url = '', remote_synced_at = NULL
 		WHERE is_remote = true
 		  AND avatar_url ~ '^https://[^/]+/uploads/remote/[0-9a-f]{2}/[0-9a-f]{64}\.(jpg|png|gif|webp|avif)$'`,

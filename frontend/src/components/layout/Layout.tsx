@@ -61,7 +61,7 @@ export default function Layout() {
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
     { to: '/pages',                     icon: BookOpen,       label: 'Pages' },
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
-    { to: `/profile/${user?.username}`, icon: User,           label: 'Profile' },
+    { to: `/profile/${user?.username}`, icon: User,           label: 'Profile',       photo: user?.avatar_url },
     { to: '/settings',                  icon: Settings,       label: 'Settings' },
     ...(user?.role === 'admin' || user?.role === 'moderator'
       ? [{ to: '/admin', icon: Shield, label: 'Admin' }]
@@ -97,14 +97,20 @@ export default function Layout() {
           constrain a flex child's height; min-h-0 is what lets it shrink and
           scroll instead of growing past its container. */}
       <nav className="flex-1 min-h-0 overflow-y-auto px-2 space-y-0.5">
-        {nav.map(({ to, icon: Icon, label, badge }) => (
+        {nav.map(({ to, icon: Icon, label, badge, photo }) => (
           <Link key={to} to={to} onClick={() => setMobileOpen(false)}
             className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors relative ${
               isActive(to)
                 ? 'bg-agora-100 dark:bg-agora-700 text-agora-900 dark:text-agora-50'
                 : 'text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-800'
             }`}>
-            <Icon size={18} />
+            {/* AGORA-392: Profile shows the account's own photo when it has
+                one. Drawn a little larger than the icons, but the negative
+                margin keeps it to an icon's 18px of width so this label still
+                lines up with the others. */}
+            {photo
+              ? <img src={photo} alt="" className="w-[22px] h-[22px] -mx-[2px] rounded-full object-cover flex-shrink-0" />
+              : <Icon size={18} />}
             {label}
             {badge != null && badge > 0 && (
               <span className="ml-auto bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">

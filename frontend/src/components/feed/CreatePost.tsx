@@ -19,7 +19,9 @@ interface Preview {
   domain: string
 }
 
-export default function CreatePost() {
+// AGORA-391: autoFocus is for "Write your first post" at the end of the
+// getting started wizard, which lands on the feed ready to type.
+export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) {
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [content, setContent] = useState('')
@@ -455,6 +457,7 @@ export default function CreatePost() {
             onPaste={handlePaste}
             placeholder="What's on your mind? Use @username to tag someone."
             rows={3}
+            autoFocus={autoFocus}
             autoComplete="off"
             data-1p-ignore="true"
             data-lpignore="true"

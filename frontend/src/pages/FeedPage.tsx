@@ -43,7 +43,9 @@ export default function FeedPage() {
   return (
     <div className="space-y-4">
       <FeedSwitcher activeFeedId={activeFeedId} onChange={setActiveFeedId} />
-      <CreatePost />
+      {/* AGORA-391: ?compose=1 comes from the getting started wizard's
+          "Write your first post". */}
+      <CreatePost autoFocus={searchParams.get('compose') === '1'} />
       {isLoading && <div className="text-center text-agora-400 py-8">Loading…</div>}
       {posts.map(p => <PostCard key={p.id} post={p} invalidateKey="feed" />)}
       {posts.length === 0 && !isLoading && (

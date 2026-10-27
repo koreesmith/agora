@@ -7,11 +7,12 @@ import { useAuthStore } from '../store/auth'
 import { markWhatsNewSeen } from '../components/common/WhatsNewModal'
 import { markWelcomeShown } from '../components/welcome/wizardSession'
 import type { InstanceInfo, StepDef, StepId, StepProps, WizardNotes } from '../components/welcome/types'
-import PlaceholderStep from '../components/welcome/PlaceholderStep'
 import WelcomeStep from '../components/welcome/WelcomeStep'
 import ProfileStep from '../components/welcome/ProfileStep'
 import PrivacyStep from '../components/welcome/PrivacyStep'
 import { BlueskyStep, FediverseStep } from '../components/welcome/NetworkStep'
+import FindPeopleStep from '../components/welcome/FindPeopleStep'
+import AllSetStep from '../components/welcome/AllSetStep'
 
 // AGORA-388: the getting started wizard (AGORA-386). New accounts land here
 // from Layout after their first sign-in; anyone can come back through the
@@ -19,13 +20,13 @@ import { BlueskyStep, FediverseStep } from '../components/welcome/NetworkStep'
 // reloads, and the recap's Change links all work.
 
 const ALL_STEPS: StepDef[] = [
-  { id: 'welcome',   label: 'Welcome',      Component: WelcomeStep, bare: true },
+  { id: 'welcome',   label: 'Welcome',      Component: WelcomeStep,    bare: true },
   { id: 'profile',   label: 'Your profile', Component: ProfileStep },
   { id: 'privacy',   label: 'Privacy',      Component: PrivacyStep },
   { id: 'bluesky',   label: 'Bluesky',      Component: BlueskyStep },
   { id: 'fediverse', label: 'Fediverse',    Component: FediverseStep },
-  { id: 'people',    label: 'Find people',  Component: PlaceholderStep },
-  { id: 'done',      label: 'All set',      Component: PlaceholderStep },
+  { id: 'people',    label: 'Find people',  Component: FindPeopleStep },
+  { id: 'done',      label: 'All set',      Component: AllSetStep },
 ]
 
 const NOTES_KEY = 'agora_welcome_notes'

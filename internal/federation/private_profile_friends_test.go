@@ -206,3 +206,74 @@ func TestRefreshRemoteProfileRules(t *testing.T) {
 		t.Error("started a second bulk refresh while one was running")
 	}
 }
+
+// AGORA-383: a new friendship with a remote user refreshes their profile, so
+// a private one's picture shows up straight away instead of at the next
+// hourly refresh. Accepting their request waits for our Accept to land first;
+// their accepting ours needs no wait.
+func TestFriendAcceptanceRefreshesProfile(t *testing.T) {
+	db := agora366TestDB(t)
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://agora366.example"}}
+
+	type call struct {
+		remoteUserID string
+		delays       []time.Duration
+	}
+	var calls []call
+	orig := scheduleFriendProfileRefresh
+	scheduleFriendProfileRefresh = func(_ *Service, remoteUserID string, delays []time.Duration) {
+		calls = append(calls, call{remoteUserID, delays})
+	}
+	t.Cleanup(func() { scheduleFriendProfileRefresh = orig })
+
+	t.Run("they accept our request: refresh right away", func(t *testing.T) {
+		calls = nil
+		localID, _ := seedAgora366User(t, db, "agora383a", false)
+		peer := seedRemotePeer(t, db, false)
+		if _, err := db.Exec(`INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, 'pending')`, localID, peer.id); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM friendships WHERE requester_id = $1`, localID) })
+
+		s.handleInboundFriendAcceptAP(localID, peer.id)
+		if len(calls) != 1 || calls[0].remoteUserID != peer.id || len(calls[0].delays) != 1 || calls[0].delays[0] != 0 {
+			t.Fatalf("calls = %+v, want one immediate refresh of %s", calls, peer.id)
+		}
+
+		// A repeated Accept for a friendship already accepted changes nothing
+		// and schedules nothing.
+		calls = nil
+		s.handleInboundFriendAcceptAP(localID, peer.id)
+		if len(calls) != 0 {
+			t.Errorf("duplicate Accept scheduled %+v", calls)
+		}
+	})
+
+	t.Run("we accept their request: refresh once our Accept has landed", func(t *testing.T) {
+		calls = nil
+		localID, _ := seedAgora366User(t, db, "agora383b", false)
+		peer := seedRemotePeer(t, db, false)
+		t.Cleanup(func() { db.Exec(`DELETE FROM ap_delivery_queue WHERE actor_user_id = $1`, localID) })
+
+		s.SendFriendAccept(localID, peer.id)
+		if len(calls) != 1 || calls[0].remoteUserID != peer.id {
+			t.Fatalf("calls = %+v, want a refresh of %s", calls, peer.id)
+		}
+		if d := calls[0].delays; len(d) == 0 || d[0] < 20*time.Second {
+			t.Errorf("delays = %v, want the first one to wait out the 20s delivery queue", d)
+		}
+	})
+
+	t.Run("an instance-initiated refresh skips the per-user cooldown", func(t *testing.T) {
+		peer := seedRemotePeer(t, db, false)
+		db.Exec(`UPDATE users SET remote_synced_at = NOW() WHERE id = $1`, peer.id)
+		// peer.example doesn't resolve: an error means a fetch was attempted,
+		// where RefreshRemoteProfile would have stopped at the cooldown.
+		if err := s.refreshRemoteUser(peer.id); err == nil {
+			t.Error("refreshRemoteUser returned nil for a just-synced account; it should not apply the cooldown")
+		}
+	})
+}

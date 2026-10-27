@@ -450,22 +450,10 @@ func (s *Service) isFriendFetch(r *http.Request, localUserID string) bool {
 	if err != nil {
 		return false
 	}
-	// remoteUserIDForActor rather than a plain ap_actor_url match: a friend
-	// made over the legacy protocol may only have a stub without one.
-	remoteID := s.remoteUserIDForActor(signer)
-	if remoteID == "" {
-		return false
-	}
-	return s.areFriends(localUserID, remoteID)
-}
-
-func (s *Service) areFriends(a, b string) bool {
-	var ok bool
-	s.db.QueryRow(`
-		SELECT EXISTS(SELECT 1 FROM friendships WHERE status = 'accepted'
-		  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)))
-	`, a, b).Scan(&ok)
-	return ok
+	// isAcceptedFriendByActor resolves through remoteUserIDForActor, so a
+	// friend made over the legacy protocol, whose stub may have no
+	// ap_actor_url, still counts.
+	return s.isAcceptedFriendByActor(localUserID, signer)
 }
 
 // BroadcastActorUpdate delivers a signed Update(Person) activity to every
@@ -2790,16 +2778,25 @@ const remoteRefreshCooldown = 2 * time.Minute
 // ActivityPub stub and a legacy Agora-protocol one. A refresh within the
 // cooldown is a no-op: the profile is as fresh as it is going to get.
 func (s *Service) RefreshRemoteProfile(remoteUserID string) error {
-	var actorURL, handle, instance string
 	var synced sql.NullTime
-	if err := s.db.QueryRow(`
-		SELECT COALESCE(ap_actor_url, ''), COALESCE(remote_user_id, ''), COALESCE(remote_instance, ''), remote_synced_at
-		  FROM users WHERE id = $1 AND is_remote = true
-	`, remoteUserID).Scan(&actorURL, &handle, &instance, &synced); err != nil {
+	if err := s.db.QueryRow(`SELECT remote_synced_at FROM users WHERE id = $1 AND is_remote = true`, remoteUserID).Scan(&synced); err != nil {
 		return ErrNotRefreshable
 	}
 	if synced.Valid && time.Since(synced.Time) < remoteRefreshCooldown {
 		return nil
+	}
+	return s.refreshRemoteUser(remoteUserID)
+}
+
+// refreshRemoteUser is RefreshRemoteProfile without the cooldown, for
+// refreshes the instance decides on itself rather than ones a person asks for.
+func (s *Service) refreshRemoteUser(remoteUserID string) error {
+	var actorURL, handle, instance string
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(ap_actor_url, ''), COALESCE(remote_user_id, ''), COALESCE(remote_instance, '')
+		  FROM users WHERE id = $1 AND is_remote = true
+	`, remoteUserID).Scan(&actorURL, &handle, &instance); err != nil {
+		return ErrNotRefreshable
 	}
 	switch {
 	case strings.HasPrefix(actorURL, "https://"):

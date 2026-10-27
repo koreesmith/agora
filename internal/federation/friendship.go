@@ -241,6 +241,13 @@ func (s *Service) SendFriendAccept(localUserID, requesterUserID string) {
 	// Follow them back, marked, so both sides end up with a friendship rather
 	// than one friendship and one follow.
 	s.deliverFriendActivity(localUserID, requesterUserID, "Follow", "friend accept")
+
+	// AGORA-383: the requester's profile may be private, which their instance
+	// only shows us in full once it has recorded this friendship as accepted,
+	// and it does that when the Accept above arrives. That goes through the
+	// delivery queue, so wait for it rather than refreshing straight away and
+	// getting the redacted profile back.
+	scheduleFriendProfileRefresh(s, requesterUserID, friendAcceptSentRefreshDelays)
 }
 
 // SendFriendUndo withdraws or ends a friendship: an Undo of the marked Follow.
@@ -500,6 +507,33 @@ func (s *Service) handleInboundFriendAcceptAP(localUserID, remoteUserID string) 
 	if s.notif != nil {
 		s.notif.Create(localUserID, remoteUserID, "friend_accepted", "", "")
 	}
+	// AGORA-383: they've accepted, so their instance now shows us their full
+	// profile even if it's private. It recorded the friendship before sending
+	// this Accept, so there's nothing to wait for.
+	scheduleFriendProfileRefresh(s, remoteUserID, friendAcceptReceivedRefreshDelays)
+}
+
+// When to refresh a new remote friend's profile (AGORA-383), measured from
+// the acceptance. Accepting their request needs our Accept delivered first
+// (the queue drains every 20s), so it waits, then tries once more later in
+// case delivery was slow. Their acceptance of ours needs no wait.
+var (
+	friendAcceptSentRefreshDelays     = []time.Duration{30 * time.Second, 3 * time.Minute}
+	friendAcceptReceivedRefreshDelays = []time.Duration{0}
+)
+
+// scheduleFriendProfileRefresh refreshes a remote friend's cached profile in
+// the background after each delay. A variable so tests can see it called
+// without waiting or reaching the network.
+var scheduleFriendProfileRefresh = func(s *Service, remoteUserID string, delays []time.Duration) {
+	go func() {
+		for _, d := range delays {
+			time.Sleep(d)
+			if err := s.refreshRemoteUser(remoteUserID); err != nil {
+				log.Printf("federation: refreshing new friend %s: %v", remoteUserID, err)
+			}
+		}
+	}()
 }
 
 // friendRequestsAccepted reports whether an inbound friend request from this

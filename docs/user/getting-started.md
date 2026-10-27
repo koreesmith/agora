@@ -20,6 +20,8 @@ The first time you sign in on the web, Agora walks you through a few short steps
 5. **Find people:** friends on your instance, people to follow on Bluesky or the Fediverse, and groups to join.
 6. **All set:** a recap, and a map of where everything lives.
 
+If your account is older than the tour, you'll see it once too, the next time you open Agora on the web. Each step starts from the settings you already have.
+
 Every step is optional. **Skip setup** at the top leaves everything as it is, and anything you choose can be changed later in **Settings**. Either way, the tour won't show up on its own again.
 
 To go through it again, click the **compass** icon at the bottom of the sidebar.

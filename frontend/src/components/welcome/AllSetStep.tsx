@@ -172,7 +172,7 @@ export default function AllSetStep({ steps, instance, me, notes, goTo, back, fin
             Go to my feed
           </button>
           <button type="button" onClick={() => finish('/feed?compose=1')} disabled={finishing} className="btn-primary min-h-[48px] px-5 text-base">
-            <PenLine size={18} aria-hidden="true" /> Write your first post
+            <PenLine size={18} aria-hidden="true" /> {me.onboarding_returning ? 'Write a post' : 'Write your first post'}
           </button>
         </div>
         <p className="flex items-center gap-2 text-sm text-agora-600 dark:text-agora-400">

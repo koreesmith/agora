@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check } from 'lucide-react'
 import { authApi, instanceApi, onboardingApi } from '../api'
 import { useAuthStore } from '../store/auth'
@@ -15,7 +15,8 @@ import FindPeopleStep from '../components/welcome/FindPeopleStep'
 import AllSetStep from '../components/welcome/AllSetStep'
 
 // AGORA-388: the getting started wizard (AGORA-386). New accounts land here
-// from Layout after their first sign-in; anyone can come back through the
+// from Layout after their first sign-in, and accounts that predate the wizard
+// once as a re-introduction (AGORA-393); anyone can come back through the
 // sidebar's Getting started icon. The current step lives in ?step= so Back,
 // reloads, and the recap's Change links all work.
 
@@ -39,6 +40,7 @@ function loadNotes(): WizardNotes {
 
 export default function WelcomePage() {
   const { updateUser } = useAuthStore()
+  const qc = useQueryClient()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const [notes, setNotesState] = useState<WizardNotes>(loadNotes)
@@ -90,7 +92,12 @@ export default function WelcomePage() {
     // in a later session, which beats trapping it here now.
     try { await onboardingApi.complete() } catch { /* see above */ }
     updateUser({ onboarding_completed: true })
-    markWhatsNewSeen()
+    // Layout now decides from this cached copy first (AGORA-393).
+    qc.setQueryData(['my-profile'], (old: any) => old && { ...old, onboarding_completed: true })
+    // For a brand-new account What's New would only repeat the wizard, but a
+    // returning member hasn't seen what changed, so theirs still shows on the
+    // feed afterwards (AGORA-393).
+    if (!me?.onboarding_returning) markWhatsNewSeen()
     try { sessionStorage.removeItem(NOTES_KEY) } catch { /* storage unavailable */ }
     navigate(to, { replace: true })
   }

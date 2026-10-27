@@ -40,7 +40,7 @@ First-run setup. Only works when no admin exists.
 ## `GET /api/auth/me` 🔒
 **Response 200:** User object
 
-Both login and `/auth/me` include `onboarding_completed` (bool). `false` means the account hasn't finished or skipped the getting started wizard yet, and the web client sends it to `/welcome`. `/auth/me` also includes `dm_privacy`.
+Both login and `/auth/me` include `onboarding_completed` (bool). `false` means the account hasn't finished or skipped the getting started wizard yet, and the web client sends it to `/welcome`. `/auth/me` also includes `dm_privacy`, and `onboarding_returning` (bool): `true` when the account was created before the wizard first shipped on this instance, which the wizard uses to greet it as a returning member.
 
 ## `GET /api/instance`
 Public instance info: `instance_name`, `instance_description`, `registration_mode`, `logo_url`, `user_invites_enabled` (all strings), plus `activitypub_enabled` and `atproto_enabled` (booleans: the instance-wide network switches, with the same defaults the server enforces) and `domain` (the bare host that Bluesky and Fediverse handles are built from).

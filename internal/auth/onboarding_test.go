@@ -67,10 +67,20 @@ func TestMeReportsOnboardingAndDmPrivacy(t *testing.T) {
 	if body["dm_privacy"] != "friends" {
 		t.Errorf("dm_privacy = %v, want \"friends\"", body["dm_privacy"])
 	}
+	if body["onboarding_returning"] != false {
+		t.Errorf("onboarding_returning = %v for a new account, want false", body["onboarding_returning"])
+	}
 
 	db.Exec(`UPDATE users SET onboarding_completed_at = NOW() WHERE id = $1`, id)
 	if got := me()["onboarding_completed"]; got != true {
 		t.Errorf("onboarding_completed = %v after completing, want true", got)
+	}
+
+	// AGORA-393: an account created before the wizard shipped on this
+	// instance is greeted as a returning member.
+	db.Exec(`UPDATE users SET created_at = '2000-01-01' WHERE id = $1`, id)
+	if got := me()["onboarding_returning"]; got != true {
+		t.Errorf("onboarding_returning = %v for an account from 2000, want true", got)
 	}
 }
 

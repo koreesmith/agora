@@ -45,23 +45,76 @@ func insertOnboardingUser(t *testing.T, db *store.DB, name string, private bool)
 	return id
 }
 
-// The backfill stamps the accounts that existed when it first ran. A rerun,
-// which happens on every restart, must leave accounts created since then
-// pending, or nobody would ever see the wizard.
-func TestOnboardingBackfillLeavesNewAccountsPending(t *testing.T) {
+// AGORA-393: where AGORA-387's backfill already ran, the re-introduction
+// clears its stamps once and keeps later ones, which belong to accounts that
+// have been through the wizard since. Reruns, on every restart, clear nothing.
+func TestOnboardingReintroductionClearsOnlyBackfillStamps(t *testing.T) {
 	db := openOnboardingTestDB(t)
 
-	id := insertOnboardingUser(t, db, "agora387new", false)
+	var reintroAt time.Time
+	if err := db.QueryRow(`SELECT applied_at FROM schema_backfills WHERE name = 'onboarding_reintroduction'`).Scan(&reintroAt); err != nil {
+		t.Fatalf("read re-introduction marker: %v", err)
+	}
+	// The old backfill's marker only exists where it ran. Stand one in if
+	// it's missing, dated before the re-introduction so the rollout time
+	// /auth/me goes by (the earlier marker) doesn't move under other tests.
+	var backfilledAt time.Time
+	err := db.QueryRow(`SELECT applied_at FROM schema_backfills WHERE name = 'onboarding_existing_accounts'`).Scan(&backfilledAt)
+	if err == sql.ErrNoRows {
+		backfilledAt = reintroAt.Add(-time.Minute)
+		if _, err := db.Exec(`INSERT INTO schema_backfills (name, applied_at) VALUES ('onboarding_existing_accounts', $1)`, backfilledAt); err != nil {
+			t.Fatalf("stand in the old backfill marker: %v", err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM schema_backfills WHERE name = 'onboarding_existing_accounts'`) })
+	} else if err != nil {
+		t.Fatalf("read old backfill marker: %v", err)
+	}
+
+	stamp := func(id string, at time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE users SET onboarding_completed_at = $2 WHERE id = $1`, id, at); err != nil {
+			t.Fatalf("stamp %s: %v", id, err)
+		}
+	}
+	completed := func(id string) bool {
+		t.Helper()
+		var at sql.NullTime
+		if err := db.QueryRow(`SELECT onboarding_completed_at FROM users WHERE id = $1`, id).Scan(&at); err != nil {
+			t.Fatalf("read onboarding_completed_at: %v", err)
+		}
+		return at.Valid
+	}
+
+	backfilled := insertOnboardingUser(t, db, "agora393backfilled", false)
+	finished := insertOnboardingUser(t, db, "agora393finished", false)
+	stamp(backfilled, backfilledAt.Add(-time.Second))
+	stamp(finished, backfilledAt.Add(time.Second))
+
+	// Run the re-introduction again, then put its marker back as it was.
+	if _, err := db.Exec(`DELETE FROM schema_backfills WHERE name = 'onboarding_reintroduction'`); err != nil {
+		t.Fatalf("remove re-introduction marker: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`INSERT INTO schema_backfills (name, applied_at) VALUES ('onboarding_reintroduction', $1)
+			ON CONFLICT (name) DO UPDATE SET applied_at = EXCLUDED.applied_at`, reintroAt)
+	})
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if completed(backfilled) {
+		t.Error("the backfill's stamp survived the re-introduction")
+	}
+	if !completed(finished) {
+		t.Error("the re-introduction cleared a stamp from after the backfill, which means someone who went through the wizard gets it again")
+	}
+
+	// Guarded: a rerun leaves even a backfill-era stamp alone.
+	stamp(backfilled, backfilledAt.Add(-time.Second))
 	if err := db.Migrate(); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
-
-	var completed sql.NullTime
-	if err := db.QueryRow(`SELECT onboarding_completed_at FROM users WHERE id = $1`, id).Scan(&completed); err != nil {
-		t.Fatalf("read onboarding_completed_at: %v", err)
-	}
-	if completed.Valid {
-		t.Fatalf("a rerun of the backfill stamped an account created after it: onboarding_completed_at = %v", completed.Time)
+	if !completed(backfilled) {
+		t.Error("a rerun of the re-introduction cleared a stamp again")
 	}
 }
 

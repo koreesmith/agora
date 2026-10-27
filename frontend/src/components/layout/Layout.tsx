@@ -5,7 +5,7 @@ import WhatsNewModal from '../common/WhatsNewModal'
 import { welcomeShownThisSession } from '../welcome/wizardSession'
 import SearchBar from './SearchBar'
 import { useAuthStore } from '../../store/auth'
-import { notificationsApi, instanceApi, dmApi } from '../../api'
+import { notificationsApi, instanceApi, dmApi, authApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
 import ChatWindows from '../common/ChatWindows'
 
@@ -43,6 +43,18 @@ export default function Layout() {
   })
   const instanceName: string = instanceData?.instance_name || 'Agora'
   const logoUrl: string = instanceData?.logo_url || ''
+
+  // AGORA-393: whether to send the account to the wizard comes from the
+  // server, not only the copy saved at sign-in. A session that signed in
+  // before the wizard existed has no onboarding_completed in that copy, so
+  // it would never be sent there. Same query and staleTime as CreatePost's,
+  // so the feed fetches it once.
+  const { data: freshProfile } = useQuery({
+    queryKey: ['my-profile'],
+    queryFn: () => authApi.me().then(r => r.data),
+    staleTime: 60_000,
+  })
+  const onboardingCompleted: boolean | undefined = freshProfile?.onboarding_completed ?? user?.onboarding_completed
 
 
   // AGORA-335: kept to the destinations that are genuinely top-level. Three
@@ -163,9 +175,10 @@ export default function Layout() {
   )
 
   // AGORA-388: a new account goes through the getting started wizard before
-  // anything else. Once per browser session (see wizardSession), so leaving
-  // the wizard by a link doesn't bounce straight back to it.
-  if (user?.onboarding_completed === false && !welcomeShownThisSession()) {
+  // anything else, and since AGORA-393 so does an account that predates it,
+  // once. Once per browser session (see wizardSession), so leaving the wizard
+  // by a link doesn't bounce straight back to it.
+  if (onboardingCompleted === false && !welcomeShownThisSession()) {
     return <Navigate to="/welcome" replace />
   }
 

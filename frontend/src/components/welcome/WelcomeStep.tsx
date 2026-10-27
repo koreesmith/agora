@@ -4,7 +4,9 @@ import type { StepProps } from './types'
 import { instanceNetworks } from './networks'
 
 // AGORA-389: the first step, shown on its own without the step rail: what
-// Agora is, and what the rest of the wizard covers.
+// Agora is, and what the rest of the wizard covers. AGORA-393: an account
+// that predates the wizard gets it once as a re-introduction, so it's greeted
+// as a returning member and told nothing changes unless it changes it.
 
 function Pillar({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
@@ -25,15 +27,18 @@ export default function WelcomeStep({ instance, me, steps, next, finish, finishi
   const networks = instanceNetworks(instance)
   const accountKinds = networks.map(n => n === 'Bluesky' ? 'a Bluesky account' : 'a Fediverse account').join(' and ')
   const reach = networks.map(n => n === 'Bluesky' ? 'Bluesky' : 'Mastodon').join(' and ')
+  const returning = !!me.onboarding_returning
 
   return (
     <div className="space-y-10">
       <div className="space-y-4 max-w-2xl">
-        {instance.domain && (
-          <p className="text-xs font-semibold uppercase tracking-wide text-agora-600 dark:text-agora-400">Welcome to {instance.domain}</p>
+        {(returning || instance.domain) && (
+          <p className="text-xs font-semibold uppercase tracking-wide text-agora-600 dark:text-agora-400">
+            {returning ? 'A quick re-introduction' : `Welcome to ${instance.domain}`}
+          </p>
         )}
         <h1 id="step-title" className="text-3xl md:text-4xl font-bold leading-tight text-agora-900 dark:text-agora-50">
-          Hi {firstName}, welcome to {instanceName}
+          Hi {firstName}, welcome {returning && 'back '}to {instanceName}
         </h1>
         <p className="text-lg leading-relaxed text-agora-700 dark:text-agora-200">
           {instanceName} is a social network for the people you actually know.{' '}
@@ -41,7 +46,7 @@ export default function WelcomeStep({ instance, me, steps, next, finish, finishi
             ? "It's open source and privacy-first"
             : "It runs on Agora, which is open source and privacy-first"}
           {instance.domain ? `, and it's run by the people behind ${instance.domain} rather than a big company` : ''}.
-          {' '}Here's what makes it different.
+          {' '}{returning ? "Here's a refresher on what makes it different." : "Here's what makes it different."}
         </p>
       </div>
 
@@ -67,8 +72,12 @@ export default function WelcomeStep({ instance, me, steps, next, finish, finishi
 
       <div className="card p-6 space-y-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="font-semibold text-agora-900 dark:text-agora-50">Here's what we'll set up</h2>
-          <p className="text-sm text-agora-600 dark:text-agora-400">About 3 minutes. Everything can be changed later in Settings.</p>
+          <h2 className="font-semibold text-agora-900 dark:text-agora-50">{returning ? "Here's what we'll go over" : "Here's what we'll set up"}</h2>
+          <p className="text-sm text-agora-600 dark:text-agora-400">
+            {returning
+              ? 'About 3 minutes. Each step starts from your current settings, and nothing changes unless you change it.'
+              : 'About 3 minutes. Everything can be changed later in Settings.'}
+          </p>
         </div>
         <ol className="flex flex-wrap gap-2.5">
           {ahead.map((s, i) => (

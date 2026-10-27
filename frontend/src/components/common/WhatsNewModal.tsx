@@ -6,7 +6,8 @@ const SEEN_KEY = 'agora_seen_v4'
 
 // AGORA-388: a brand-new account has just been through the getting started
 // wizard, so the auto-shown What's New would only repeat it. Finishing or
-// skipping the wizard marks the current version as seen.
+// skipping the wizard marks the current version as seen, for new accounts
+// only: a returning member still gets it (AGORA-393).
 export function markWhatsNewSeen() {
   try { localStorage.setItem(SEEN_KEY, '1') } catch { /* storage unavailable */ }
 }

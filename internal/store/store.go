@@ -1784,15 +1784,22 @@ var schema = []string{
 
 	// AGORA-387: the getting started wizard. NULL means the account hasn't
 	// finished or skipped it yet, which is what sends it to /welcome.
-	//
-	// Guarded backfill: every local account that exists when this ships is
-	// stamped once, so only accounts created afterwards ever see the wizard.
-	// Without the guard, every restart would stamp the accounts created since
-	// the last one and nobody would ever see it.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ`,
-	`UPDATE users SET onboarding_completed_at = NOW()
-	 WHERE onboarding_completed_at IS NULL AND is_remote = false
-	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'onboarding_existing_accounts')`,
-	`INSERT INTO schema_backfills (name) VALUES ('onboarding_existing_accounts')
+
+	// AGORA-393: accounts that predate the wizard see it too, once, as a
+	// re-introduction. AGORA-387 first shipped with a guarded backfill
+	// ('onboarding_existing_accounts') that stamped every account existing at
+	// the time so only new sign-ups would see it. That backfill is gone, and
+	// where it already ran, its stamps are cleared here once. Only stamps at
+	// or before its own marker go: those are the backfill's, while anyone who
+	// has been through the wizard since has a later one and keeps it. Where it
+	// never ran, the subquery is NULL and this matches nothing.
+	//
+	// The earlier of the two markers is when the wizard first shipped on this
+	// instance; /auth/me compares created_at with it (onboarding_returning).
+	`UPDATE users SET onboarding_completed_at = NULL
+	 WHERE onboarding_completed_at <= (SELECT applied_at FROM schema_backfills WHERE name = 'onboarding_existing_accounts')
+	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'onboarding_reintroduction')`,
+	`INSERT INTO schema_backfills (name) VALUES ('onboarding_reintroduction')
 		ON CONFLICT (name) DO NOTHING`,
 }

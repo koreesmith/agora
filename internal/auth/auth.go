@@ -390,17 +390,19 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		SuspensionReason string
 		EmailVerified  bool
 		ProfilePrivate bool
+		OnboardingCompleted bool
 	}
 
 	login := strings.ToLower(strings.TrimSpace(req.UsernameOrEmail))
 	err := s.db.QueryRow(`
 		SELECT id, username, email, password_hash, display_name, avatar_url,
-		       role, is_suspended, suspension_reason, email_verified, profile_private
+		       role, is_suspended, suspension_reason, email_verified, profile_private,
+		       onboarding_completed_at IS NOT NULL
 		FROM users
 		WHERE (LOWER(username) = $1 OR LOWER(email) = $1) AND is_remote = false
 	`, login).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName,
 		&u.AvatarURL, &u.Role, &u.IsSuspended, &u.SuspensionReason,
-		&u.EmailVerified, &u.ProfilePrivate)
+		&u.EmailVerified, &u.ProfilePrivate, &u.OnboardingCompleted)
 	if err != nil {
 		// No such account — still run a bcrypt compare against a fixed dummy
 		// hash so this branch takes about as long as a real wrong-password
@@ -447,6 +449,8 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		"avatar_url":      u.AvatarURL,
 		"role":            u.Role,
 		"profile_private": u.ProfilePrivate,
+		// AGORA-387: false sends a new account to the getting started wizard.
+		"onboarding_completed": u.OnboardingCompleted,
 	})
 }
 
@@ -482,15 +486,19 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		FediverseNotificationsEnabled bool
 		AtprotoEnabled       bool
 		AtprotoNotificationsEnabled bool
+		DmPrivacy            string
+		OnboardingCompleted  bool
 	}
 	err = s.db.QueryRow(`
 		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
 		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required,
-		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled
+		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled,
+		       dm_privacy, onboarding_completed_at IS NOT NULL
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
 		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
-		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled)
+		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled,
+		&u.DmPrivacy, &u.OnboardingCompleted)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -507,6 +515,11 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"fediverse_notifications_enabled": u.FediverseNotificationsEnabled,
 		"atproto_enabled": u.AtprotoEnabled,
 		"atproto_notifications_enabled": u.AtprotoNotificationsEnabled,
+		// AGORA-387: dm_privacy was only ever in the client's local copy after
+		// a change made this session, so a fresh sign-in always showed
+		// "Everyone" whatever was saved. The wizard's recap needs the real one.
+		"dm_privacy":           u.DmPrivacy,
+		"onboarding_completed": u.OnboardingCompleted,
 	})
 }
 
@@ -747,6 +760,16 @@ func (s *Service) getSetting(key string) string {
 	return val
 }
 
+// domainFromURL strips the scheme from an instance URL, leaving the bare
+// domain. Duplicated from internal/atproto and internal/federation for the
+// same reason they duplicate it from each other: a three-line pure function
+// isn't worth a cross-package dependency.
+func domainFromURL(u string) string {
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	return strings.Split(u, "/")[0]
+}
+
 func isValidUsername(u string) bool {
 	for _, c := range u {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -784,10 +807,18 @@ func RegisterInstanceRoute(r chi.Router, s *Service) {
 
 func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	keys := []string{"instance_name", "instance_description", "registration_mode", "logo_url", "user_invites_enabled"}
-	info := map[string]string{}
+	info := map[string]any{}
 	for _, k := range keys {
 		info[k] = s.getSetting(k)
 	}
+	// AGORA-387: the getting started wizard leaves out the step for a network
+	// the admin has turned off, and builds handles from the bare domain. The
+	// two switches default differently, so these mirror the checks the
+	// federation and atproto packages actually enforce: ActivityPub is on
+	// unless set to "false", AT Proto is off unless set to "true".
+	info["activitypub_enabled"] = s.getSetting("activitypub_enabled") != "false"
+	info["atproto_enabled"] = s.getSetting("atproto_enabled") == "true"
+	info["domain"] = domainFromURL(s.cfg.InstanceDomain)
 	writeJSON(w, 200, info)
 }
 

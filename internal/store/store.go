@@ -1781,4 +1781,18 @@ var schema = []string{
 	`UPDATE users SET avatar_url = '', remote_synced_at = NULL
 		WHERE is_remote = true
 		  AND avatar_url ~ '^https://[^/]+/uploads/remote/[0-9a-f]{2}/[0-9a-f]{64}\.(jpg|png|gif|webp|avif)$'`,
+
+	// AGORA-387: the getting started wizard. NULL means the account hasn't
+	// finished or skipped it yet, which is what sends it to /welcome.
+	//
+	// Guarded backfill: every local account that exists when this ships is
+	// stamped once, so only accounts created afterwards ever see the wizard.
+	// Without the guard, every restart would stamp the accounts created since
+	// the last one and nobody would ever see it.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ`,
+	`UPDATE users SET onboarding_completed_at = NOW()
+	 WHERE onboarding_completed_at IS NULL AND is_remote = false
+	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'onboarding_existing_accounts')`,
+	`INSERT INTO schema_backfills (name) VALUES ('onboarding_existing_accounts')
+		ON CONFLICT (name) DO NOTHING`,
 }

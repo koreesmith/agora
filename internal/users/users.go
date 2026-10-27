@@ -97,6 +97,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/{username}/notify",    s.EnablePostNotify)
 	r.Delete("/users/{username}/notify",  s.DisablePostNotify)
 	r.Post("/users/{username}/refresh",   s.RefreshRemoteProfile)
+	// AGORA-387: getting started wizard.
+	r.Post("/onboarding/complete",        s.CompleteOnboarding)
+	r.Get("/onboarding/suggestions",      s.OnboardingSuggestions)
 }
 
 // RegisterPublicRoutes registers read-only routes reachable by guests.

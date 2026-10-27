@@ -57,6 +57,14 @@ Cancel a pending deletion request.
 Returns public profiles for discovery.
 **Response 200:** `[...profile objects...]`
 
+## `POST /api/onboarding/complete` 🔒
+Marks the caller as done with the getting started wizard, whether they finished or skipped it. Idempotent: the first timestamp is kept.
+**Response 200:** `{"onboarding_completed": true}`
+
+## `GET /api/onboarding/suggestions` 🔒
+People for the wizard's Find people step. `inviter` is the account whose invite code the caller registered with, or `null` (email invites don't record one). `people` is up to 5 of the newest verified local accounts, leaving out the caller, the inviter, existing friends, private profiles, and blocks in either direction.
+**Response 200:** `{"inviter": person | null, "people": [person]}`, where a person is `{ "id", "username", "display_name", "avatar_url", "bio", "friend_status" }` and `friend_status` is `""`, `"pending"` (the caller sent a request), `"pending_incoming"`, or `"friends"`.
+
 ## `GET /api/users/mention-search?q=...`
 Autocomplete search for @mentions. Returns up to 10 results.
 **Response 200:** `[{ "id", "username", "display_name", "avatar_url" }]`

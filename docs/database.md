@@ -26,6 +26,7 @@ Migrations run automatically at startup via `store.Migrate()` in `internal/store
 | `profile_private` | boolean | Friends-only profile |
 | `hide_timeline` | boolean | Hide post timeline on profile |
 | `wall_approval_required` | boolean | Require approval for wall posts |
+| `onboarding_completed_at` | timestamptz | When the account finished or skipped the getting started wizard (AGORA-387). NULL sends it to `/welcome`. Accounts that existed when the column was added were stamped once by a `schema_backfills`-guarded backfill |
 | `is_suspended` | boolean | Temporarily suspended |
 | `suspension_reason` | text | Reason shown to user |
 | `is_banned` | boolean | Permanently banned |

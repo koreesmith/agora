@@ -46,7 +46,7 @@ export function Switch({ checked, onChange, labelledBy, disabled }: {
     <button type="button" role="switch" aria-checked={checked} aria-labelledby={labelledBy} disabled={disabled}
       onClick={() => onChange(!checked)}
       className="flex-shrink-0 w-14 h-11 flex items-center justify-center rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
-      <span className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${checked ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-600'}`}>
+      <span className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${checked ? 'bg-agora-700 dark:bg-agora-400' : 'bg-agora-200 dark:bg-agora-900'}`}>
         <span className={`absolute top-1 left-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-5' : ''}`} />
       </span>
     </button>

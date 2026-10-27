@@ -88,7 +88,7 @@ export default function ProfileStep({ instance, me, next, back }: StepProps) {
               {avatar ? <img src={avatar} alt="" className="w-full h-full object-cover" /> : initials}
             </span>
             <div className="space-y-1.5">
-              <label className={`btn-secondary min-h-[44px] cursor-pointer ${uploading === 'avatar' ? 'opacity-50 pointer-events-none' : ''}`}>
+              <label className={`btn-secondary dark:bg-transparent dark:ring-1 dark:ring-inset dark:ring-agora-500 dark:hover:bg-agora-700 min-h-[44px] cursor-pointer ${uploading === 'avatar' ? 'opacity-50 pointer-events-none' : ''}`}>
                 <Camera size={18} aria-hidden="true" />
                 {uploading === 'avatar' ? 'Uploading…' : avatar ? 'Change photo' : 'Upload a photo'}
                 <input type="file" accept="image/*" className="sr-only"
@@ -137,7 +137,7 @@ export default function ProfileStep({ instance, me, next, back }: StepProps) {
               </label>
             </div>
             <div className="px-5 pb-5 space-y-1">
-              <span aria-hidden="true" className="-mt-9 w-[72px] h-[72px] rounded-full bg-agora-700 text-white border-4 border-white dark:border-agora-800 flex items-center justify-center text-xl font-semibold overflow-hidden">
+              <span aria-hidden="true" className="relative -mt-9 w-[72px] h-[72px] rounded-full bg-agora-700 text-white border-4 border-white dark:border-agora-800 flex items-center justify-center text-xl font-semibold overflow-hidden">
                 {avatar ? <img src={avatar} alt="" className="w-full h-full object-cover" /> : initials}
               </span>
               <p className="pt-1 text-lg font-bold text-agora-900 dark:text-agora-50 break-words">{name.trim() || me.username}</p>

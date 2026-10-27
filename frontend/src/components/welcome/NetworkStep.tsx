@@ -241,7 +241,7 @@ function NetworkStep({ network, steps, instance, me, notes, setNotes, next, back
                 description={`Be @${me.username}.example.com, or any domain you own, instead. You'll need to add one DNS record, so it's easiest to do later.`}
                 control={notes.domainReminder
                   ? <span className="inline-flex items-center gap-2 min-h-[44px] px-4 text-sm font-semibold text-agora-700 dark:text-agora-200"><Check size={16} aria-hidden="true" /> Reminder saved</span>
-                  : <button type="button" onClick={() => setNotes({ domainReminder: true })} className="btn-secondary min-h-[44px]">Remind me on the last step</button>} />
+                  : <button type="button" onClick={() => setNotes({ domainReminder: true })} className="btn-secondary dark:bg-transparent dark:ring-1 dark:ring-inset dark:ring-agora-500 dark:hover:bg-agora-700 min-h-[44px]">Remind me on the last step</button>} />
             )}
           </div>
         </>

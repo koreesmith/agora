@@ -127,6 +127,10 @@ export const friendsApi = {
   listFriendListMembers: (listID: string)          => api.get(`/friend-groups/${listID}/members`),
   addToFriendList:    (listID: string, friendID: string) => api.post(`/friend-groups/${listID}/members/${friendID}`),
   removeFromFriendList: (listID: string, friendID: string) => api.delete(`/friend-groups/${listID}/members/${friendID}`),
+  // AGORA-395: one account's lists in one request, and an all-or-nothing change
+  // to them. Both answer { group_ids }.
+  getFriendListMemberships: (friendID: string)    => api.get(`/friend-groups/memberships/${friendID}`),
+  setFriendListMemberships: (friendID: string, changes: { add: string[], remove: string[] }) => api.put(`/friend-groups/memberships/${friendID}`, changes),
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────

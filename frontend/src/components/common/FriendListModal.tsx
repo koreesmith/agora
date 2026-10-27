@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useMutation, useQuery, useQueries, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { friendsApi } from '../../api'
 import { X, Plus, Check } from 'lucide-react'
 
@@ -20,50 +20,45 @@ export default function FriendListModal({ friend, onClose }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const { data: listsData } = useQuery({
+  const listsQuery = useQuery({
     queryKey: ['friend-groups'],
     queryFn: () => friendsApi.listFriendLists().then(r => r.data),
   })
-  const lists: any[] = listsData?.groups || []
+  const lists: any[] = listsQuery.data?.groups || []
 
-  // Load which of these lists this account is already a member of, so the
-  // checkboxes reflect reality instead of always starting unchecked —
-  // previously this modal had no idea whether the account it was opened
-  // for was already on any list. Uses the same ['list-members', id] query
-  // key ConnectionsPage's own ListCard uses, so an already-expanded list's
-  // membership is shared from cache rather than re-fetched.
+  // Which of the caller's lists this account is already on, so the checkboxes
+  // reflect reality instead of always starting unchecked.
   //
-  // This replaced an earlier hand-rolled Promise.all-in-a-useEffect version
-  // that could hang forever showing "Loading current lists…": a background
-  // refetch of the ['friend-groups'] query (React Query refetches on window
-  // focus by default) changed the effect's own dependency mid-flight,
-  // tearing down the in-flight fetch via its cancelled-flag cleanup before
-  // it ever got to call setState. useQueries lets React Query itself own
-  // that lifecycle instead of a manual flag, so it can't get stuck.
-  const membershipQueries = useQueries({
-    queries: lists.map(list => ({
-      queryKey: ['list-members', list.id],
-      queryFn: () => friendsApi.listFriendListMembers(list.id).then(r => r.data),
-    })),
+  // AGORA-395: this used to fetch every list's full member list, one request
+  // per list, all at once. When some of that burst was refused (the API rate
+  // limit was enough), those lists were shown unchecked with a "some may be
+  // missing" warning and Save diffed against that guess. Now it is one
+  // request, and until it has succeeded nothing is shown to edit or save.
+  // gcTime 0 so every opening fetches fresh instead of reusing an earlier
+  // opening's answer.
+  const membershipQuery = useQuery({
+    queryKey: ['friend-list-memberships', friend.id],
+    queryFn: () => friendsApi.getFriendListMemberships(friend.id).then(r => r.data.group_ids as string[]),
+    gcTime: 0,
+    retry: 2,
   })
-  const membershipLoaded = lists.length === 0 || membershipQueries.every(q => q.isSuccess || q.isError)
-  const membershipQueryError = membershipQueries.some(q => q.isError)
+
+  // Lists that loaded earlier are good enough even if a background refetch of
+  // them has since failed; membership is matched by list ID, not position.
+  const loadFailed = !seeded && ((listsQuery.isError && !listsQuery.data) || membershipQuery.isError)
+  const retrying = listsQuery.isFetching || membershipQuery.isFetching
+  const retryLoad = () => {
+    if (listsQuery.isError) listsQuery.refetch()
+    if (membershipQuery.isError) membershipQuery.refetch()
+  }
 
   useEffect(() => {
-    if (seeded || !membershipLoaded) return
-    const memberOf = new Set<string>()
-    lists.forEach((list, i) => {
-      const members: any[] = membershipQueries[i]?.data?.members || []
-      if (members.some((m: any) => m.id === friend.id)) memberOf.add(list.id)
-    })
+    if (seeded || !listsQuery.data || !membershipQuery.isSuccess) return
+    const memberOf = new Set<string>(membershipQuery.data)
     setSelected(memberOf)
     setInitialSelected(memberOf)
     setSeeded(true)
-    if (membershipQueryError) {
-      setError("Couldn't load this account's current lists — some may be missing below.")
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [membershipLoaded, seeded])
+  }, [seeded, listsQuery.data, membershipQuery.isSuccess, membershipQuery.data])
 
   const createList = useMutation({
     mutationFn: (name: string) => friendsApi.createFriendList(name),
@@ -89,21 +84,40 @@ export default function FriendListModal({ friend, onClose }: Props) {
   const hasChanges = toAdd.length > 0 || toRemove.length > 0
 
   const handleSave = async () => {
+    if (!seeded) return
     if (!hasChanges) { onClose(); return }
     setSaving(true)
     setError('')
     try {
-      await Promise.all([
-        ...toAdd.map(listID => friendsApi.addToFriendList(listID, friend.id)),
-        ...toRemove.map(listID => friendsApi.removeFromFriendList(listID, friend.id)),
-      ])
+      // AGORA-395: one request that applies every change or none of them.
+      // This used to send one add or remove per list in parallel, so when
+      // some were refused the rest still went through.
+      await friendsApi.setFriendListMemberships(friend.id, { add: toAdd, remove: toRemove })
       qc.invalidateQueries({ queryKey: ['friend-groups'] })
       for (const listID of [...toAdd, ...toRemove]) {
         qc.invalidateQueries({ queryKey: ['list-members', listID] })
       }
       onClose()
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Could not update lists — please try again.')
+      // The selection is kept so Save can simply be pressed again: adding to
+      // a list the account is already on, or removing from one it isn't, is
+      // a no-op, so a retry is safe whatever happened to this attempt.
+      const msg: string | undefined = err.response?.data?.error
+      if (err.response?.status === 409) {
+        // A list was deleted elsewhere while this was open. Drop it from the
+        // selection so pressing Save again sends only lists that still exist.
+        await qc.refetchQueries({ queryKey: ['friend-groups'] })
+        const current = new Set<string>((qc.getQueryData<any>(['friend-groups'])?.groups || []).map((l: any) => l.id))
+        setSelected(s => new Set([...s].filter(id => current.has(id))))
+        setInitialSelected(s => new Set([...s].filter(id => current.has(id))))
+        setError('One of those lists was just deleted, so none of your changes were saved. Save again to apply the rest.')
+      } else if (msg) {
+        setError(`${msg[0].toUpperCase()}${msg.slice(1)}. None of your changes were saved.`)
+      } else if (err.response?.status === 429) {
+        setError('Too many requests right now. None of your changes were saved, so try again in a moment.')
+      } else {
+        setError("Couldn't save your changes. Try again.")
+      }
     } finally {
       setSaving(false)
     }
@@ -152,13 +166,21 @@ export default function FriendListModal({ friend, onClose }: Props) {
 
         {/* List selection */}
         <div className="px-4 py-3 max-h-52 overflow-y-auto space-y-1">
-          {lists.length === 0 && !createList.isPending && (
-            <p className="text-sm text-agora-400 text-center py-3">No lists yet — create one below</p>
+          {loadFailed && (
+            <div className="text-center py-3 space-y-2">
+              <p className="text-sm text-red-500">Couldn't load this account's current lists.</p>
+              <button onClick={retryLoad} disabled={retrying} className="btn-secondary text-sm px-3">
+                {retrying ? 'Trying again…' : 'Try again'}
+              </button>
+            </div>
           )}
-          {lists.length > 0 && !membershipLoaded && (
+          {!loadFailed && !seeded && (
             <p className="text-sm text-agora-400 text-center py-3">Loading current lists…</p>
           )}
-          {membershipLoaded && lists.map((list: any) => {
+          {seeded && lists.length === 0 && !createList.isPending && (
+            <p className="text-sm text-agora-400 text-center py-3">No lists yet. Create one below.</p>
+          )}
+          {seeded && lists.map((list: any) => {
             const isSelected = selected.has(list.id)
             return (
               <button
@@ -192,10 +214,11 @@ export default function FriendListModal({ friend, onClose }: Props) {
               value={newListName}
               onChange={e => setNewListName(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleCreateAndSelect()}
+              disabled={!seeded}
             />
             <button
               onClick={handleCreateAndSelect}
-              disabled={!newListName.trim() || createList.isPending}
+              disabled={!seeded || !newListName.trim() || createList.isPending}
               className="btn-secondary px-3 flex-shrink-0"
               title="Create list"
             >
@@ -213,7 +236,7 @@ export default function FriendListModal({ friend, onClose }: Props) {
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || !membershipLoaded}
+            disabled={saving || !seeded}
             className="btn-primary flex-1 text-sm"
           >
             {saving ? 'Saving…' : hasChanges ? 'Save changes' : 'Done'}

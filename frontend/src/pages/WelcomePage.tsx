@@ -8,6 +8,9 @@ import { markWhatsNewSeen } from '../components/common/WhatsNewModal'
 import { markWelcomeShown } from '../components/welcome/wizardSession'
 import type { InstanceInfo, StepDef, StepId, StepProps, WizardNotes } from '../components/welcome/types'
 import PlaceholderStep from '../components/welcome/PlaceholderStep'
+import WelcomeStep from '../components/welcome/WelcomeStep'
+import ProfileStep from '../components/welcome/ProfileStep'
+import PrivacyStep from '../components/welcome/PrivacyStep'
 
 // AGORA-388: the getting started wizard (AGORA-386). New accounts land here
 // from Layout after their first sign-in; anyone can come back through the
@@ -15,9 +18,9 @@ import PlaceholderStep from '../components/welcome/PlaceholderStep'
 // reloads, and the recap's Change links all work.
 
 const ALL_STEPS: StepDef[] = [
-  { id: 'welcome',   label: 'Welcome',      Component: PlaceholderStep, bare: true },
-  { id: 'profile',   label: 'Your profile', Component: PlaceholderStep },
-  { id: 'privacy',   label: 'Privacy',      Component: PlaceholderStep },
+  { id: 'welcome',   label: 'Welcome',      Component: WelcomeStep, bare: true },
+  { id: 'profile',   label: 'Your profile', Component: ProfileStep },
+  { id: 'privacy',   label: 'Privacy',      Component: PrivacyStep },
   { id: 'bluesky',   label: 'Bluesky',      Component: PlaceholderStep },
   { id: 'fediverse', label: 'Fediverse',    Component: PlaceholderStep },
   { id: 'people',    label: 'Find people',  Component: PlaceholderStep },

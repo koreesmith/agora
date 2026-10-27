@@ -8,8 +8,9 @@ import { StepFooter, StepHeader } from './WizardParts'
 import { instanceNetworks } from './networks'
 
 // AGORA-389: photo, display name, pronouns, and bio, with a live preview.
-// Photos save as soon as they're picked, like Settings; the text fields save
-// on Continue, and "Skip this step" leaves them as they were.
+// Photos save as soon as they're picked, like Settings; Continue saves only
+// the text fields that were edited, and "Skip this step" leaves them as they
+// were.
 
 function initialsOf(name: string, fallback: string) {
   const words = name.trim().split(/\s+/).filter(Boolean)
@@ -47,9 +48,17 @@ export default function ProfileStep({ instance, me, next, back }: StepProps) {
     }
   }
 
+  // Only the fields actually edited are sent. Settings saves text untrimmed,
+  // so a bio there can end in a blank line; comparing trimmed to trimmed
+  // keeps an untouched Continue from rewriting it just to strip that (and
+  // pushing a profile update to Bluesky and the Fediverse for nothing).
   const save = async () => {
-    const changes = { display_name: name.trim(), pronouns: pronouns.trim(), bio: bio.trim() }
-    if (changes.display_name === (me.display_name || '') && changes.pronouns === (me.pronouns || '') && changes.bio === (me.bio || '')) {
+    const changes: Record<string, string> = {}
+    const typed = { display_name: name, pronouns, bio }
+    for (const [key, value] of Object.entries(typed)) {
+      if (value.trim() !== (me[key] || '').trim()) changes[key] = value.trim()
+    }
+    if (Object.keys(changes).length === 0) {
       next(); return
     }
     setSaving(true); setErr('')

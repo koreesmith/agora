@@ -365,7 +365,7 @@ export default function SettingsPage() {
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Fediverse (ActivityPub)</h3>
           <p className="text-sm text-agora-500">
-            Agora can talk to Mastodon and the rest of the fediverse over ActivityPub — the same open protocol those
+            Agora can talk to Mastodon and the rest of the Fediverse over ActivityPub — the same open protocol those
             apps use amongst themselves. Turning this on lets people out there follow and see your public posts, and
             reply to them. Private and friends-only posts are never federated either way.
           </p>
@@ -381,7 +381,7 @@ export default function SettingsPage() {
             <div>
               <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
               <p className="text-xs text-agora-400">
-                Let people on Mastodon and other fediverse apps follow and see your public posts. Doesn't affect
+                Let people on Mastodon and other Fediverse apps follow and see your public posts. Doesn't affect
                 being found or friended from an instance federated with this one, only your profile's own privacy
                 setting does that.
               </p>
@@ -394,7 +394,7 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="font-medium text-sm">Fediverse post notifications</p>
-              <p className="text-xs text-agora-400">Get notified when a fediverse account you follow posts something new. Doesn't affect any other notification type.</p>
+              <p className="text-xs text-agora-400">Get notified when a Fediverse account you follow posts something new. Doesn't affect any other notification type.</p>
             </div>
             <button
               onClick={() => toggleFediverseNotifications.mutate()}
@@ -404,7 +404,7 @@ export default function SettingsPage() {
             </button>
           </div>
           <p className="text-sm text-agora-500 pt-2 border-t border-agora-100 dark:border-agora-700">
-            Following a fediverse handle and managing who you already follow moved to{' '}
+            Following a Fediverse handle and managing who you already follow moved to{' '}
             <Link to="/connections?tab=fediverse" className="underline hover:text-agora-700">Connections → Fediverse</Link>.
           </p>
         </div>
@@ -419,7 +419,7 @@ export default function SettingsPage() {
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Bluesky (AT Protocol)</h3>
           <p className="text-sm text-agora-500">
-            Agora can also talk to Bluesky over AT Protocol, a separate network from the fediverse with its own
+            Agora can also talk to Bluesky over AT Protocol, a separate network from the Fediverse with its own
             identity and moderation model. Turning this on lets people on Bluesky find, follow, and see your public
             posts. Private and friends-only posts are never federated either way.
           </p>

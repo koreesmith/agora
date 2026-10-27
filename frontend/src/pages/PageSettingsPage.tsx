@@ -221,7 +221,7 @@ export default function PageSettingsPage() {
           <div>
             <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
             <p className="text-xs text-agora-400">
-              Let Mastodon and other fediverse apps discover, follow, and see posts from this page.
+              Let Mastodon and other Fediverse apps discover, follow, and see posts from this page.
             </p>
           </div>
           <button

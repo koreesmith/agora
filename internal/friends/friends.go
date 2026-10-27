@@ -531,7 +531,7 @@ func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 		)
 	`, userID, friendID).Scan(&ok)
 	if !ok {
-		writeError(w, 400, "can only add friends or followed fediverse/bluesky accounts to lists")
+		writeError(w, 400, "can only add friends or followed Fediverse or Bluesky accounts to lists")
 		return
 	}
 

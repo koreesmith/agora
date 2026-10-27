@@ -422,10 +422,10 @@ export default function ConnectionsPage() {
           {fediSubTab === 'following' && (
           <div className="card p-5 space-y-4">
             <div>
-              <h2 className="font-semibold text-sm">Follow a fediverse account</h2>
+              <h2 className="font-semibold text-sm">Follow a Fediverse account</h2>
               <p className="text-xs text-agora-400 mt-1">
                 Enter a full handle (e.g. <code>user@mastodon.social</code>) or a profile URL. There's no way to
-                search the fediverse by name — like Mastodon's own remote search, you need the exact handle.
+                search the Fediverse by name — like Mastodon's own remote search, you need the exact handle.
               </p>
             </div>
             <form onSubmit={handleFediSearch} className="flex gap-2">
@@ -449,7 +449,7 @@ export default function ConnectionsPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-amber-700 dark:text-amber-400">This is a Bluesky account</p>
                   <p className="text-xs text-agora-500 mt-1">
-                    @{fediPreview.preferred_username} is a Bluesky account bridged into the fediverse — follow it natively from the Bluesky tab instead.
+                    @{fediPreview.preferred_username} is a Bluesky account bridged into the Fediverse — follow it natively from the Bluesky tab instead.
                   </p>
                 </div>
                 <button
@@ -494,7 +494,7 @@ export default function ConnectionsPage() {
             )}
             {following.length === 0 && (
               <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
-                You're not following anyone on the fediverse yet.
+                You're not following anyone on the Fediverse yet.
               </p>
             )}
             <div className="space-y-2">
@@ -547,7 +547,7 @@ export default function ConnectionsPage() {
                       <button
                         onClick={() => migrateBridged.mutate(f.id)}
                         disabled={migrateBridged.isPending}
-                        title="This is a Bluesky account followed via the fediverse bridge — switch to following it natively"
+                        title="This is a Bluesky account followed via the Fediverse bridge — switch to following it natively"
                         className="btn-secondary text-xs flex items-center gap-1">
                         <Cloud size={13} /> {migrateBridged.isPending ? 'Migrating…' : 'Migrate to Bluesky'}
                       </button>
@@ -598,7 +598,7 @@ export default function ConnectionsPage() {
             <h2 className="font-semibold text-sm">Your followers</h2>
             {followers.length === 0 && (
               <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
-                No one on the fediverse follows you yet.
+                No one on the Fediverse follows you yet.
               </p>
             )}
             <div className="space-y-2">
@@ -642,7 +642,7 @@ export default function ConnectionsPage() {
           )}
 
           <p className="text-xs text-agora-400 text-center">
-            Want to opt out of the fediverse entirely? That toggle lives in{' '}
+            Want to opt out of the Fediverse entirely? That toggle lives in{' '}
             <Link to="/settings?tab=fediverse" className="underline hover:text-agora-600">Settings → Fediverse</Link>.
           </p>
         </div>
@@ -952,7 +952,7 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
           )}
 
           {members.length === 0 && nonMembers.length === 0 && (
-            <p className="text-sm text-agora-400 text-center py-2">Add friends or fediverse follows first, then organize them into lists.</p>
+            <p className="text-sm text-agora-400 text-center py-2">Add friends or Fediverse follows first, then organize them into lists.</p>
           )}
         </div>
       )}

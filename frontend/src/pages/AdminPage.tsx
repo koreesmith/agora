@@ -186,7 +186,7 @@ export default function AdminPage() {
             </button>
           </div>
           <p className="text-xs text-agora-400 -mt-2">
-            Mastodon/fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
+            Mastodon/Fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
           </p>
           <div className="flex items-center justify-between py-2">
             <div><p className="font-medium text-sm">Allow users to invite friends</p>
@@ -429,7 +429,7 @@ export default function AdminPage() {
           <div className="card p-4">
             <div className="flex items-center justify-between py-2">
               <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-                <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
+                <p className="text-xs text-agora-400">Let Mastodon and other Fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
               <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
                 className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
                 <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
@@ -445,7 +445,7 @@ export default function AdminPage() {
               rest of the fediverse controls instead. */}
           <div>
             <h3 className="font-semibold mb-3">Relays</h3>
-            <p className="text-sm text-agora-500 mb-3">Subscribe this instance to a fediverse relay to exchange public posts in bulk with every other server subscribed to it — the usual way a small or new instance gets a populated federated timeline without its users having to find and follow remote accounts one at a time.</p>
+            <p className="text-sm text-agora-500 mb-3">Subscribe this instance to a Fediverse relay to exchange public posts in bulk with every other server subscribed to it — the usual way a small or new instance gets a populated federated timeline without its users having to find and follow remote accounts one at a time.</p>
             <RelaysPanel
               relays={relaysData?.relays||[]}
               onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
@@ -454,7 +454,7 @@ export default function AdminPage() {
 
           <div>
             <h3 className="font-semibold mb-3">Instance Bans</h3>
-            <p className="text-sm text-agora-500 mb-3">Block a whole fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
+            <p className="text-sm text-agora-500 mb-3">Block a whole Fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
             <div className="card p-4 space-y-3 mb-3">
               <p className="text-sm font-medium">Ban an instance</p>
               <div className="flex gap-2 flex-wrap">
@@ -941,7 +941,7 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock, onDisconnect }:
         <h3 className="font-semibold">Add Federated Instance</h3>
         <p className="text-sm text-agora-500">
           Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
-          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
+          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard Fediverse
           instance, use the Fediverse tab's Instance Bans instead.
         </p>
         {/* AGORA-322: peering can now carry a timeline, but only when an admin
@@ -1185,7 +1185,7 @@ function RelaysPanel({ relays, onChanged }: {
         {relays.length === 0 && (
           <div className="card p-8 text-center text-agora-400 space-y-1">
             <p className="font-medium">No relays yet</p>
-            <p className="text-sm">Add a relay above to start discovering content from across the fediverse.</p>
+            <p className="text-sm">Add a relay above to start discovering content from across the Fediverse.</p>
           </div>
         )}
         {relays.map((relay: any) => (

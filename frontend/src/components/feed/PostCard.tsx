@@ -286,7 +286,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
         <p className="text-xs font-medium text-agora-400 dark:text-agora-500">🔒 This poll has ended</p>
       )}
       {!isExpired && isRemote && (
-        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">📡 Results from the fediverse — voting happens on the original post</p>
+        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">📡 Results from the Fediverse — voting happens on the original post</p>
       )}
       {!isExpired && !isRemote && post.poll_expires_at && (
         <p className="text-xs text-agora-400 dark:text-agora-500">⏱ Closes {new Date(post.poll_expires_at).toLocaleString()}</p>

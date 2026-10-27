@@ -1,6 +1,6 @@
 # Bluesky
 
-Every Agora account is also a real Bluesky account — no bridge, no separate signup. Agora runs its own copy of the same technology Bluesky itself runs on (the **AT Protocol**), so your public posts sync to and from Bluesky directly, and you can follow any Bluesky account natively, right alongside your fediverse and Agora connections.
+Every Agora account is also a real Bluesky account — no bridge, no separate signup. Agora runs its own copy of the same technology Bluesky itself runs on (the **AT Protocol**), so your public posts sync to and from Bluesky directly, and you can follow any Bluesky account natively, right alongside your Fediverse and Agora connections.
 
 > This is a different network from [The Fediverse](fediverse.md) (Mastodon and friends) — they use different underlying protocols, so following works a little differently on each, even though both live on the same **Connections** page.
 
@@ -32,7 +32,7 @@ You can also follow directly from a Bluesky account's profile page once you've s
 
 ## Notifications are per-account, not automatic
 
-Same as the fediverse: following someone on Bluesky doesn't automatically notify you of every new post. Tap the **bell icon** on their Connections → Bluesky row (or on their profile) to turn on notifications for that one account specifically. The account-wide "Bluesky post notifications" toggle in Settings still has to be on too.
+Same as the Fediverse: following someone on Bluesky doesn't automatically notify you of every new post. Tap the **bell icon** on their Connections → Bluesky row (or on their profile) to turn on notifications for that one account specifically. The account-wide "Bluesky post notifications" toggle in Settings still has to be on too.
 
 ## Search
 
@@ -40,8 +40,8 @@ The **Search** page's People and Posts tabs each include an "On Bluesky" section
 
 ## What you can't do with a Bluesky account
 
-Bluesky accounts don't support Agora's friend system — there's no AT Protocol equivalent of a mutual friend request, so a Bluesky profile shows Follow/Unfollow instead of Add Friend. You *can* add a Bluesky account (once it's shown up locally, which happens the first time you see one of their posts) to a **Friend List**, right alongside your Agora friends and fediverse follows. You can also block a Bluesky account the same way you'd block anyone else — see [Blocking someone](blocking.md).
+Bluesky accounts don't support Agora's friend system — there's no AT Protocol equivalent of a mutual friend request, so a Bluesky profile shows Follow/Unfollow instead of Add Friend. You *can* add a Bluesky account (once it's shown up locally, which happens the first time you see one of their posts) to a **Friend List**, right alongside your Agora friends and Fediverse follows. You can also block a Bluesky account the same way you'd block anyone else — see [Blocking someone](blocking.md).
 
-## If you were already following someone through the fediverse bridge
+## If you were already following someone through the Fediverse bridge
 
-Before native Bluesky support existed, the only way to reach a Bluesky account from Agora was through the [Bridgy Fed](https://fed.brid.gy/) bridge, which makes a Bluesky account show up as a fediverse actor. If you're still following someone that way, their row on the **Connections → Fediverse** tab will offer a **"Migrate to Bluesky"** button — it creates a native Bluesky follow without unfollowing the bridged version, so you don't lose anything in the switch.
+Before native Bluesky support existed, the only way to reach a Bluesky account from Agora was through the [Bridgy Fed](https://fed.brid.gy/) bridge, which makes a Bluesky account show up as a Fediverse actor. If you're still following someone that way, their row on the **Connections → Fediverse** tab will offer a **"Migrate to Bluesky"** button — it creates a native Bluesky follow without unfollowing the bridged version, so you don't lose anything in the switch.

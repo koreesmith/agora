@@ -8,7 +8,7 @@ Every post has a visibility setting:
 
 | Setting | Who can see it |
 |---|---|
-| **Public** | Anyone on this instance, and — unless you've turned either off — anyone on Mastodon/the fediverse and anyone on Bluesky. See [The Fediverse](fediverse.md) and [Bluesky](bluesky.md). |
+| **Public** | Anyone on this instance, and — unless you've turned either off — anyone on Mastodon/the Fediverse and anyone on Bluesky. See [The Fediverse](fediverse.md) and [Bluesky](bluesky.md). |
 | **Friends** | Only your accepted friends |
 | **Friend List** | Only members of a specific friend group you've created |
 | **Private** | Only you |

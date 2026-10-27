@@ -43,7 +43,7 @@ const FEATURES = [
   {
     emoji: '👀',
     title: 'See your followers',
-    desc: 'View your fediverse and Bluesky follower and following lists, now with a dedicated Followers segment in each tab.',
+    desc: 'View your Fediverse and Bluesky follower and following lists, now with a dedicated Followers segment in each tab.',
     link: '/connections?tab=fediverse&sub=followers',
     linkText: 'Check your followers →',
   },

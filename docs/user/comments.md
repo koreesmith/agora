@@ -62,5 +62,5 @@ Anyone can read the comments on a public post, but you need to [sign in](getting
 ## Related
 
 - [Making a post](posting.md)
-- [Sharing a post](sharing.md)
+- [Reposting and sharing](sharing.md)
 - [Blocking someone](blocking.md)

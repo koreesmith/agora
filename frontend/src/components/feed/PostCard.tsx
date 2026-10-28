@@ -12,6 +12,7 @@ import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
 import CustomHandle from '../common/CustomHandle'
 import AltBadge from '../common/AltBadge'
 import AltTextModal from '../common/AltTextModal'
+import ShareMenu, { isShareable } from './ShareMenu'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -30,6 +31,9 @@ interface Post {
   repost_author_custom_domain?: string
   is_remote?: boolean
   remote_instance?: string
+  // The post's id on its home network: an ActivityPub object URL, or an
+  // at:// URI for a Bluesky post. AGORA-411 shares it instead of our permalink.
+  remote_url?: string
   content: string
   image_url: string
   visibility: string
@@ -44,6 +48,7 @@ interface Post {
   link_image: string
   link_domain: string
   group_id?: string
+  author_profile_private?: boolean
   friend_list_id?: string
   group_name?: string
   group_slug?: string
@@ -576,7 +581,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
       setSharedConfirm(true)
       setTimeout(() => setSharedConfirm(false), 2500)
     },
-    onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
+    onError: (e: any) => alert(e.response?.data?.error || 'Could not repost'),
   })
 
   const closeShareModal = () => {
@@ -1271,19 +1276,25 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 <button
                   onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
                   disabled={post.visibility !== 'public'}
-                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
+                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be reposted' : 'Repost'}
+                  aria-label="Repost"
                   className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
                   <Repeat2 size={16} />
                   {sharedConfirm
-                    ? <span className="text-xs">Shared!</span>
+                    ? <span className="text-xs">Reposted!</span>
                     : <span>{post.repost_count || ''}</span>}
                 </button>
               ) : (
-                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to share">
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to repost">
                   <Repeat2 size={16} />
                   <span>{post.repost_count || ''}</span>
                 </span>
               )}
+
+              {/* AGORA-411: sending a link somewhere else, as opposed to the
+                  Repost beside it. Guests get it too, since a public post's
+                  permalink works for them. */}
+              {isShareable(post) && <ShareMenu post={post} />}
             </div>
 
             {/* Reaction summary bar */}
@@ -1307,7 +1318,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeShareModal}>
           <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between p-4 border-b border-agora-100 dark:border-agora-700">
-              <h2 className="font-bold text-lg">Share post</h2>
+              <h2 className="font-bold text-lg">Repost</h2>
               <button onClick={closeShareModal} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
             </div>
             <div className="p-4 space-y-3">
@@ -1390,7 +1401,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 className="btn-primary flex items-center gap-1.5"
               >
                 <Repeat2 size={14} />
-                {repost.isPending ? 'Sharing…' : 'Share'}
+                {repost.isPending ? 'Reposting…' : 'Repost'}
               </button>
             </div>
           </div>

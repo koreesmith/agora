@@ -742,6 +742,15 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	handle := chi.URLParam(r, "handle")
 	postID := chi.URLParam(r, "postID")
 
+	// AGORA-411: this object URL is the "original" link another instance
+	// shares for one of our posts, so a person following it in a browser is
+	// sent to the readable post page instead of being handed raw JSON. That
+	// page applies the same visibility rules as everywhere else.
+	if wantsHTML(r) {
+		http.Redirect(w, r, strings.TrimRight(s.cfg.InstanceDomain, "/")+"/post/"+url.PathEscape(postID), http.StatusFound)
+		return
+	}
+
 	u, ok := s.apEligibleUser(handle)
 	if !ok {
 		writeError(w, 404, "user not found")

@@ -2874,6 +2874,10 @@ type Post struct {
 	// Filled in by enrichCustomHandles rather than selected in the queries
 	// above — see that function for why it isn't a join.
 	AuthorCustomDomain string `json:"author_custom_domain,omitempty"`
+	// AGORA-411: a private profile's posts are hidden from signed-out
+	// visitors whatever their own visibility, so the client offers no Share
+	// link for them. Filled in by markPrivateAuthors.
+	AuthorProfilePrivate bool `json:"author_profile_private,omitempty"`
 	// AGORA-401: live custom domains of the local accounts @-mentioned in
 	// this post (and in the post it reposts), keyed by lowercased username.
 	MentionDomains map[string]string `json:"mention_domains,omitempty"`
@@ -3072,6 +3076,7 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 	if len(posts) == 0 {
 		return
 	}
+	s.markPrivateAuthors(posts)
 	mentions := make([][]string, len(posts))
 	var names []string
 	for i, p := range posts {
@@ -3088,6 +3093,33 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 		posts[i].AuthorCustomDomain = byUsername[strings.ToLower(posts[i].AuthorUsername)]
 		posts[i].RepostAuthorCustomDomain = byUsername[strings.ToLower(derefOr(posts[i].RepostAuthorUsername))]
 		posts[i].MentionDomains = pickDomains(mentions[i], byUsername)
+	}
+}
+
+// markPrivateAuthors (AGORA-411) sets AuthorProfilePrivate in one query over
+// the already-scanned posts, for the same reason enrichCustomHandles avoids a
+// join. It runs from enrichCustomHandles so every feed path that already
+// enriches handles gets it without another call site.
+func (s *Service) markPrivateAuthors(posts []Post) {
+	ids := make([]string, 0, len(posts))
+	for _, p := range posts {
+		ids = append(ids, p.AuthorID)
+	}
+	rows, err := s.db.Query(`SELECT id FROM users WHERE id = ANY($1::uuid[]) AND profile_private`, pq.Array(ids))
+	if err != nil {
+		log.Printf("feed: markPrivateAuthors: %v", err)
+		return
+	}
+	defer rows.Close()
+	private := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			private[id] = true
+		}
+	}
+	for i := range posts {
+		posts[i].AuthorProfilePrivate = private[posts[i].AuthorID]
 	}
 }
 

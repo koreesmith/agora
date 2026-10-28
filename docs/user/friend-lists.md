@@ -22,7 +22,7 @@ You can add your friends to a list. You can also add accounts you follow on [the
 
 When you write a post, set its visibility to **Friend List** and choose the list. Only the people on that list (and you) can see the post. See [Making a post](posting.md).
 
-You can do the same when you [share a post](sharing.md), to share it with just one list.
+You can do the same when you [repost a post](sharing.md), to show it to just one list.
 
 Who can see a list post follows the list as it is now, not as it was when you posted:
 

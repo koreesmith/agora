@@ -352,6 +352,18 @@ func (s *Service) refreshLegacyRemoteUser(handle, instance string) error {
 	return err
 }
 
+// wantsHTML reports whether a request is a person's browser rather than
+// federation software. Fediverse servers always ask for an ActivityPub type,
+// and browsers always list text/html, so a request is only treated as a
+// browser when it asks for HTML and no ActivityPub type at all.
+func wantsHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "application/activity+json") || strings.Contains(accept, "application/ld+json") {
+		return false
+	}
+	return strings.Contains(accept, "text/html")
+}
+
 // ── Federated user profile ────────────────────────────────────────────────────
 
 func (s *Service) GetUser(w http.ResponseWriter, r *http.Request) {

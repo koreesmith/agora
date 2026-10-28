@@ -82,7 +82,7 @@ const notifText: Record<string, string> = {
   post_reaction:         'reacted to your post',
   comment_reaction:      'reacted to your comment',
   post_comment:          'commented on your post',
-  post_repost:           'shared your post',
+  post_repost:           'reposted your post',
   post_mention:          'mentioned you in a post',
   comment_reply:         'replied to your comment',
   user_post:             'made a new post',

@@ -504,8 +504,8 @@ func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseUR
 		return fmt.Sprintf("%s replied to your comment", actorName),
 			fmt.Sprintf("%s replied to your comment on %s.\n\nSee the reply: %s", actorName, instanceName, postURL)
 	case "post_repost":
-		return fmt.Sprintf("%s shared your post on %s", actorName, instanceName),
-			fmt.Sprintf("%s shared one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
+		return fmt.Sprintf("%s reposted your post on %s", actorName, instanceName),
+			fmt.Sprintf("%s reposted one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "post_mention":
 		return fmt.Sprintf("%s mentioned you in a post", actorName),
 			fmt.Sprintf("%s mentioned you in a post on %s.\n\nSee the post: %s", actorName, instanceName, postURL)

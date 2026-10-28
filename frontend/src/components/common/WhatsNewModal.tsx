@@ -24,6 +24,13 @@ const FEATURES = [
     linkText: 'Try it in the composer →',
   },
   {
+    emoji: '🔗',
+    title: 'Share and Repost',
+    desc: "Share a public post's link by email, to Bluesky or Mastodon, or anywhere you can paste it, with a proper preview. What used to be called Share is now Repost.",
+    link: '/feed',
+    linkText: 'Find it under any public post →',
+  },
+  {
     emoji: '🌉',
     title: 'Friends across Agora instances',
     desc: "Friend requests, friends-only posts, and their replies and reactions now reach your friends even when they're on a different Agora instance, not just your own.",

@@ -13,7 +13,7 @@ Welcome to Agora, a private, federated social network built for the people you a
 
 - [Making a post](posting.md), including choosing where it goes, describing your images, and hiding a post from your timeline
 - [Commenting & reacting](comments.md)
-- [Sharing a post](sharing.md)
+- [Reposting and sharing](sharing.md)
 - [Polls](polls.md)
 
 ## Friends & Groups

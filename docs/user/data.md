@@ -34,7 +34,14 @@ During the grace period, other people can no longer open your profile or find yo
 
 When the grace period ends, your account and everything in it is permanently deleted from this instance: your profile, posts, comments, photos, friends, and messages. This can't be undone. Copies of public posts that already reached Mastodon, Bluesky or other servers are kept by those servers.
 
-Neither app currently offers a way to cancel a scheduled deletion, so be sure before you confirm.
+### Cancelling a scheduled deletion
+
+You can cancel any time before the grace period ends:
+
+- **On the web:** go to **Settings → Data**, where **Delete account** shows the scheduled date, and click **Cancel deletion**.
+- **In the mobile app:** go to **Settings**, and under **Data** tap **Cancel account deletion**. The confirmation shows the scheduled date. Tap **Cancel deletion**.
+
+Your profile and posts become visible again straight away.
 
 > If you might want your posts later, download your data (see above) before you schedule the deletion.
 

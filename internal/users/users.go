@@ -595,9 +595,13 @@ func (s *Service) RequestDeletion(w http.ResponseWriter, r *http.Request) {
 		WHERE id = $2
 	`, scheduledAt, userID)
 
+	// AGORA-405: mobile builds read deletion_scheduled_at (the /auth/me name),
+	// so send both rather than break either client.
 	writeJSON(w, 200, map[string]any{
-		"message":      fmt.Sprintf("account deletion scheduled — you have %d days to cancel", graceDays),
-		"scheduled_at": scheduledAt,
+		"message":               fmt.Sprintf("account deletion scheduled, you have %d days to cancel", graceDays),
+		"scheduled_at":          scheduledAt,
+		"deletion_scheduled_at": scheduledAt,
+		"grace_days":            graceDays,
 	})
 }
 

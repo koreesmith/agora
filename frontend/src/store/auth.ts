@@ -24,6 +24,8 @@ export interface User {
   // Undefined for a session stored before the field existed, which never
   // redirects.
   onboarding_completed?: boolean
+  // AGORA-405: set while an account deletion is pending
+  deletion_scheduled_at?: string | null
 }
 
 interface AuthState {

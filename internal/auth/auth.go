@@ -489,6 +489,7 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		DmPrivacy            string
 		OnboardingCompleted  bool
 		OnboardingReturning  bool
+		DeletionScheduledAt  *time.Time
 	}
 	// AGORA-393: onboarding_returning is whether the account predates the
 	// wizard on this instance, i.e. was created before the earlier of its two
@@ -499,12 +500,13 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled,
 		       dm_privacy, onboarding_completed_at IS NOT NULL,
 		       COALESCE(created_at < (SELECT MIN(applied_at) FROM schema_backfills
-		                              WHERE name IN ('onboarding_existing_accounts', 'onboarding_reintroduction')), false)
+		                              WHERE name IN ('onboarding_existing_accounts', 'onboarding_reintroduction')), false),
+		       deletion_scheduled_at
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
 		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
 		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled,
-		&u.DmPrivacy, &u.OnboardingCompleted, &u.OnboardingReturning)
+		&u.DmPrivacy, &u.OnboardingCompleted, &u.OnboardingReturning, &u.DeletionScheduledAt)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -527,6 +529,9 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"dm_privacy":           u.DmPrivacy,
 		"onboarding_completed": u.OnboardingCompleted,
 		"onboarding_returning": u.OnboardingReturning,
+		// AGORA-405: null unless a deletion is pending, so the settings
+		// screens can offer to cancel it.
+		"deletion_scheduled_at": u.DeletionScheduledAt,
 	})
 }
 

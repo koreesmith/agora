@@ -82,6 +82,16 @@ func TestMeReportsOnboardingAndDmPrivacy(t *testing.T) {
 	if got := me()["onboarding_returning"]; got != true {
 		t.Errorf("onboarding_returning = %v for an account from 2000, want true", got)
 	}
+
+	// AGORA-405: a pending deletion shows up so the client can offer to
+	// cancel it, and is null otherwise.
+	if got, ok := me()["deletion_scheduled_at"]; !ok || got != nil {
+		t.Errorf("deletion_scheduled_at = %v (present %v), want null", got, ok)
+	}
+	db.Exec(`UPDATE users SET deletion_scheduled_at = NOW() + INTERVAL '30 days' WHERE id = $1`, id)
+	if got, _ := me()["deletion_scheduled_at"].(string); got == "" {
+		t.Errorf("deletion_scheduled_at = %v with a deletion pending, want a timestamp", me()["deletion_scheduled_at"])
+	}
 }
 
 // AGORA-387: /api/instance carries the two network switches with the same

@@ -151,9 +151,29 @@ export default function SettingsPage() {
     const a = document.createElement('a'); a.href = url; a.download = 'agora-export.zip'; a.click()
   }
 
+  // AGORA-405: /auth/me reports a pending deletion, so the Data tab can show
+  // its date and offer to cancel it.
+  const deletionScheduledAt: string | null =
+    (freshProfile ? freshProfile.deletion_scheduled_at : user?.deletion_scheduled_at) ?? null
+  const setDeletionScheduledAt = (at: string | null) => {
+    qc.setQueryData(['my-profile'], (old: any) => old && { ...old, deletion_scheduled_at: at })
+    updateUser({ deletion_scheduled_at: at })
+  }
+  const formatDate = (at: string) => new Date(at).toLocaleDateString(undefined, { dateStyle: 'long' })
+
   const requestDelete = useMutation({
     mutationFn: () => usersApi.requestDeletion(),
-    onSuccess: () => ok('Deletion scheduled. You have 30 days to cancel.'),
+    onSuccess: (res) => {
+      const at = res.data.deletion_scheduled_at ?? res.data.scheduled_at
+      setDeletionScheduledAt(at)
+      ok(`Deletion scheduled for ${formatDate(at)}. You can cancel it until then.`)
+    },
+    onError: fail,
+  })
+
+  const cancelDelete = useMutation({
+    mutationFn: () => usersApi.cancelDeletion(),
+    onSuccess: () => { setDeletionScheduledAt(null); ok('Account deletion cancelled') },
     onError: fail,
   })
 
@@ -467,10 +487,24 @@ export default function SettingsPage() {
           </div>
           <div className="card p-4 space-y-3 border-red-200 dark:border-red-800">
             <h3 className="font-semibold text-red-600">Delete account</h3>
-            <p className="text-sm text-agora-500">Your account will be scheduled for deletion. You have 30 days to cancel before all data is permanently removed.</p>
-            <button onClick={() => { if(confirm('Schedule account deletion? You will have 30 days to cancel.')) requestDelete.mutate() }} className="btn-danger">
-              Schedule deletion
-            </button>
+            {deletionScheduledAt ? (
+              <>
+                <p className="text-sm text-agora-500">
+                  Your account is scheduled for deletion on <strong>{formatDate(deletionScheduledAt)}</strong>.
+                  {' '}After that, all of your data is permanently removed. You can cancel until then.
+                </p>
+                <button onClick={() => cancelDelete.mutate()} disabled={cancelDelete.isPending} className="btn-secondary">
+                  Cancel deletion
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-agora-500">Your account will be scheduled for deletion. You have a grace period (30 days unless your instance sets another) to cancel before all data is permanently removed.</p>
+                <button onClick={() => { if(confirm('Schedule account deletion? You can cancel it during the grace period.')) requestDelete.mutate() }} disabled={requestDelete.isPending} className="btn-danger">
+                  Schedule deletion
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

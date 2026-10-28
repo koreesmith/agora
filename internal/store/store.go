@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -25,10 +26,34 @@ func Open(dsn string) (*DB, error) {
 	return &DB{db}, nil
 }
 
+// migrationLockKey names the advisory lock Migrate holds. Any constant works,
+// as long as nothing else in the database uses the same one.
+const migrationLockKey int64 = 0x61676f7261 // "agora"
+
+// Migrate brings the schema up to date.
+//
+// AGORA-399: it holds a Postgres advisory lock while it runs, so concurrent
+// migrators (two backends starting at once, or parallel test packages sharing
+// one database) take turns instead of running the same statement together,
+// which failed with errors like `constraint ... already exists`. The lock is
+// session-level, so the statements run on the one connection that holds it.
+// A migrator that waits finds everything already applied.
 func (db *DB) Migrate() error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		return fmt.Errorf("migrate: lock: %w", err)
+	}
+	defer conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
+
 	log.Println("store: running migrations")
 	for i, m := range schema {
-		if _, err := db.Exec(m); err != nil {
+		if _, err := conn.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i, err)
 		}
 	}

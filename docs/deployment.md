@@ -105,6 +105,7 @@ an extra step beyond the base SSL setup above.
 ## Production Checklist
 
 - [ ] `JWT_SECRET` set to a long random string
+- [ ] `POSTGRES_PASSWORD` changed from the default `agora`
 - [ ] `INSTANCE_DOMAIN` set to your public HTTPS URL
 - [ ] Admin password changed from default `admin`
 - [ ] `ENVIRONMENT=production`
@@ -136,3 +137,79 @@ docker compose up -d --build
 ```
 
 Migrations run automatically on startup via `db.Migrate()`.
+
+## Upgrading to v4.0.0
+
+Back up `./data/postgres` and `./data/uploads` first. Then read the points
+below before running the update above.
+
+### Before you pull
+
+- **Database credentials moved to `.env`.** `docker-compose.yml` now reads
+  `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` from `.env` and
+  builds the backend's `DATABASE_URL` from them. If you changed the
+  credentials by editing `docker-compose.yml`, copy them into `.env` first,
+  or `git pull` will conflict on that file. A `DATABASE_URL` line left in
+  `.env` is ignored. Leaving all three unset keeps the old `agora` values.
+- **Postgres is published on the host.** The database now binds
+  `127.0.0.1:5432` (`POSTGRES_PORT`). If something else on the host already
+  uses 5432, set `POSTGRES_PORT` to a free port (for example
+  `127.0.0.1:5433`) or the stack will not start.
+- **Host ports are configurable.** `HTTP_PORT` and `HTTPS_PORT` default to
+  80 and 443, so a standard install needs no change. See Host ports above.
+
+### Federation with other Agora instances
+
+Agora-to-Agora federation now runs entirely over ActivityPub, and the older
+Agora-only protocol has been removed (see
+[ADR-002](adr/002-agora-to-agora-federation-protocol.md)). Friend requests,
+friends-only and friend-list posts, and messages between instances all need
+both sides on v4.0.0.
+
+- **Upgrade peers together.** A v3 instance can still follow and be followed
+  over ActivityPub, but friend requests between it and a v4 instance will
+  not go through.
+- **Keep ActivityPub on.** Turning off the instance-wide Fediverse
+  (ActivityPub) switch in Admin now also stops federation with other Agora
+  instances.
+- New instance setting `friend_requests_from`: `anyone` (default) or
+  `peered_only`, which accepts friend requests only from instances listed in
+  the Federation tab. It has no control on the Admin page yet; set it through
+  the admin settings API (`PATCH /admin/settings`).
+
+### On by default after upgrading
+
+- **Signup challenge.** New signups solve a short proof-of-work check in the
+  browser. Signups that don't (including older mobile app builds) are not
+  rejected; they go to the waitlist for an admin to approve. Turn it off with
+  the `signup_challenge` setting in Admin.
+- **Signup limits.** Registration is rate limited per IP, and throwaway email
+  domains are refused.
+- **Remote media cache.** Profile pictures and covers from other servers are
+  downloaded and served locally, up to 1 GB under `./data/uploads/remote`.
+  The size limit, and whether the cache is on at all, are in Admin under
+  Storage.
+- **Getting started tour.** Every existing account sees the new tour once on
+  its next sign-in, followed by What's New. Both can be skipped.
+
+### nginx
+
+The nginx config is built into its image, so the `--build` in the update
+command is needed. Changes you may notice:
+
+- The general API rate limit is higher (10 requests a second, burst 100), and
+  a limited request now gets `429` instead of `503`.
+- nginx trusts `X-Forwarded-For` from private address ranges (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`) so rate limits apply per visitor behind
+  an internal reverse proxy. If anything on those ranges can reach nginx
+  directly and is not a proxy you control, review this before upgrading.
+- Uploaded files are served with their real content type, which fixes video
+  playback.
+
+### After the first start
+
+- The first start runs several one-time data repairs and can take longer than
+  usual. Migrations take a database lock, so two backends starting at once
+  wait for each other instead of colliding.
+- The instance now reports version `4.0.0` in NodeInfo, and reports
+  registrations as open only when the registration mode is Open.

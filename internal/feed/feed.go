@@ -403,6 +403,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -740,6 +741,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 
@@ -831,6 +833,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 
@@ -1041,6 +1044,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
@@ -1466,6 +1470,7 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enrichReactions(posts, viewerID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
@@ -1930,6 +1935,7 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
 	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -2949,6 +2955,11 @@ type Post struct {
 	RepostLinkDescription *string `json:"repost_link_description,omitempty"`
 	RepostLinkImage       *string `json:"repost_link_image,omitempty"`
 	RepostLinkDomain      *string `json:"repost_link_domain,omitempty"`
+	// AGORA-408: the post the reposted post itself quotes, when it is a quote (filled
+	// in by enrichNestedQuotes). Without it, sharing a quote post showed only
+	// the quoter's words, e.g. a one-line reaction to an article with the
+	// article gone.
+	RepostQuote *NestedQuote `json:"repost_quote,omitempty"`
 	// AGORA-258: custom emoji (shortcode -> image URL) for this post's author
 	// name, this post's own content, and (if this is a repost/quote-share) the
 	// reposted post's author name/content — each independently sourced from
@@ -2965,6 +2976,23 @@ type Post struct {
 	// in the first place, so there's nothing for enrichExternalOnly to find.
 	ExternalOnly bool   `json:"external_only,omitempty"`
 	OnlyOn       string `json:"only_on,omitempty"`
+}
+
+// NestedQuote (AGORA-408) is the second level of a share-of-a-quote: just enough of the
+// innermost post to render a compact card inside the quoted one.
+type NestedQuote struct {
+	ID             string          `json:"id"`
+	AuthorUsername string          `json:"author_username"`
+	AuthorName     string          `json:"author_display_name"`
+	AuthorAvatar   string          `json:"author_avatar_url,omitempty"`
+	AuthorEmojis   json.RawMessage `json:"author_emojis,omitempty"`
+	Content        string          `json:"content"`
+	ContentEmojis  json.RawMessage `json:"content_emojis,omitempty"`
+	ImageURL       string          `json:"image_url,omitempty"`
+	LinkURL        string          `json:"link_url,omitempty"`
+	LinkTitle      string          `json:"link_title,omitempty"`
+	LinkImage      string          `json:"link_image,omitempty"`
+	LinkDomain     string          `json:"link_domain,omitempty"`
 }
 
 // nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
@@ -3060,6 +3088,57 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 		posts[i].AuthorCustomDomain = byUsername[strings.ToLower(posts[i].AuthorUsername)]
 		posts[i].RepostAuthorCustomDomain = byUsername[strings.ToLower(derefOr(posts[i].RepostAuthorUsername))]
 		posts[i].MentionDomains = pickDomains(mentions[i], byUsername)
+	}
+}
+
+// enrichNestedQuotes (AGORA-408) fills RepostQuote on every repost whose reposted post is
+// itself a quote, in one query over the already-scanned posts (the same shape
+// as enrichCustomHandles, for the same reason: keeping the positional column
+// lists of the feed SELECTs untouched). Only one extra level is resolved, so a
+// longer chain still ends after two cards.
+func (s *Service) enrichNestedQuotes(posts []Post) {
+	var ids []string
+	for _, p := range posts {
+		if p.RepostOfID != nil {
+			ids = append(ids, *p.RepostOfID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	rows, err := s.db.Query(`
+		SELECT mid.id, q.id, u.username, COALESCE(u.display_name,''), COALESCE(u.avatar_url,''),
+		       COALESCE(u.emojis::text,'{}'), COALESCE(q.content,''), COALESCE(q.emojis::text,'{}'),
+		       COALESCE(q.image_url,''), COALESCE(q.link_url,''), COALESCE(q.link_title,''),
+		       COALESCE(q.link_image,''), COALESCE(q.link_domain,'')
+		FROM posts mid
+		JOIN posts q ON q.id = mid.repost_of_id AND q.deleted_at IS NULL
+		JOIN users u ON u.id = q.author_id
+		WHERE mid.id = ANY($1) AND mid.deleted_at IS NULL
+		  AND q.visibility NOT IN ('private', 'friends') AND q.community_group_id IS NULL
+	`, pq.Array(ids))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	byMid := map[string]*NestedQuote{}
+	for rows.Next() {
+		var midID, authorEmojis, contentEmojis string
+		var q NestedQuote
+		if rows.Scan(&midID, &q.ID, &q.AuthorUsername, &q.AuthorName, &q.AuthorAvatar,
+			&authorEmojis, &q.Content, &contentEmojis,
+			&q.ImageURL, &q.LinkURL, &q.LinkTitle, &q.LinkImage, &q.LinkDomain) != nil {
+			continue
+		}
+		q.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		q.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
+		byMid[midID] = &q
+	}
+	for i := range posts {
+		if posts[i].RepostOfID != nil {
+			posts[i].RepostQuote = byMid[*posts[i].RepostOfID]
+		}
 	}
 }
 

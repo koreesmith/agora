@@ -58,6 +58,21 @@ interface Post {
   repost_link_description?: string
   repost_link_image?: string
   repost_link_domain?: string
+  // AGORA-408: the post the reposted post itself quotes, so sharing a quote keeps the
+  // thing it was quoting (e.g. the article a one-line reaction was about)
+  repost_quote?: {
+    id: string
+    author_username: string
+    author_display_name: string
+    author_emojis?: Record<string, string>
+    content: string
+    content_emojis?: Record<string, string>
+    image_url?: string
+    link_url?: string
+    link_title?: string
+    link_image?: string
+    link_domain?: string
+  }
   like_count: number
   comment_count: number
   repost_count: number
@@ -947,6 +962,64 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       </div>
                     </a>
                   )}
+                  {/* AGORA-408: the quoted post's own quote, one level further in and
+                      kept compact, so the context it was reacting to survives */}
+                  {post.repost_quote && (() => {
+                    const q = post.repost_quote
+                    return (
+                      <div
+                        onClick={e => {
+                          if ((e.target as HTMLElement).closest('a')) return
+                          e.stopPropagation()
+                          navigate(`/post/${q.id}`)
+                        }}
+                        className="mt-2 border border-agora-200 dark:border-agora-600 rounded-lg p-2.5 hover:bg-agora-100 dark:hover:bg-agora-700 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5 flex-wrap text-xs">
+                          <Link to={`/profile/${q.author_username}`}
+                            className="font-semibold text-agora-800 dark:text-agora-200 hover:underline">
+                            {q.author_display_name ? renderName(q.author_display_name, q.author_emojis) : q.author_username}
+                          </Link>
+                          <span className="text-agora-400">{handle(q.author_username)}</span>
+                        </div>
+                        {q.content && (
+                          <p className="text-xs text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words line-clamp-4">
+                            {renderContent(q.content, undefined, q.content_emojis, post.mention_domains)}
+                          </p>
+                        )}
+                        {q.image_url && (
+                          <img src={q.image_url} alt="" className="mt-1.5 rounded-md max-h-40 object-cover w-full" />
+                        )}
+                        {q.link_url && (
+                          <a
+                            href={q.link_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1.5 flex gap-2 border border-agora-200 dark:border-agora-600 rounded-lg overflow-hidden hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                          >
+                            {q.link_image && (
+                              <img
+                                src={q.link_image}
+                                alt=""
+                                className="w-12 h-12 object-cover flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                                onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                              />
+                            )}
+                            <div className="flex-1 min-w-0 p-1.5">
+                              <p className="text-[11px] text-agora-400 flex items-center gap-1">
+                                <ExternalLink size={9} /> {q.link_domain}
+                              </p>
+                              {q.link_title && (
+                                <p className="text-xs font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">
+                                  {q.link_title}
+                                </p>
+                              )}
+                            </div>
+                          </a>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
               )}
 

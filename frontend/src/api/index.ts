@@ -248,7 +248,7 @@ export const adminApi = {
   listInvites:     ()                          => api.get('/admin/invites'),
   createInvite:    ()                          => api.post('/admin/invites'),
   revokeInvite:    (id: string)                => api.delete(`/admin/invites/${id}`),
-  getAuditLog:     ()                          => api.get('/admin/audit-log'),
+  getAuditLog:     (page = 0)                  => api.get('/admin/audit-log', { params: { page } }),
   listInstances:   ()                          => api.get('/admin/federation/instances'),
   addInstance:     (domain: string)            => api.post('/admin/federation/instances', { domain }),
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),

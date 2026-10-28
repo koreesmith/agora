@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/store"
@@ -367,15 +370,27 @@ func (s *Service) RevokeInvite(w http.ResponseWriter, r *http.Request) {
 
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
+// auditPageSize is a var so tests can page through a handful of rows.
+var auditPageSize = 50
+
+// GetAuditLog answers GET /admin/audit-log?page=N, newest first.
+//
+// AGORA-397: it used to return the latest 200 and ignore page, so mobile's
+// Previous/Next did nothing. It now pages and says whether there is more, and
+// names the account a user-targeted action was about (target_id alone is a
+// UUID nobody can read).
 func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 0 { page = 0 }
+
 	rows, err := s.db.Query(`
 		SELECT a.id, a.action, a.target_type, a.target_id, a.details, a.created_at,
 		       u.username
 		FROM audit_log a
 		LEFT JOIN users u ON u.id = a.actor_id
-		ORDER BY a.created_at DESC
-		LIMIT 200
-	`)
+		ORDER BY a.created_at DESC, a.id
+		LIMIT $1 OFFSET $2
+	`, auditPageSize+1, page*auditPageSize)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -383,22 +398,60 @@ func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Entry struct {
-		ID         string  `json:"id"`
-		Action     string  `json:"action"`
-		TargetType string  `json:"target_type"`
-		TargetID   string  `json:"target_id"`
-		Details    string  `json:"details"`
-		CreatedAt  string  `json:"created_at"`
-		Actor      *string `json:"actor_username"`
+		ID             string  `json:"id"`
+		Action         string  `json:"action"`
+		TargetType     string  `json:"target_type"`
+		TargetID       string  `json:"target_id"`
+		TargetUsername *string `json:"target_username"`
+		Details        string  `json:"details"`
+		CreatedAt      string  `json:"created_at"`
+		Actor          *string `json:"actor_username"`
 	}
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Details, &e.CreatedAt, &e.Actor)
+		if err := rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Details, &e.CreatedAt, &e.Actor); err != nil {
+			writeError(w, 500, "db error")
+			return
+		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	hasMore := len(entries) > auditPageSize
+	if hasMore { entries = entries[:auditPageSize] }
+
+	// Looked up separately rather than joined: target_id is text, and casting
+	// users.id to match it would cost a scan of users for every row.
+	var userIDs []string
+	for _, e := range entries {
+		if e.TargetType == "user" {
+			if _, err := uuid.Parse(e.TargetID); err == nil {
+				userIDs = append(userIDs, e.TargetID)
+			}
+		}
+	}
+	if len(userIDs) > 0 {
+		names := map[string]string{}
+		urows, err := s.db.Query(`SELECT id, username FROM users WHERE id = ANY($1::uuid[])`, pq.Array(userIDs))
+		if err == nil {
+			for urows.Next() {
+				var id, name string
+				if urows.Scan(&id, &name) == nil { names[id] = name }
+			}
+			urows.Close()
+		}
+		for i := range entries {
+			if name, ok := names[entries[i].TargetID]; ok && entries[i].TargetType == "user" {
+				entries[i].TargetUsername = &name
+			}
+		}
+	}
+
 	if entries == nil { entries = []Entry{} }
-	writeJSON(w, 200, map[string]any{"entries": entries})
+	writeJSON(w, 200, map[string]any{"entries": entries, "has_more": hasMore})
 }
 
 // ── Federation ────────────────────────────────────────────────────────────────

@@ -3,11 +3,11 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
 import RemoteMediaCacheCard from '../components/common/RemoteMediaCacheCard'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign } from 'lucide-react'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign, ScrollText } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'invites'|'rules'|'audit'|'waitlist'|'pages'|'media'>(
     // AGORA-302: relays moved from a tab of their own into the Fediverse tab,
     // so ?tab=relays is aliased rather than dropped — it's a live entry point
     // in existing links and bookmarks, and would otherwise land on a tab that
@@ -97,6 +97,7 @@ export default function AdminPage() {
     { id:'federation',  label:'Federation',  icon: Link2 },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
+    { id:'audit',       label:'Audit log',   icon: ScrollText },
     { id:'pages',       label:'Pages',       icon: Star },
     { id:'media',       label:'Storage',     icon: HardDrive },
   ]
@@ -619,6 +620,8 @@ export default function AdminPage() {
         <RulesPanel rules={rulesData?.rules ?? []} onChanged={()=>qc.invalidateQueries({queryKey:['admin-rules']})} />
       )}
 
+      {tab==='audit' && <AuditLogPanel />}
+
       {tab==='waitlist' && (
         <div className="space-y-4">
           <div className="card p-4">
@@ -787,6 +790,74 @@ export default function AdminPage() {
               </div>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Audit Log Panel ───────────────────────────────────────────────────────────
+
+// AGORA-397: web had the API call but no tab, so only mobile admins could see
+// who changed what. Newest first, one page at a time.
+function AuditLogPanel() {
+  const [page, setPage] = useState(0)
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['admin-audit', page],
+    queryFn: () => adminApi.getAuditLog(page).then(r => r.data),
+  })
+  const entries: any[] = data?.entries ?? []
+  const hasMore: boolean = data?.has_more ?? false
+
+  const target = (e: any) => {
+    if (e.target_username) return `@${e.target_username}`
+    if (e.target_type === 'user') return 'a deleted account'
+    return e.target_id || ''
+  }
+
+  return (
+    <div className="card p-4 space-y-3">
+      <div>
+        <h3 className="font-semibold">Audit log</h3>
+        <p className="text-sm text-agora-500">Changes made by admins and moderators, newest first.</p>
+      </div>
+
+      {isLoading && <p className="text-sm text-agora-400">Loading…</p>}
+      {isError && <p className="text-sm text-red-500">Couldn't load the audit log.</p>}
+      {!isLoading && !isError && entries.length === 0 && (
+        <p className="text-sm text-agora-400 italic">{page === 0 ? 'Nothing has been logged yet.' : 'No more entries.'}</p>
+      )}
+
+      {entries.length > 0 && (
+        <ul className="divide-y divide-agora-100 dark:divide-agora-700">
+          {entries.map(e => (
+            <li key={e.id} className="py-2 flex items-start gap-3 text-sm">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-agora-900 dark:text-agora-100">
+                  {e.action.replace(/_/g, ' ')}
+                  {target(e) && <span className="font-normal text-agora-500"> · {target(e)}</span>}
+                </p>
+                <p className="text-xs text-agora-400">
+                  {e.actor_username ? `by @${e.actor_username}` : 'by a deleted account'}
+                  {e.details && <> · {e.details}</>}
+                </p>
+              </div>
+              <time className="text-xs text-agora-400 flex-shrink-0" dateTime={e.created_at}>
+                {new Date(e.created_at).toLocaleString()}
+              </time>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {(page > 0 || hasMore) && (
+        <div className="flex gap-2">
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="btn-secondary text-sm flex-1">
+            ← Newer
+          </button>
+          <button onClick={() => setPage(p => p + 1)} disabled={!hasMore} className="btn-secondary text-sm flex-1">
+            Older →
+          </button>
         </div>
       )}
     </div>

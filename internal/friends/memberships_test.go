@@ -28,7 +28,10 @@ import (
 func TestMemberships(t *testing.T) {
 	db, err := store.Open("postgres://agora:agora@localhost:15433/agora_test?sslmode=disable")
 	if err != nil { t.Skipf("skipping: agora-postgres-test not reachable: %v", err) }
-	defer db.Close()
+	// A Cleanup, not a defer: deferred calls run before t.Cleanup functions,
+	// so a deferred Close left every cleanup below hitting a closed pool and
+	// the test's rows behind. Registered first, so it runs last.
+	t.Cleanup(func() { db.Close() })
 	if err := db.Migrate(); err != nil { t.Fatalf("migrate: %v", err) }
 	u := time.Now().UnixNano()
 

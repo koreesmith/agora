@@ -2,7 +2,10 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 
-const SEEN_KEY = 'agora_seen_v4'
+// AGORA-396: the list grew after v4.0.0 first shipped to running instances, so
+// the key moved on once to show the fuller list to members who had already
+// dismissed the original.
+const SEEN_KEY = 'agora_seen_v4_2'
 
 // AGORA-388: a brand-new account has just been through the getting started
 // wizard, so the auto-shown What's New would only repeat it. Finishing or
@@ -13,6 +16,13 @@ export function markWhatsNewSeen() {
 }
 
 const FEATURES = [
+  {
+    emoji: '🎯',
+    title: 'Choose where each post goes',
+    desc: 'Pick Agora, the Fediverse, Bluesky, or any mix of them for each post. You can even post to the Fediverse or Bluesky without posting on Agora.',
+    link: '/feed',
+    linkText: 'Try it in the composer →',
+  },
   {
     emoji: '🌉',
     title: 'Friends across Agora instances',
@@ -26,6 +36,20 @@ const FEATURES = [
     desc: 'Send and receive DMs with friends on other Agora instances, not just your own.',
     link: '/messages',
     linkText: 'Open Messages →',
+  },
+  {
+    emoji: '🧭',
+    title: 'Find people on other Agora instances',
+    desc: "Find Friends now suggests people from Agora instances this one connects with, and you can find a private profile by its exact handle to send a friend request.",
+    link: '/discover',
+    linkText: 'Find friends →',
+  },
+  {
+    emoji: '🔎',
+    title: 'Search from anywhere',
+    desc: 'The search bar now sits at the top of every page, with quick results for people, posts, and pages. The full results page also searches the Fediverse and Bluesky.',
+    link: null,
+    linkText: null,
   },
   {
     emoji: '🌐',
@@ -51,7 +75,7 @@ const FEATURES = [
   {
     emoji: '👀',
     title: 'See your followers',
-    desc: 'View your Fediverse and Bluesky follower and following lists, now with a dedicated Followers segment in each tab.',
+    desc: "View your Fediverse and Bluesky follower and following lists, now with a dedicated Followers segment in each tab. You'll also get a notification when someone new follows you.",
     link: '/connections?tab=fediverse&sub=followers',
     linkText: 'Check your followers →',
   },
@@ -61,6 +85,13 @@ const FEATURES = [
     desc: 'Remove a post from your own timeline without deleting it.',
     link: null,
     linkText: null,
+  },
+  {
+    emoji: '👋',
+    title: 'Getting started tour',
+    desc: 'A short tour for setting up your profile, privacy, and networks. Take it again anytime with the compass button at the bottom of the sidebar.',
+    link: '/welcome',
+    linkText: 'Take the tour →',
   },
 ]
 

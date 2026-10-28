@@ -176,6 +176,14 @@ export default function AdminPage() {
               <option value="invite">Invite only</option>
               <option value="closed">Closed</option>
             </select></div>
+          <div className="flex items-center justify-between gap-4 py-2">
+            <div><p className="font-medium text-sm">Signup bot check</p>
+              <p className="text-xs text-agora-400">The signup page quietly solves a small puzzle in the background. On open registration, signups that don't (bots, older mobile app versions) go to the waitlist for approval instead.</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,signup_challenge:f.signup_challenge==='off'?'on':'off'}))}
+              className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${settingsForm.signup_challenge!=='off'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.signup_challenge!=='off'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
           <div><label className="label">Blocked email domains</label>
             <textarea className="input" rows={3} autoComplete="off" value={settingsForm.blocked_email_domains||''}
               onChange={e=>setSettingsForm(f=>({...f,blocked_email_domains:e.target.value}))} placeholder="spammy.example, another.example" />

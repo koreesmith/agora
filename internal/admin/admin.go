@@ -136,6 +136,8 @@ var adminEditableSettings = map[string]bool{
 	// AGORA-406: extra email domains to refuse at signup, on top of the
 	// built-in disposable list. Comma or newline separated.
 	"blocked_email_domains": true,
+	// AGORA-407: 'on' or 'off', the proof-of-work signup check.
+	"signup_challenge": true,
 }
 
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {

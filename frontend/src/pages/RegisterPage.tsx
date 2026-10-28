@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { authApi } from '../api'
+import { solveSignupChallenge, type SignupSolution } from '../utils/signupChallenge'
 
 export default function RegisterPage() {
   const [params] = useSearchParams()
@@ -9,20 +10,28 @@ export default function RegisterPage() {
   const [success, setSuccess] = useState(false)
   const [waitlisted, setWaitlisted] = useState(false)
   const [loading, setLoading] = useState(false)
+  // AGORA-407: solved in the background from page load; a fresh one is
+  // started after a failed submit, since the server uses each one only once.
+  const challenge = useRef<Promise<SignupSolution | null> | null>(null)
+  useEffect(() => { challenge.current = solveSignupChallenge() }, [])
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(f=>({...f,[k]:e.target.value}))
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setLoading(true)
     try {
-      const res = await authApi.register(form)
+      const signup_challenge = await (challenge.current ?? Promise.resolve(null))
+      const res = await authApi.register({ ...form, signup_challenge })
       if (res.data?.message === 'waitlist') {
         setWaitlisted(true)
       } else {
         setSuccess(true)
       }
     }
-    catch (err:any) { setError(err.response?.data?.error||'Registration failed') }
+    catch (err:any) {
+      setError(err.response?.data?.error||'Registration failed')
+      challenge.current = solveSignupChallenge()
+    }
     finally { setLoading(false) }
   }
 

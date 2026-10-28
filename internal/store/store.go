@@ -1833,4 +1833,17 @@ var schema = []string{
 	// post_photos.alt describes each photo of a multi-photo post.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_alt TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE post_photos ADD COLUMN IF NOT EXISTS alt TEXT NOT NULL DEFAULT ''`,
+
+	// AGORA-407: the proof-of-work signup challenge. 'on' or 'off', seeded on
+	// so an upgrading instance is protected straight away; a signup without a
+	// valid solution goes to the waitlist rather than failing, so old mobile
+	// builds still get through. used_signup_challenges records each solved
+	// challenge's signature until it expires, so one solution can't be replayed
+	// for a batch of accounts.
+	`INSERT INTO instance_settings (key, value) VALUES ('signup_challenge', 'on')
+		ON CONFLICT (key) DO NOTHING`,
+	`CREATE TABLE IF NOT EXISTS used_signup_challenges (
+		signature  TEXT        PRIMARY KEY,
+		expires_at TIMESTAMPTZ NOT NULL
+	)`,
 }

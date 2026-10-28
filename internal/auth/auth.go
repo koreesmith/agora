@@ -163,6 +163,7 @@ func RegisterPublicRoutes(r chi.Router, s *Service) {
 	r.Get("/auth/verify-email",      s.VerifyEmail)
 	r.With(forgotPasswordRateLimit).Post("/auth/forgot-password", s.ForgotPassword)
 	r.With(resetPasswordRateLimit).Post("/auth/reset-password", s.ResetPassword)
+	r.With(signupChallengeRateLimit).Get("/auth/signup-challenge", s.SignupChallenge)
 	r.Get("/auth/me",                s.Me)
 	r.Get("/auth/waitlist/accept",   s.WaitlistAccept)
 }
@@ -265,6 +266,8 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 		// AGORA-406: a field the web form hides from people. Bots that fill
 		// in every input fill this too; clients that never send it pass.
 		Website     string `json:"website"`
+		// AGORA-407: the solved proof-of-work challenge, if the client did it.
+		SignupChallenge *signupSolution `json:"signup_challenge"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json"); return
@@ -348,6 +351,14 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if regMode == "waitlist" {
 		waitlistStatus = "pending"
 	}
+	// AGORA-407: on an open instance, a signup that didn't solve the
+	// challenge (an old mobile build, or a bot) goes to the waitlist for an
+	// admin to approve instead of being refused. Invite signups are already
+	// vouched for, and waitlist ones are reviewed anyway.
+	if regMode == "open" && s.signupChallengeEnabled() &&
+		!(s.verifySignupSolution(req.SignupChallenge) && s.consumeSignupSolution(req.SignupChallenge)) {
+		waitlistStatus = "pending"
+	}
 
 	var userID string
 	err = s.db.QueryRow(`
@@ -378,7 +389,7 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	// Always send email verification
 	go s.notifSvc.SendEmailVerification(userID, req.Email, displayName, verifyToken)
 
-	if regMode == "waitlist" {
+	if waitlistStatus == "pending" {
 		// Also send waitlist confirmation email
 		go s.notifSvc.SendWaitlistConfirmation(userID, req.Email, displayName)
 		// Notify all admins that a new user joined the waitlist

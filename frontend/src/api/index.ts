@@ -31,6 +31,7 @@ export default api
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const authApi = {
   register:       (data: any)   => api.post('/auth/register', data),
+  signupChallenge: ()           => api.get('/auth/signup-challenge'),
   login:          (data: any)   => api.post('/auth/login', data),
   me:             ()            => api.get('/auth/me'),
   changePassword:      (data: any)   => api.post('/auth/change-password', data),

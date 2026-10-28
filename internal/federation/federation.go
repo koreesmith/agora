@@ -146,25 +146,36 @@ func (s *Service) NodeInfoDiscovery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// softwareVersion is the Agora release NodeInfo advertises. Bump it with each
+// release line.
+const softwareVersion = "4.0.0"
+
+// nodeInfoOpenRegistrations maps the registration_mode instance setting onto
+// NodeInfo's openRegistrations. Only "open" (or unset, which the register
+// handler also treats as open) counts: invite-only, waitlist and closed
+// instances all stop a stranger signing up on their own.
+func nodeInfoOpenRegistrations(mode string) bool {
+	return mode == "" || mode == "open"
+}
+
 func (s *Service) NodeInfo(w http.ResponseWriter, r *http.Request) {
 	var userCount int
 	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false AND is_suspended = false`).Scan(&userCount)
+	var regMode string
+	s.db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'registration_mode'`).Scan(&regMode)
 
 	writeJSON(w, 200, map[string]any{
 		"version": "2.0",
 		"software": map[string]string{
 			"name":    "agora",
-			"version": "2.0.0",
+			"version": softwareVersion,
 		},
 		"protocols": []string{"activitypub"},
 		"services": map[string][]string{
 			"inbound":  {},
 			"outbound": {},
 		},
-		// Agora has no registration-closed/invite-only setting today —
-		// signup is always open, so this is unconditionally true rather
-		// than reading a config value that doesn't exist yet.
-		"openRegistrations": true,
+		"openRegistrations": nodeInfoOpenRegistrations(regMode),
 		"usage": map[string]any{
 			"users": map[string]int{"total": userCount},
 		},

@@ -5,9 +5,9 @@
 1. Click in the **compose box** at the top of your feed ("What's on your mind?").
 2. Type your post. The box auto-expands as you write.
 3. Choose who can see it using the **visibility selector** in the toolbar:
-   - **Public** — visible to anyone on the instance
-   - **Friends** — visible only to accepted friends
-   - **Friend List** — visible to a specific friend group you've created
+   - **Public**: visible to anyone on the instance
+   - **Friends**: visible only to accepted friends
+   - **Friend List**: visible to a specific friend group you've created
 
 4. Click **Post**.
 
@@ -28,7 +28,7 @@ The row only appears for **Public** posts, and only when you have the Fediverse 
 
 - Click the 📷 **photo icon** in the toolbar, or **paste an image directly** from your clipboard (Ctrl/Cmd + V) into the compose box.
 - You can attach up to **10 photos** per post.
-- HEIC photos from your iPhone are automatically converted — a progress message appears if conversion takes more than a second.
+- HEIC photos from your iPhone are automatically converted, and a progress message appears if conversion takes more than a second.
 
 ## Describing your images
 
@@ -56,14 +56,14 @@ Descriptions travel with your post to the Fediverse and Bluesky, and description
 1. Click the **Poll** button in the toolbar.
 2. Enter at least 2 options (up to 6).
 3. Set a duration and whether multiple choices are allowed.
-4. Post — friends will see the poll and can vote.
+4. Post. Friends will see the poll and can vote.
 
 ## Tagging people and groups
 
-- Type **@username** to tag a friend — they'll receive a notification.
-- Type **@handle@instance.social** to tag a Fediverse account — they'll get a real notification on their own server, whether or not you follow them or they follow you. See [The Fediverse](fediverse.md).
-- Type **+group-name** to tag a group — group admins will be notified.
-- An autocomplete dropdown appears as you type (local users and groups only — a Fediverse handle has no autocomplete, type the full handle).
+- Type **@username** to tag a friend. They'll receive a notification.
+- Type **@handle@instance.social** to tag a Fediverse account. They'll get a real notification on their own server, whether or not you follow them or they follow you. See [The Fediverse](fediverse.md).
+- Type **+group-name** to tag a group. Group admins will be notified.
+- An autocomplete dropdown appears as you type (local users and groups only; a Fediverse handle has no autocomplete, so type the full handle).
 
 ## Adding a content warning
 

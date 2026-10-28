@@ -29,7 +29,7 @@ Group owners and moderators can create **invite links** under the group settings
 
 | Role | Permissions |
 |---|---|
-| **Owner** | Full control — can delete the group, manage all members and settings |
+| **Owner** | Full control: can delete the group, manage all members and settings |
 | **Mod** | Can approve join requests, add/remove members, create invite links |
 | **Member** | Can read and post |
 

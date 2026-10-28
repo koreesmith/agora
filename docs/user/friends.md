@@ -1,6 +1,6 @@
 # Adding Friends
 
-Agora uses a mutual friendship model — both people must accept before they're friends.
+Agora uses a mutual friendship model: both people must accept before they're friends.
 
 ## Sending a friend request
 

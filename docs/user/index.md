@@ -1,6 +1,6 @@
 # Agora User Guide
 
-Welcome to Agora — a private, federated social network built for the people you actually know.
+Welcome to Agora, a private, federated social network built for the people you actually know.
 
 ## Getting Started
 

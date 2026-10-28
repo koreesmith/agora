@@ -2,12 +2,12 @@
 
 ## Creating your account
 
-1. Go to your Agora instance's home page and click **Get started — free** (or **Join the waitlist** if your instance uses invite-only mode).
+1. Go to your Agora instance's home page and click **Get started** (or **Join the waitlist** if your instance uses invite-only mode).
 2. Enter your desired **username**, **email address**, and a secure **password**.
 3. Check your email for a verification link and click it to activate your account.
 4. Once verified, sign in. The first time you do, a short getting started tour walks you through the basics (see below).
 
-> **Tip:** Your username is permanent and public — choose something you're comfortable sharing.
+> **Tip:** Your username is permanent and public, so choose something you're comfortable sharing.
 
 ## The getting started tour
 

@@ -30,10 +30,6 @@ These have their own Settings tabs rather than living under Privacy — see **Se
 
 See [Blocking someone](blocking.md).
 
-## Downloading your data
+## Downloading your data and deleting your account
 
-Go to **Settings → Privacy → Export my data**. A download of all your posts, comments, profile info, and friends list will be prepared.
-
-## Deleting your account
-
-Go to **Settings → Privacy → Delete account**. Deletion is scheduled after a 30-day grace period, during which you can cancel. After the grace period, all your data is permanently removed.
+See [Managing your data](data.md).

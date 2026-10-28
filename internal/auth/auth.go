@@ -158,7 +158,7 @@ var (
 func RegisterPublicRoutes(r chi.Router, s *Service) {
 	r.Get("/setup",                  s.SetupStatus)
 	r.Post("/setup",                 s.RunSetup)
-	r.Post("/auth/register",         s.Register)
+	r.With(registerRateLimit).Post("/auth/register", s.Register)
 	r.With(loginRateLimit).Post("/auth/login", s.Login)
 	r.Get("/auth/verify-email",      s.VerifyEmail)
 	r.With(forgotPasswordRateLimit).Post("/auth/forgot-password", s.ForgotPassword)
@@ -248,6 +248,13 @@ func (s *Service) RunSetup(w http.ResponseWriter, r *http.Request) {
 
 // ── Register ──────────────────────────────────────────────────────────────────
 
+// The two success replies, shared with the honeypot branch so a caught bot
+// sees a byte-identical response.
+const (
+	registerCreatedMessage = "account created — check your email to verify"
+	registerWaitlistDetail = "You've been added to the waitlist. Check your email — you'll receive an invite once approved."
+)
+
 func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username    string `json:"username"`
@@ -255,9 +262,25 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
 		InviteCode  string `json:"invite_code"`
+		// AGORA-406: a field the web form hides from people. Bots that fill
+		// in every input fill this too; clients that never send it pass.
+		Website     string `json:"website"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json"); return
+	}
+	if req.Website != "" {
+		// Answer exactly like a real signup so the bot gets no signal
+		// that it was caught, and create nothing.
+		if s.getSetting("registration_mode") == "waitlist" {
+			writeJSON(w, 201, map[string]string{
+				"message": "waitlist",
+				"detail":  registerWaitlistDetail,
+			})
+			return
+		}
+		writeJSON(w, 201, map[string]string{"message": registerCreatedMessage})
+		return
 	}
 	if len(req.Username) < 3 || len(req.Username) > 50 {
 		writeError(w, 400, "username must be 3–50 characters"); return
@@ -279,6 +302,9 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
+	}
+	if emailDomainBlocked(req.Email, s.getSetting("blocked_email_domains")) {
+		writeError(w, 400, "this email provider isn't accepted here, please use a different address"); return
 	}
 
 	// Block if no admin yet
@@ -359,12 +385,12 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 		go s.notifyAdminsWaitlistJoin(userID)
 		writeJSON(w, 201, map[string]string{
 			"message": "waitlist",
-			"detail":  "You've been added to the waitlist. Check your email — you'll receive an invite once approved.",
+			"detail":  registerWaitlistDetail,
 		})
 		return
 	}
 
-	writeJSON(w, 201, map[string]string{"message": "account created — check your email to verify"})
+	writeJSON(w, 201, map[string]string{"message": registerCreatedMessage})
 }
 
 // ── Login ─────────────────────────────────────────────────────────────────────

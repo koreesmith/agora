@@ -4,7 +4,7 @@ import { authApi } from '../api'
 
 export default function RegisterPage() {
   const [params] = useSearchParams()
-  const [form, setForm] = useState({ username:'', email:'', password:'', display_name:'', invite_code: params.get('invite')||'' })
+  const [form, setForm] = useState({ username:'', email:'', password:'', display_name:'', invite_code: params.get('invite')||'', website:'' })
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
   const [waitlisted, setWaitlisted] = useState(false)
@@ -69,6 +69,10 @@ export default function RegisterPage() {
           <div><label className="label">Email *</label><input type="email" className="input" required autoComplete="email" value={form.email} onChange={set('email')} /></div>
           <div><label className="label">Password *</label><input type="password" className="input" required minLength={8} autoComplete="new-password" value={form.password} onChange={set('password')} /></div>
           <div><label className="label">Invite code</label><input className="input" autoComplete="off" value={form.invite_code} onChange={set('invite_code')} placeholder="Required if registration is invite-only" /></div>
+          {/* AGORA-406: hidden from people (and screen readers); bots that fill every input fill this too */}
+          <div aria-hidden="true" style={{ position:'absolute', left:'-10000px', width:1, height:1, overflow:'hidden' }}>
+            <label>Website<input name="website" tabIndex={-1} autoComplete="off" value={form.website} onChange={set('website')} /></label>
+          </div>
           <button type="submit" disabled={loading} className="btn-primary w-full">{loading ? 'Creating account…' : 'Create account'}</button>
         </form>
         <p className="text-center text-sm text-agora-500 mt-4">Already have an account? <Link to="/login" className="text-agora-600 hover:underline font-medium">Sign in</Link></p>

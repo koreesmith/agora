@@ -176,6 +176,10 @@ export default function AdminPage() {
               <option value="invite">Invite only</option>
               <option value="closed">Closed</option>
             </select></div>
+          <div><label className="label">Blocked email domains</label>
+            <textarea className="input" rows={3} autoComplete="off" value={settingsForm.blocked_email_domains||''}
+              onChange={e=>setSettingsForm(f=>({...f,blocked_email_domains:e.target.value}))} placeholder="spammy.example, another.example" />
+            <p className="text-xs text-agora-400 mt-1">Signups from these domains are refused, one per line or comma separated. Known throwaway providers are already blocked; popular ones like Gmail, Yahoo and Proton never are unless you list them here.</p></div>
           <div><label className="label">Deletion grace period (days)</label>
             <input type="number" className="input" autoComplete="off" value={settingsForm.deletion_grace_days||'30'} onChange={sf('deletion_grace_days')} /></div>
           <div className="flex items-center justify-between py-2">

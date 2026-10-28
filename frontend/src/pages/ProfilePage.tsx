@@ -7,8 +7,9 @@ import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield, RefreshCw } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield, RefreshCw, Flag } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import ReportModal from '../components/feed/ReportModal'
 import CustomHandle from '../components/common/CustomHandle'
 import LockedBadge from '../components/common/LockedBadge'
 
@@ -26,6 +27,7 @@ export default function ProfilePage() {
   const [tab, setTab] = useState<'posts'|'photos'|'wall'>('posts')
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [showWallComposer, setShowWallComposer] = useState(false)
+  const [showReport, setShowReport] = useState(false)
   const [wallContent, setWallContent] = useState('')
   const [wallPosting, setWallPosting] = useState(false)
 
@@ -226,6 +228,7 @@ export default function ProfilePage() {
         onClose={() => setListModalFriend(null)}
       />
     )}
+    {showReport && <ReportModal userId={profile.id} onClose={() => setShowReport(false)} />}
     <div className="space-y-4">
       {/* Cover + avatar */}
       <div className="card overflow-hidden">
@@ -472,6 +475,18 @@ export default function ProfilePage() {
               <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5">
                 <UserCheck size={11} /> Follows you
               </span>
+            )}
+            {/* AGORA-398: reporting the account itself, not one of its posts.
+                Here rather than beside Block because each relationship state
+                above draws its own set of buttons, and some have no Block. */}
+            {me && !isSelf && (
+              <button
+                onClick={() => setShowReport(true)}
+                title="Report this account"
+                className="ml-auto flex items-center gap-1 text-xs text-agora-400 hover:text-red-500 transition-colors"
+              >
+                <Flag size={12} /> Report
+              </button>
             )}
           </div>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio, undefined, profile.emojis)}</p>}

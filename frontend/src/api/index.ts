@@ -48,7 +48,8 @@ export const feedApi = {
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
-  editPost:      (id: string, data: { content?: string, image_url?: string, visibility?: string, friend_list_id?: string, content_warning?: string }) => api.patch(`/posts/${id}`, data),
+  // image_alts alone re-describes the post's existing images (AGORA-400).
+  editPost:      (id: string, data: { content?: string, image_url?: string, image_alts?: string[], visibility?: string, friend_list_id?: string, content_warning?: string }) => api.patch(`/posts/${id}`, data),
   likePost:      (id: string)              => api.post(`/posts/${id}/like`),
   unlikePost:    (id: string)              => api.delete(`/posts/${id}/like`),
   reactPost:     (id: string, type: string) => api.post(`/posts/${id}/react`, { type }),
@@ -159,7 +160,7 @@ export const groupsApi = {
   addMember:      (slug: string, username: string)           => api.post(`/groups/${slug}/members/add`, { username }),
   memberSearch:   (slug: string, q: string)                  => api.get(`/groups/${slug}/member-search`, { params: { q } }),
   getFeed:        (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
-  createPost:     (slug: string, data: { content: string, image_url?: string, poll_options?: string[] }) => api.post(`/groups/${slug}/posts`, data),
+  createPost:     (slug: string, data: { content: string, image_url?: string, image_alt?: string, poll_options?: string[] }) => api.post(`/groups/${slug}/posts`, data),
   // Invite links
   listInvites:    (slug: string)                             => api.get(`/groups/${slug}/invites`),
   createInvite:   (slug: string, maxUses = 0)                => api.post(`/groups/${slug}/invites`, { max_uses: maxUses }),
@@ -201,7 +202,7 @@ export const pagesApi = {
   subscribe:   (slug: string)                            => api.post(`/pages/${slug}/subscribe`),
   unsubscribe: (slug: string)                            => api.delete(`/pages/${slug}/subscribe`),
   getFeed:     (slug: string, page = 0)                  => api.get(`/pages/${slug}/feed`, { params: { page } }),
-  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[] }) => api.post(`/pages/${slug}/posts`, data),
+  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[], image_alts?: string[] }) => api.post(`/pages/${slug}/posts`, data),
   analytics:   (slug: string)                            => api.get(`/pages/${slug}/analytics`),
 }
 

@@ -35,7 +35,7 @@ func blobCID(data []byte) (cid.Cid, error) {
 }
 
 // readLocalUpload reads an already-uploaded post image or video straight off
-// local disk rather than fetching it over HTTP the way postImageURLs's
+// local disk rather than fetching it over HTTP the way postImages's
 // federation counterpart does for remote fediverse consumers. This instance
 // already has this exact file on its own filesystem (internal/media's
 // UploadDir), so a self-fetch would just be slower for no benefit.
@@ -51,31 +51,38 @@ func readLocalUpload(uploadDir, url string) (data []byte, mimeType string, err e
 	return data, http.DetectContentType(data), nil
 }
 
-// postImageURLs is this package's own copy of federation's postImageURLs —
+// postImage is one image attached to a post, with its description
+// (AGORA-400; "" when it has none).
+type postImage struct {
+	URL string
+	Alt string
+}
+
+// postImages is this package's own copy of federation's postImages,
 // duplicated rather than imported, the same tradeoff already made for
 // domainFromURL (a small query isn't worth a cross-package dependency).
 // Unlike federation's version, this deliberately returns storage-relative
 // URLs (not absolute ones) since the caller reads the file locally rather
 // than handing the URL to a remote server.
-func (s *Service) postImageURLs(ctx context.Context, postID string) []string {
-	rows, err := s.db.QueryContext(ctx, `SELECT url FROM post_photos WHERE post_id = $1 ORDER BY position ASC`, postID)
+func (s *Service) postImages(ctx context.Context, postID string) []postImage {
+	rows, err := s.db.QueryContext(ctx, `SELECT url, alt FROM post_photos WHERE post_id = $1 ORDER BY position ASC`, postID)
 	if err == nil {
 		defer rows.Close()
-		var urls []string
+		var images []postImage
 		for rows.Next() {
-			var u string
-			if rows.Scan(&u) == nil && u != "" {
-				urls = append(urls, u)
+			var u, alt string
+			if rows.Scan(&u, &alt) == nil && u != "" {
+				images = append(images, postImage{URL: u, Alt: alt})
 			}
 		}
-		if len(urls) > 0 {
-			return urls
+		if len(images) > 0 {
+			return images
 		}
 	}
-	var imageURL string
-	s.db.QueryRowContext(ctx, `SELECT image_url FROM posts WHERE id = $1`, postID).Scan(&imageURL)
+	var imageURL, imageAlt string
+	s.db.QueryRowContext(ctx, `SELECT image_url, image_alt FROM posts WHERE id = $1`, postID).Scan(&imageURL, &imageAlt)
 	if imageURL != "" {
-		return []string{imageURL}
+		return []postImage{{URL: imageURL, Alt: imageAlt}}
 	}
 	return nil
 }
@@ -122,26 +129,25 @@ func (s *Service) uploadBlob(ctx context.Context, bs *pgBlockstore, url string) 
 // MST/commit node, so no new storage plumbing is needed beyond uploadBlob.
 // Truncates to AT Proto's 4-image embed cap rather than erroring the whole
 // post federation attempt if Agora's own post_photos limit (currently
-// higher) was used. Alt text is left blank; Agora doesn't capture per-image
-// alt text today, a real follow-up if that ever changes, not something to
-// block this on.
+// higher) was used. Each image carries its description as alt (AGORA-400),
+// "" when the author didn't write one.
 func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID string) *bsky.FeedPost_Embed {
-	urls := s.postImageURLs(ctx, postID)
-	if len(urls) == 0 {
+	imgs := s.postImages(ctx, postID)
+	if len(imgs) == 0 {
 		return nil
 	}
-	if len(urls) > 4 {
-		urls = urls[:4]
+	if len(imgs) > 4 {
+		imgs = imgs[:4]
 	}
 
 	var images []*bsky.EmbedImages_Image
-	for _, url := range urls {
-		blob, err := s.uploadBlob(ctx, bs, url)
+	for _, img := range imgs {
+		blob, err := s.uploadBlob(ctx, bs, img.URL)
 		if err != nil {
-			log.Printf("atproto: could not upload image blob for %s: %v", url, err)
+			log.Printf("atproto: could not upload image blob for %s: %v", img.URL, err)
 			continue
 		}
-		images = append(images, &bsky.EmbedImages_Image{Image: blob})
+		images = append(images, &bsky.EmbedImages_Image{Image: blob, Alt: img.Alt})
 	}
 	if len(images) == 0 {
 		return nil
@@ -153,7 +159,7 @@ func (s *Service) buildImageEmbed(ctx context.Context, bs *pgBlockstore, postID 
 }
 
 // postVideoURL returns a post's attached video's storage-relative URL
-// (AGORA-368), mirroring postImageURLs. A post has at most one video
+// (AGORA-368), mirroring postImages. A post has at most one video
 // (AGORA-137's own composer treats video and photos as mutually exclusive),
 // so unlike post_photos there's no ordered multi-row table behind it.
 func (s *Service) postVideoURL(ctx context.Context, postID string) string {

@@ -11,6 +11,8 @@ import CommentsSection from '../components/feed/CommentsSection'
 import { Heart, MessageCircle, Users, Lock, Globe, Settings, UserMinus, Shield, Image, X, Link2, Copy, Check, CheckCircle, XCircle, UserPlus, ClipboardList, BarChart2, Plus, Minus, ThumbsUp } from 'lucide-react'
 import { REACTIONS, REACTION_MAP } from '../utils/reactions'
 import CoverPhoto from '../components/common/CoverPhoto'
+import AltBadge from '../components/common/AltBadge'
+import AltTextModal from '../components/common/AltTextModal'
 
 export default function GroupPage() {
   const { slug } = useParams<{ slug: string }>()!
@@ -160,6 +162,9 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
   const qc = useQueryClient()
   const [content, setContent] = useState('')
   const [imageUrl, setImageUrl] = useState('')
+  // AGORA-400: the attached image's description
+  const [imageAlt, setImageAlt] = useState('')
+  const [altEditing, setAltEditing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [openComments, setOpenComments] = useState<string|null>(null)
   const [openReactionPicker, setOpenReactionPicker] = useState<string|null>(null)
@@ -178,10 +183,11 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
     mutationFn: () => groupsApi.createPost(slug, {
       content,
       image_url: imageUrl,
+      image_alt: imageUrl ? imageAlt : undefined,
       poll_options: pollEnabled ? pollOptions.filter(o => o.trim()) : [],
     }),
     onSuccess: () => {
-      setContent(''); setImageUrl('')
+      setContent(''); setImageUrl(''); setImageAlt('')
       setPollEnabled(false); setPollOptions(['', ''])
       qc.invalidateQueries({ queryKey: ['group-feed', slug] })
     },
@@ -220,9 +226,17 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
           </div>
           {imageUrl && (
             <div className="relative">
-              <img src={imageUrl} alt="" className="rounded-lg w-full max-h-40 object-contain bg-agora-50 dark:bg-agora-900" />
-              <button onClick={() => setImageUrl('')} className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center"><X size={12} /></button>
+              <img src={imageUrl} alt={imageAlt} className="rounded-lg w-full max-h-40 object-contain bg-agora-50 dark:bg-agora-900" />
+              <button onClick={() => { setImageUrl(''); setImageAlt('') }} aria-label="Remove image" className="absolute top-2 right-2 bg-black/60 text-white rounded-full w-6 h-6 flex items-center justify-center"><X size={12} /></button>
+              <button type="button" onClick={() => setAltEditing(true)}
+                aria-label={imageAlt ? 'Edit image description' : 'Add image description'}
+                className="absolute bottom-2 left-2 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-black/70 text-white hover:bg-black/85">
+                {imageAlt ? 'ALT ✓' : '+ ALT'}
+              </button>
             </div>
+          )}
+          {altEditing && imageUrl && (
+            <AltTextModal imageUrl={imageUrl} initial={imageAlt} onSave={setImageAlt} onClose={() => setAltEditing(false)} />
           )}
 
           {/* Poll editor */}
@@ -317,9 +331,12 @@ function GroupFeed({ slug, group }: { slug: string, group: any }) {
 
           {post.content && <p className="text-sm whitespace-pre-wrap break-words">{renderContent(post.content)}</p>}
           {post.image_url && (
-            isGifUrl(post.image_url)
-              ? <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain" />
-              : <img src={post.image_url} alt="" className="rounded-lg w-full max-h-[32rem] object-contain bg-agora-50 dark:bg-agora-900" />
+            <div className="relative">
+              {isGifUrl(post.image_url)
+                ? <img src={post.image_url} alt={post.image_alt || ''} className="rounded-lg w-full max-h-[32rem] object-contain" />
+                : <img src={post.image_url} alt={post.image_alt || ''} className="rounded-lg w-full max-h-[32rem] object-contain bg-agora-50 dark:bg-agora-900" />}
+              <AltBadge alt={post.image_alt} />
+            </div>
           )}
 
           {/* Poll */}

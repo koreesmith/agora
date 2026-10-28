@@ -1827,4 +1827,10 @@ var schema = []string{
 	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'onboarding_reintroduction')`,
 	`INSERT INTO schema_backfills (name) VALUES ('onboarding_reintroduction')
 		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-400: image descriptions (alt text). image_alt describes image_url,
+	// which is a single-image post's only image and a multi-photo post's first;
+	// post_photos.alt describes each photo of a multi-photo post.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_alt TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE post_photos ADD COLUMN IF NOT EXISTS alt TEXT NOT NULL DEFAULT ''`,
 }

@@ -9,6 +9,7 @@ import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
 import { findFirstUrl } from '../../utils/linkify'
+import AltTextModal from '../common/AltTextModal'
 
 
 interface Preview {
@@ -26,6 +27,11 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
   const qc = useQueryClient()
   const [content, setContent] = useState('')
   const [imageUrls, setImageUrls] = useState<string[]>([])
+  // AGORA-400: descriptions keyed by image URL, so adding, removing and
+  // reordering images never leaves one describing the wrong picture.
+  const [altByUrl, setAltByUrl] = useState<Record<string, string>>({})
+  const [altEditing, setAltEditing] = useState<string | null>(null)
+  const imageAlts = imageUrls.map(u => altByUrl[u] || '')
   const [visibility, setVisibility] = useState('friends')
   // Post-as-page identity selector
   const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
@@ -182,6 +188,7 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
         return pagesApi.createPost(selectedPageSlug, {
           content,
           image_urls: imageUrls,
+          image_alts: imageAlts,
         })
       }
       // AGORA-374: omit the targeting fields entirely when the author left
@@ -195,6 +202,7 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
       return feedApi.createPost({
         content,
         image_urls: imageUrls,
+        image_alts: imageAlts,
         video_url: videoUrl || undefined,
         video_thumb_url: videoThumbUrl || undefined,
         visibility,
@@ -213,7 +221,7 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
       })
     },
     onSuccess: () => {
-      setContent(''); setImageUrls([]); setFriendListId('')
+      setContent(''); setImageUrls([]); setAltByUrl({}); setFriendListId('')
       stopVideoPolling(); localStorage.removeItem('agora_pending_video_job')
       setVideoUrl(''); setVideoThumbUrl(''); setVideoProcessing(false)
       setTwEnabled(false); setTwLabel('')
@@ -531,13 +539,24 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
               {isGifUrl(url) && (
                 <span className="absolute top-1 left-1 bg-black/60 text-white text-xs font-bold px-1 py-0.5 rounded z-10">GIF</span>
               )}
-              <img src={url} alt="" className={`rounded-lg w-full object-cover ${imageUrls.length === 1 ? 'max-h-48' : 'h-32'} ${isGifUrl(url) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
-              <button onClick={() => setImageUrls(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
+              <img src={url} alt={altByUrl[url] || ''} className={`rounded-lg w-full object-cover ${imageUrls.length === 1 ? 'max-h-48' : 'h-32'} ${isGifUrl(url) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
+              <button onClick={() => setImageUrls(prev => prev.filter((_, i) => i !== idx))} aria-label="Remove image" className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
                 <X size={10} />
+              </button>
+              {/* AGORA-400 */}
+              <button type="button" onClick={() => setAltEditing(url)}
+                aria-label={altByUrl[url] ? 'Edit image description' : 'Add image description'}
+                className="absolute bottom-1 left-1 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-black/70 text-white hover:bg-black/85">
+                {altByUrl[url] ? 'ALT ✓' : '+ ALT'}
               </button>
             </div>
           ))}
         </div>
+      )}
+      {altEditing && (
+        <AltTextModal imageUrl={altEditing} initial={altByUrl[altEditing] || ''}
+          onSave={alt => setAltByUrl(m => ({ ...m, [altEditing]: alt }))}
+          onClose={() => setAltEditing(null)} />
       )}
 
       {/* Link preview loading */}

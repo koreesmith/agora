@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/agora-social/agora/internal/albums"
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/notifications"
@@ -1053,6 +1054,10 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content         string   `json:"content"`
 		ImageURL        string   `json:"image_url"`
 		ImageURLs       []string `json:"image_urls"`
+		// AGORA-400: descriptions, in the same order as image_urls. image_alt
+		// goes with a lone image_url.
+		ImageAlts       []string `json:"image_alts"`
+		ImageAlt        string   `json:"image_alt"`
 		VideoURL        string   `json:"video_url"`
 		VideoThumbURL   string   `json:"video_thumb_url"`
 		Visibility      string   `json:"visibility"`
@@ -1109,7 +1114,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.ImageURL = req.ImageURLs[0]
 	} else if req.ImageURL != "" {
 		req.ImageURLs = []string{req.ImageURL}
+		if len(req.ImageAlts) == 0 {
+			req.ImageAlts = []string{req.ImageAlt}
+		}
 	}
+	imageAlts := alttext.Clean(req.ImageAlts, len(req.ImageURLs))
 
 	// Allow text, image, video, or poll — any one is sufficient (AGORA-119)
 	if req.Content == "" && req.ImageURL == "" && req.VideoURL == "" && len(pollOpts) == 0 {
@@ -1234,8 +1243,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// Insert photos if multiple
 	if len(req.ImageURLs) > 1 {
 		for i, u := range req.ImageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, id, u, i, imageAlts[i])
 		}
+	}
+	// AGORA-400: before the broadcast below, which reads the descriptions back.
+	if len(imageAlts) > 0 && imageAlts[0] != "" {
+		s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, imageAlts[0], id)
 	}
 
 	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
@@ -2125,7 +2138,7 @@ func (s *Service) enrichPhotos(posts []Post) {
 		args[i] = id
 	}
 	rows, err := s.db.Query(
-		fmt.Sprintf(`SELECT post_id, url FROM post_photos WHERE post_id IN (%s) ORDER BY post_id, position ASC`,
+		fmt.Sprintf(`SELECT post_id, url, alt FROM post_photos WHERE post_id IN (%s) ORDER BY post_id, position ASC`,
 			strings.Join(placeholders, ",")),
 		args...,
 	)
@@ -2133,22 +2146,49 @@ func (s *Service) enrichPhotos(posts []Post) {
 		return
 	}
 	defer rows.Close()
+	tableAlts := map[int][]string{}
 	for rows.Next() {
-		var postID, url string
-		rows.Scan(&postID, &url)
+		var postID, url, alt string
+		rows.Scan(&postID, &url, &alt)
 		if idx, ok := idxMap[postID]; ok {
 			posts[idx].PhotoURLs = append(posts[idx].PhotoURLs, url)
+			tableAlts[idx] = append(tableAlts[idx], alt)
 		}
+	}
+	// AGORA-400: a single-image post's description lives on the post itself.
+	imageAlts := map[string]string{}
+	if arows, err := s.db.Query(
+		fmt.Sprintf(`SELECT id, image_alt FROM posts WHERE id IN (%s) AND image_alt <> ''`, strings.Join(placeholders, ",")),
+		args...,
+	); err == nil {
+		for arows.Next() {
+			var id, alt string
+			if arows.Scan(&id, &alt) == nil {
+				imageAlts[id] = alt
+			}
+		}
+		arows.Close()
 	}
 	// For posts with photos in the table, the image_url holds the first photo
 	// (set on insert). Ensure photo_urls always includes it as the first entry
 	// when the table has entries.
 	for i := range posts {
+		var alts []string
 		if len(posts[i].PhotoURLs) > 0 && posts[i].ImageURL != "" {
 			// photo_urls from the table already has position 0 = ImageURL
+			alts = tableAlts[i]
 		} else if posts[i].ImageURL != "" {
 			// single-image post: expose via photo_urls for uniform frontend access
 			posts[i].PhotoURLs = []string{posts[i].ImageURL}
+			alts = []string{imageAlts[posts[i].ID]}
+		}
+		// photo_alts lines up with photo_urls, and is left out entirely when
+		// no image has a description, the common case.
+		for _, a := range alts {
+			if a != "" {
+				posts[i].PhotoAlts = alts
+				break
+			}
 		}
 	}
 }
@@ -2632,6 +2672,10 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		Content        *string  `json:"content"`
 		ImageURL       *string  `json:"image_url"`
 		ImageURLs      []string `json:"image_urls"`
+		// AGORA-400: descriptions in image order. Sent with image_urls they
+		// go with the new set; sent alone they re-describe the images the
+		// post already has, so fixing a description needs no re-upload.
+		ImageAlts      *[]string `json:"image_alts"`
 		Visibility     *string  `json:"visibility"`
 		FriendListID   *string  `json:"friend_list_id"`
 		ContentWarning *string  `json:"content_warning"`
@@ -2639,7 +2683,7 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
-	if req.Content == nil && req.ImageURL == nil && len(req.ImageURLs) == 0 && req.Visibility == nil && req.ContentWarning == nil {
+	if req.Content == nil && req.ImageURL == nil && len(req.ImageURLs) == 0 && req.ImageAlts == nil && req.Visibility == nil && req.ContentWarning == nil {
 		writeError(w, 400, "nothing to update"); return
 	}
 	// Normalize image_urls → image_url
@@ -2697,10 +2741,28 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 
 	// Replace photos if image_urls was provided
 	if len(req.ImageURLs) > 0 {
+		var given []string
+		if req.ImageAlts != nil {
+			given = *req.ImageAlts
+		}
+		alts := alttext.Clean(given, len(req.ImageURLs))
 		s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, id)
 		if len(req.ImageURLs) > 1 {
 			for pos, u := range req.ImageURLs {
-				s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, pos)
+				s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, id, u, pos, alts[pos])
+			}
+		}
+		s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, alts[0], id)
+	} else if req.ImageAlts != nil {
+		// AGORA-400: new descriptions for the images already there, by position.
+		var imageURL string
+		var photoCount int
+		s.db.QueryRow(`SELECT image_url, (SELECT COUNT(*) FROM post_photos WHERE post_id = $1) FROM posts WHERE id = $1`, id).Scan(&imageURL, &photoCount)
+		if imageURL != "" {
+			alts := alttext.Clean(*req.ImageAlts, max(photoCount, 1))
+			s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, alts[0], id)
+			for pos := 0; pos < photoCount; pos++ {
+				s.db.Exec(`UPDATE post_photos SET alt = $1 WHERE post_id = $2 AND position = $3`, alts[pos], id, pos)
 			}
 		}
 	}
@@ -2832,6 +2894,9 @@ type Post struct {
 	WallStatus       string  `json:"wall_status,omitempty"`
 	// Multi-photo (AGORA-93)
 	PhotoURLs []string `json:"photo_urls,omitempty"`
+	// AGORA-400: image descriptions, same order as photo_urls ("" for an
+	// image without one). Omitted when none of the images has one.
+	PhotoAlts []string `json:"photo_alts,omitempty"`
 	// Video (AGORA-119)
 	VideoURL      string `json:"video_url,omitempty"`
 	VideoThumbURL string `json:"video_thumb_url,omitempty"`

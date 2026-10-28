@@ -11,6 +11,7 @@ import (
 
 	"github.com/bluesky-social/indigo/api/bsky"
 
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/linkify"
 )
 
@@ -122,14 +123,16 @@ func (s *Service) getOrCreateRemoteATUser(did, handle, displayName, avatarURL, c
 // storeInboundImages mirrors federation's own helper of the same name
 // (internal/federation/activitypub.go) — remote images are referenced by
 // URL (the AppView's CDN, in this case), not re-downloaded/re-hosted.
-func (s *Service) storeInboundImages(postID string, imageURLs []string) {
+// imageAlts are the matching descriptions (AGORA-400).
+func (s *Service) storeInboundImages(postID string, imageURLs, imageAlts []string) {
 	if len(imageURLs) == 0 {
 		return
 	}
-	s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, imageURLs[0], postID)
+	alts := alttext.Clean(imageAlts, len(imageURLs))
+	s.db.Exec(`UPDATE posts SET image_url = $1, image_alt = $2 WHERE id = $3`, imageURLs[0], alts[0], postID)
 	if len(imageURLs) > 1 {
 		for i, u := range imageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, postID, u, i, alts[i])
 		}
 	}
 }
@@ -260,13 +263,14 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 }
 
 func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_View) {
-	var imageURLs []string
+	var imageURLs, imageAlts []string
 	for _, img := range imgs.Images {
 		if img.Fullsize != "" {
 			imageURLs = append(imageURLs, img.Fullsize)
+			imageAlts = append(imageAlts, img.Alt) // AGORA-400
 		}
 	}
-	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundImages(postID, imageURLs, imageAlts)
 }
 
 // storeInboundLink maps a Bluesky link/GIF card onto Agora's own link

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/linkify"
 	"github.com/agora-social/agora/internal/mediacache"
@@ -814,14 +815,20 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 	// AGORA-152: attach images so they render on Mastodon etc., not just as a
 	// caption with no photo. Queried here (rather than threaded through every
 	// caller) to keep buildCreateActivity/buildUpdateActivity's signatures stable.
-	if images := s.postImageURLs(postID); len(images) > 0 {
+	if images := s.postImages(postID); len(images) > 0 {
 		attachments := make([]map[string]any, 0, len(images))
-		for _, u := range images {
-			attachments = append(attachments, map[string]any{
+		for _, img := range images {
+			a := map[string]any{
 				"type":      "Image",
-				"mediaType": guessImageMediaType(u),
-				"url":       u,
-			})
+				"mediaType": guessImageMediaType(img.URL),
+				"url":       img.URL,
+			}
+			// AGORA-400: Mastodon and most AP software read an attachment's
+			// description from "name".
+			if img.Alt != "" {
+				a["name"] = img.Alt
+			}
+			attachments = append(attachments, a)
 		}
 		note["attachment"] = attachments
 	}
@@ -845,35 +852,42 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 	return note
 }
 
-// postImageURLs returns the images attached to a post or comment, resolved
+// postImage is one image attached to a post, with its description
+// (AGORA-400; "" when it has none).
+type postImage struct {
+	URL string
+	Alt string
+}
+
+// postImages returns the images attached to a post or comment, resolved
 // to absolute URLs for remote consumption. Posts with 2+ images use
 // post_photos (AGORA-93); everything else (including comments, which only
 // ever have one) uses the single image_url column.
-func (s *Service) postImageURLs(postID string) []string {
-	rows, err := s.db.Query(`SELECT url FROM post_photos WHERE post_id = $1 ORDER BY position ASC`, postID)
+func (s *Service) postImages(postID string) []postImage {
+	rows, err := s.db.Query(`SELECT url, alt FROM post_photos WHERE post_id = $1 ORDER BY position ASC`, postID)
 	if err == nil {
 		defer rows.Close()
-		var urls []string
+		var images []postImage
 		for rows.Next() {
-			var u string
-			if rows.Scan(&u) == nil && u != "" {
-				urls = append(urls, s.absoluteURL(u))
+			var u, alt string
+			if rows.Scan(&u, &alt) == nil && u != "" {
+				images = append(images, postImage{URL: s.absoluteURL(u), Alt: alt})
 			}
 		}
-		if len(urls) > 0 {
-			return urls
+		if len(images) > 0 {
+			return images
 		}
 	}
-	var imageURL string
-	s.db.QueryRow(`SELECT image_url FROM posts WHERE id = $1`, postID).Scan(&imageURL)
+	var imageURL, imageAlt string
+	s.db.QueryRow(`SELECT image_url, image_alt FROM posts WHERE id = $1`, postID).Scan(&imageURL, &imageAlt)
 	if imageURL != "" {
-		return []string{s.absoluteURL(imageURL)}
+		return []postImage{{URL: s.absoluteURL(imageURL), Alt: imageAlt}}
 	}
 	return nil
 }
 
 // postVideoURL returns a post's attached video (and its poster thumbnail, if
-// any) as absolute URLs, mirroring postImageURLs (AGORA-368). A post has at
+// any) as absolute URLs, mirroring postImages (AGORA-368). A post has at
 // most one video (AGORA-137's own composer treats video and photos as
 // mutually exclusive), so unlike post_photos there's no ordered multi-row
 // table behind it, just the posts row's own two columns.
@@ -1742,6 +1756,7 @@ type apAttachment struct {
 	Type      string `json:"type"`
 	MediaType string `json:"mediaType"`
 	URL       string `json:"url"`
+	Name      string `json:"name"` // the image description (AGORA-400)
 }
 
 // apImageField (AGORA-308) decodes an ActivityStreams Image|Link property
@@ -1916,13 +1931,30 @@ func (s *Service) storeHashtags(postID string, tags []string) {
 func matchAttachments(attachments []apAttachment) (imageURLs []string, videoURL string) {
 	for _, a := range attachments {
 		switch {
-		case (strings.HasPrefix(a.MediaType, "image/") || a.Type == "Image") && a.URL != "":
+		case isImageAttachment(a):
 			imageURLs = append(imageURLs, a.URL)
 		case (strings.HasPrefix(a.MediaType, "video/") || a.Type == "Video") && a.URL != "" && videoURL == "":
 			videoURL = a.URL
 		}
 	}
 	return imageURLs, videoURL
+}
+
+func isImageAttachment(a apAttachment) bool {
+	return (strings.HasPrefix(a.MediaType, "image/") || a.Type == "Image") && a.URL != ""
+}
+
+// attachmentAlts returns the description of each image attachment
+// (AGORA-400), in the same order as matchAttachments' imageURLs, since both
+// select images with isImageAttachment.
+func attachmentAlts(attachments []apAttachment) []string {
+	var alts []string
+	for _, a := range attachments {
+		if isImageAttachment(a) {
+			alts = append(alts, a.Name)
+		}
+	}
+	return alts
 }
 
 // apPollOption is one entry of a Question's "oneOf"/"anyOf" array — a
@@ -2081,6 +2113,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	}
 
 	imageURLs, videoURL := matchAttachments(note.Attachment)
+	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 	poll := parseAPPoll(note.Type, note.OneOf, note.AnyOf, note.EndTime)
 
@@ -2098,7 +2131,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// claiming to be friends-only while addressed to Public is stored
 		// public, since that is what its author's own followers already saw.
 		visibility := friendsOnlyVisibility(note.Audience, isAddressedPublicly(note.To, note.CC))
-		postID := s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+		postID := s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 
 		// AGORA-342: a list post is stored invisible and becomes visible only
 		// through this record. Written after the insert rather than before,
@@ -2203,7 +2236,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// when the row already existed — expected on redelivery, not an error.
 		return
 	}
-	s.storeInboundImages(commentID, imageURLs)
+	s.storeInboundImages(commentID, imageURLs, imageAlts)
 	s.storeInboundVideo(commentID, videoURL)
 	s.storeHashtags(commentID, hashtagsFromAPTags(note.Tag)) // AGORA-213
 
@@ -2290,6 +2323,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	}
 
 	imageURLs, videoURL := matchAttachments(note.Attachment)
+	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
@@ -2300,7 +2334,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	// rows before reapplying whatever the edit currently carries, mirroring
 	// EditPost's own replace-not-append handling of image_urls.
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
-	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
 	// AGORA-210: Mastodon re-sends a poll's full object (not a diff) as vote
 	// tallies change, so this is the mechanism that keeps an already-ingested
@@ -2412,15 +2446,15 @@ func (s *Service) handleInboundAPDelete(verifiedActor string, objectRaw json.Raw
 // same redelivery-tolerant pattern as the reply path) — per-viewer
 // visibility is enforced later at custom-feed query time (execCustomFeed),
 // not here, since a single ingested post is shared by every local follower.
-func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
-	s.ingestFollowedPostAs("public", actorURL, noteID, content, summary, imageURLs, videoURL, poll, tags, emojis, publishedAt)
+func (s *Service) ingestFollowedPost(actorURL, noteID, content, summary string, imageURLs, imageAlts []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) {
+	s.ingestFollowedPostAs("public", actorURL, noteID, content, summary, imageURLs, imageAlts, videoURL, poll, tags, emojis, publishedAt)
 }
 
 // ingestFollowedPostAs is ingestFollowedPost with the stored visibility made
 // explicit (AGORA-337). Every caller but one wants "public"; a friends-only
 // post from another Agora instance wants "friends", which is what makes the
 // feed show it to the author's friends here and to nobody else.
-func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, summary string, imageURLs []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) (ingestedPostID string) {
+func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, summary string, imageURLs, imageAlts []string, videoURL string, poll *apPoll, tags []string, emojis map[string]string, publishedAt time.Time) (ingestedPostID string) {
 	var followerUserID string
 	s.db.QueryRow(`SELECT follower_user_id FROM ap_following WHERE followed_actor_url = $1 AND accepted = true LIMIT 1`, actorURL).Scan(&followerUserID)
 	if followerUserID == "" {
@@ -2449,7 +2483,7 @@ func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, su
 		// first insert, never on a redelivery/duplicate no-op.
 		return ""
 	}
-	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
 	s.applyInboundPoll(postID, poll) // AGORA-210
 	s.storeHashtags(postID, tags)    // AGORA-213
@@ -2483,16 +2517,18 @@ func (s *Service) ingestFollowedPostAs(visibility, actorURL, noteID, content, su
 
 // storeInboundImages persists a remote Note's image attachments — a single
 // URL into posts.image_url, or all of them into post_photos plus the first
-// into image_url too, mirroring how pages.CreatePost and postImageURLs'
-// read-side already treat the multi-image case.
-func (s *Service) storeInboundImages(postID string, imageURLs []string) {
+// into image_url too, mirroring how pages.CreatePost and postImages'
+// read-side already treat the multi-image case. imageAlts are the matching
+// descriptions (AGORA-400), as attachmentAlts returns them.
+func (s *Service) storeInboundImages(postID string, imageURLs, imageAlts []string) {
 	if len(imageURLs) == 0 {
 		return
 	}
-	s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, imageURLs[0], postID)
+	alts := alttext.Clean(imageAlts, len(imageURLs))
+	s.db.Exec(`UPDATE posts SET image_url = $1, image_alt = $2 WHERE id = $3`, imageURLs[0], alts[0], postID)
 	if len(imageURLs) > 1 {
 		for i, u := range imageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, postID, u, i, alts[i])
 		}
 	}
 }
@@ -3316,6 +3352,7 @@ func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, o
 
 	domain := domainFromURL(note.ID)
 	imageURLs, videoURL := matchAttachments(note.Attachment)
+	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
 	var postID string
 	err = s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
@@ -3332,7 +3369,7 @@ func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, o
 			return
 		}
 	} else {
-		s.storeInboundImages(postID, imageURLs)
+		s.storeInboundImages(postID, imageURLs, imageAlts)
 		s.storeInboundVideo(postID, videoURL)
 		s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
 	}

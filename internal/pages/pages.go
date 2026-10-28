@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
@@ -105,6 +106,7 @@ type PagePost struct {
 	AvatarURL    string `json:"avatar_url"`
 	Content      string `json:"content"`
 	ImageURL     string `json:"image_url"`
+	ImageAlt     string `json:"image_alt,omitempty"` // AGORA-400
 	LikeCount    int    `json:"like_count"`
 	CommentCount int    `json:"comment_count"`
 	Liked        bool   `json:"liked"`
@@ -424,7 +426,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
-		       p.content, p.image_url,
+		       p.content, p.image_url, p.image_alt,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
@@ -446,7 +448,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p PagePost
 		rows.Scan(&p.ID, &p.AuthorID, &p.Username, &p.DisplayName, &p.AvatarURL,
-			&p.Content, &p.ImageURL, &p.LikeCount, &p.CommentCount, &p.Liked, &p.CreatedAt)
+			&p.Content, &p.ImageURL, &p.ImageAlt, &p.LikeCount, &p.CommentCount, &p.Liked, &p.CreatedAt)
 		posts = append(posts, p)
 	}
 	if posts == nil {
@@ -475,6 +477,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content  string   `json:"content"`
 		ImageURL string   `json:"image_url"`
 		ImageURLs []string `json:"image_urls"`
+		ImageAlts []string `json:"image_alts"` // AGORA-400, in image_urls order
+		ImageAlt  string   `json:"image_alt"`  // with a lone image_url
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
@@ -485,22 +489,24 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	// Prefer image_urls array; fall back to single image_url for compat
 	imageURL := req.ImageURL
+	imageAlts := alttext.Clean([]string{req.ImageAlt}, 1)
 	if len(req.ImageURLs) > 0 {
 		imageURL = req.ImageURLs[0]
+		imageAlts = alttext.Clean(req.ImageAlts, len(req.ImageURLs))
 	}
 
 	var postID string
 	err := s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, image_url, visibility, page_id)
-		VALUES ($1, $2, $3, 'public', $4) RETURNING id
-	`, userID, strings.TrimSpace(req.Content), imageURL, pageID).Scan(&postID)
+		INSERT INTO posts (author_id, content, image_url, visibility, page_id, image_alt)
+		VALUES ($1, $2, $3, 'public', $4, $5) RETURNING id
+	`, userID, strings.TrimSpace(req.Content), imageURL, pageID, imageAlts[0]).Scan(&postID)
 	if err != nil {
 		writeError(w, 500, "could not create post"); return
 	}
 
 	// Insert additional photos
 	for i, url := range req.ImageURLs {
-		s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, url, i)
+		s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, postID, url, i, imageAlts[i])
 	}
 
 	// Update page post count

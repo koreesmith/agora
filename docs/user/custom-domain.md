@@ -63,7 +63,7 @@ Some instances publish a verified domain immediately. Others have an administrat
 
 Verification and approval are two different things. Verification proves you control the domain; approval is the instance deciding whether to publish that handle. A verified domain that's still waiting is completely normal and doesn't mean anything is wrong.
 
-Once it's live, the panel says so, your profile shows your domain next to your @username, and your handle on Bluesky is your domain.
+Once it's live, the panel says so, your profile shows your domain next to your @username, and your handle on Bluesky is your domain. When someone @mentions you in a post or comment, a small verified mark appears next to the mention as well, showing your domain when you point at it.
 
 ## Keeping it
 

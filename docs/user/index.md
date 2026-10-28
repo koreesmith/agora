@@ -7,10 +7,11 @@ Welcome to Agora — a private, federated social network built for the people yo
 - [Creating your account](getting-started.md)
 - [Your profile](profile.md)
 - [Privacy settings](privacy.md)
+- [Using more than one account (mobile app)](multiple-accounts.md)
 
 ## Posting & Interacting
 
-- [Making a post](posting.md)
+- [Making a post](posting.md), including choosing where it goes, describing your images, and hiding a post from your timeline
 - [Commenting & reacting](comments.md)
 - [Sharing a post](sharing.md)
 - [Polls](polls.md)

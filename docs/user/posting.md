@@ -11,11 +11,38 @@
 
 4. Click **Post**.
 
+## Choosing where a post goes
+
+A **Public** post normally goes everywhere your account reaches: Agora, the [Fediverse](fediverse.md) and [Bluesky](bluesky.md). Below the compose box, a **Post to:** row lets you change that for one post:
+
+- **Agora**, **Fediverse** and **Bluesky** are all on to start with. Tap one to turn it off for this post.
+- Turn off **Fediverse** or **Bluesky** to keep a post off that network. It still appears on Agora as usual.
+- Turn off **Agora** to send a post *only* to the outside networks. It won't appear in anyone's Agora feed, on your profile for other people, or in Agora search. A note under the row says where it will go, for example "This post will only appear on Bluesky, not on Agora."
+- At least one place has to stay on.
+
+You still see your own outside-only posts on Agora, marked with a label such as **Only on Bluesky**, so you can find, edit or delete them later.
+
+The row only appears for **Public** posts, and only when you have the Fediverse or Bluesky turned on in **Settings**. Friends and Friend List posts never leave Agora, so there is nothing to choose.
+
 ## Adding photos
 
 - Click the 📷 **photo icon** in the toolbar, or **paste an image directly** from your clipboard (Ctrl/Cmd + V) into the compose box.
 - You can attach up to **10 photos** per post.
 - HEIC photos from your iPhone are automatically converted — a progress message appears if conversion takes more than a second.
+
+## Describing your images
+
+A description (sometimes called alt text) tells people who use a screen reader, or who can't load the image, what is in it.
+
+1. After you attach a photo, tap **+ ALT** on its preview.
+2. Write what's in the image, including any text that appears in it. Descriptions can be up to 1,500 characters.
+3. Tap **Save**. The button changes to **ALT ✓**. Tap it again to change what you wrote.
+
+Each photo in a post has its own description. Photos in groups and Pages can be described the same way.
+
+On a posted image, an **ALT** badge in the corner means it has a description. Tap the badge to read it; screen readers read it out automatically. The description also appears under the photo when you open it full size. On the web, you can add or change descriptions later by editing the post.
+
+Descriptions travel with your post to the Fediverse and Bluesky, and descriptions that other people wrote there come back with their posts, so they show up on Agora too.
 
 ## Adding a video
 
@@ -45,3 +72,14 @@ Click the **TW** button to add a content warning label. The post content is hidd
 ## Posting as a Page
 
 If you own one or more Pages, a dropdown appears above the compose box. Select a Page to post as that Page instead of your personal account.
+
+## Hiding a post from your timeline
+
+If you don't want to see one particular post, but don't want to block or unfriend the person who wrote it:
+
+1. Open the post's **⋯** menu.
+2. Choose **Hide post**.
+
+The post disappears from your feeds straight away. Hiding is private: the author isn't told, and nothing changes for anyone else. You can't hide your own posts (delete or edit them instead).
+
+To bring a post back, go to **Settings → Blocked → Hidden posts** on the web, or **Settings → Hidden posts** in the mobile app, and choose **Unhide**.

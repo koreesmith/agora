@@ -100,6 +100,9 @@ interface Post {
   content_emojis?: Record<string, string>
   repost_author_emojis?: Record<string, string>
   repost_content_emojis?: Record<string, string>
+  // AGORA-401: live custom domains of the local accounts mentioned in content
+  // or repost_content, keyed by lowercased username
+  mention_domains?: Record<string, string>
 }
 
 // AGORA-273: an exact, locale-formatted timestamp — shown outright on the
@@ -875,7 +878,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
               {/* Content — the author's own words (their commentary, when this is a repost) */}
               {post.content && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-                  {renderContent(post.content, undefined, post.content_emojis)}
+                  {renderContent(post.content, undefined, post.content_emojis, post.mention_domains)}
                 </p>
               )}
 
@@ -906,7 +909,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   </div>
                   {post.repost_content && (
                     <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">
-                      {renderContent(post.repost_content, undefined, post.repost_content_emojis)}
+                      {renderContent(post.repost_content, undefined, post.repost_content_emojis, post.mention_domains)}
                     </p>
                   )}
                   {post.repost_image_url && (
@@ -1272,7 +1275,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}</span>
                   <span className="text-xs text-agora-400">@{post.author_username}</span>
                 </div>
-                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis)}</p>}
+                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis, post.mention_domains)}</p>}
                 {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
               </div>
 

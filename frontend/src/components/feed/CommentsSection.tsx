@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, ThumbsUp } from 'lucide-react'
+import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, ThumbsUp, BadgeCheck } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
@@ -139,7 +139,10 @@ const CONTENT_TOKEN_RE = new RegExp(`(${URL_TOKEN}|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]
 
 // Render text with @mentions as profile links, URLs as clickable links, and
 // (AGORA-258) recognized :shortcode: custom emoji as inline images.
-export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap) {
+// mentionDomains (AGORA-401) maps a mentioned local username, lowercased, to
+// its live custom domain, so a mention carries the same verified mark the
+// author line does.
+export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap, mentionDomains?: Record<string, string>) {
   // Split on @mentions (local @username, bridged fediverse @handle@instance.tld
   // — AGORA-163 —, or a single-@ dotted handle like @alice.bsky.social /
   // @alice@mastodon.social typed as one token — AGORA-276), +group-tags,
@@ -165,7 +168,17 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
-      return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+      const domain = mentionDomains?.[part.slice(1).toLowerCase()]
+      return (
+        <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">
+          {part}
+          {domain && (
+            <span title={`${domain}, a domain this account has verified it controls`} className="inline-block align-[-1px] ml-0.5 text-sky-600 dark:text-sky-400">
+              <BadgeCheck size={12} />
+            </span>
+          )}
+        </Link>
+      )
     }
     // AGORA-89: +group-slug links to group page
     if (/^\+[a-zA-Z0-9_-]+$/.test(part)) {
@@ -530,7 +543,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             </div>
           ) : (
             <>
-              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content, undefined, c.content_emojis)}</p>
+              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content, undefined, c.content_emojis, c.mention_domains)}</p>
               {c.image_url && (
                 isGifUrl(c.image_url) ? (
                   <div className="mt-1 rounded-lg overflow-hidden">

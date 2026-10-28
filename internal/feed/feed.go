@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/albums"
 	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
@@ -2373,6 +2374,8 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		// comment's own content, mirroring Post.AuthorEmojis/ContentEmojis.
 		AuthorEmojis  json.RawMessage `json:"author_emojis,omitempty"`
 		ContentEmojis json.RawMessage `json:"content_emojis,omitempty"`
+		// AGORA-401: as Post.MentionDomains, for this comment's content.
+		MentionDomains map[string]string `json:"mention_domains,omitempty"`
 	}
 
 	scanComment := func(rows interface {
@@ -2506,6 +2509,22 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// AGORA-401: one lookup for every mention in the thread, every level.
+	var walk func(cs []Comment, visit func(*Comment))
+	walk = func(cs []Comment, visit func(*Comment)) {
+		for i := range cs {
+			visit(&cs[i])
+			walk(cs[i].Replies, visit)
+		}
+	}
+	var mentioned []string
+	walk(comments, func(c *Comment) { mentioned = append(mentioned, mentionedLocalUsernames(c.Content)...) })
+	if byUsername := s.liveCustomDomains(mentioned); len(byUsername) > 0 {
+		walk(comments, func(c *Comment) {
+			c.MentionDomains = pickDomains(mentionedLocalUsernames(c.Content), byUsername)
+		})
 	}
 
 	writeJSON(w, 200, map[string]any{"comments": comments})
@@ -2849,6 +2868,9 @@ type Post struct {
 	// Filled in by enrichCustomHandles rather than selected in the queries
 	// above — see that function for why it isn't a join.
 	AuthorCustomDomain string `json:"author_custom_domain,omitempty"`
+	// AGORA-401: live custom domains of the local accounts @-mentioned in
+	// this post (and in the post it reposts), keyed by lowercased username.
+	MentionDomains map[string]string `json:"mention_domains,omitempty"`
 	Content        string  `json:"content"`
 	ImageURL       string  `json:"image_url"`
 	Visibility     string  `json:"visibility"`
@@ -3014,38 +3036,57 @@ func scanPosts(rows interface {
 //
 // Keyed by username rather than user id because a repost's source author is
 // only ever scanned as a username, with no id column to match on.
+//
+// AGORA-401: the same lookup also covers everyone @-mentioned in a post or in
+// the post it reposts, filling MentionDomains, so a mention can carry the badge
+// too without a second query.
 func (s *Service) enrichCustomHandles(posts []Post) {
 	if len(posts) == 0 {
 		return
 	}
-	seen := map[string]bool{}
-	var names []any
-	for _, p := range posts {
-		for _, n := range []string{p.AuthorUsername, derefOr(p.RepostAuthorUsername)} {
-			if n != "" && !seen[n] {
-				seen[n] = true
-				names = append(names, n)
-			}
-		}
+	mentions := make([][]string, len(posts))
+	var names []string
+	for i, p := range posts {
+		names = append(names, p.AuthorUsername, derefOr(p.RepostAuthorUsername))
+		mentions[i] = append(mentionedLocalUsernames(p.Content), mentionedLocalUsernames(derefOr(p.RepostContent))...)
+		names = append(names, mentions[i]...)
 	}
-	if len(names) == 0 {
+	byUsername := s.liveCustomDomains(names)
+	if len(byUsername) == 0 {
 		return
 	}
 
-	ph := make([]string, len(names))
-	for i := range names {
-		ph[i] = fmt.Sprintf("$%d", i+1)
+	for i := range posts {
+		posts[i].AuthorCustomDomain = byUsername[strings.ToLower(posts[i].AuthorUsername)]
+		posts[i].RepostAuthorCustomDomain = byUsername[strings.ToLower(derefOr(posts[i].RepostAuthorUsername))]
+		posts[i].MentionDomains = pickDomains(mentions[i], byUsername)
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`
-		SELECT u.username, cd.domain
+}
+
+// liveCustomDomains returns the live (verified and approved) custom domain of
+// each of the given usernames that has one, keyed by lowercased username.
+func (s *Service) liveCustomDomains(usernames []string) map[string]string {
+	seen := map[string]bool{}
+	var names []string
+	for _, n := range usernames {
+		if n = strings.ToLower(n); n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(`
+		SELECT LOWER(u.username), cd.domain
 		FROM custom_domains cd
 		JOIN users u ON u.id = cd.user_id
 		WHERE cd.protocol = 'atproto'
 		  AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
-		  AND u.username IN (%s)
-	`, strings.Join(ph, ",")), names...)
+		  AND LOWER(u.username) = ANY($1)
+	`, pq.Array(names))
 	if err != nil {
-		return
+		return nil
 	}
 	defer rows.Close()
 
@@ -3056,14 +3097,56 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 			byUsername[username] = domain
 		}
 	}
-	if len(byUsername) == 0 {
-		return
-	}
+	return byUsername
+}
 
-	for i := range posts {
-		posts[i].AuthorCustomDomain = byUsername[posts[i].AuthorUsername]
-		posts[i].RepostAuthorCustomDomain = byUsername[derefOr(posts[i].RepostAuthorUsername)]
+// pickDomains is the part of byUsername that a post's mentions refer to, or
+// nil when none of them has a live custom domain.
+func pickDomains(mentioned []string, byUsername map[string]string) map[string]string {
+	var out map[string]string
+	for _, n := range mentioned {
+		if d, ok := byUsername[n]; ok {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[n] = d
+		}
 	}
+	return out
+}
+
+// mentionedLocalUsernames returns the lowercased local usernames @-mentioned
+// in content (AGORA-401). A bare @name counts; the name half of a Fediverse
+// @name@instance.tld does not (the AGORA-163 rule notifyMentions follows), and
+// neither does a dotted handle like @name.bsky.social, which the web and
+// mobile renderers also treat as one non-local token.
+func mentionedLocalUsernames(content string) []string {
+	if !strings.Contains(content, "@") {
+		return nil
+	}
+	fediverseSpans := fediverseMentionRe.FindAllStringIndex(content, -1)
+	var out []string
+	for _, m := range mentionRe.FindAllStringSubmatchIndex(content, -1) {
+		inFediverse := false
+		for _, sp := range fediverseSpans {
+			if m[0] >= sp[0] && m[0] < sp[1] {
+				inFediverse = true
+				break
+			}
+		}
+		if inFediverse {
+			continue
+		}
+		if end := m[1]; end+1 < len(content) && content[end] == '.' && isHandleByte(content[end+1]) {
+			continue // @name.bsky.social
+		}
+		out = append(out, strings.ToLower(content[m[2]:m[3]]))
+	}
+	return out
+}
+
+func isHandleByte(b byte) bool {
+	return b == '_' || b == '-' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func derefOr(s *string) string {

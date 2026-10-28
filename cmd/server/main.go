@@ -30,6 +30,7 @@ import (
 	"github.com/agora-social/agora/internal/groups"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/interactions"
+	"github.com/agora-social/agora/internal/linkpreview"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/pages"
@@ -244,6 +245,11 @@ func main() {
 	// shape as federation's well-known paths, dereferenced directly by AT
 	// Proto clients/relays rather than through /api.
 	atproto.RegisterRoutes(r, atprotoSvc)
+
+	// AGORA-412: post and profile pages with their link preview tags filled
+	// in. nginx routes /post/ and /profile/ page loads here and falls back to
+	// the frontend if this answers with an error.
+	linkpreview.RegisterRoutes(r, linkpreview.NewService(db, cfg))
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

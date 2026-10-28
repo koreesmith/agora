@@ -205,6 +205,12 @@ command is needed. Changes you may notice:
   directly and is not a proxy you control, review this before upgrading.
 - Uploaded files are served with their real content type, which fixes video
   playback.
+- Post and profile pages (`/post/...`, `/profile/...`) now go through the
+  backend first, which fills in the link preview tags that messaging apps,
+  Bluesky and Mastodon read, then falls back to the frontend if the backend
+  is unavailable. The backend fetches the app's `index.html` from
+  `http://frontend:80` on the compose network; set `FRONTEND_INTERNAL_URL` in
+  `.env` only if your frontend lives somewhere else.
 
 ### After the first start
 

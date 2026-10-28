@@ -38,6 +38,12 @@ type Config struct {
 	// same as any other misconfigured optional integration.
 	ATProtoBotHandle      string
 	ATProtoBotAppPassword string
+
+	// FrontendInternalURL (AGORA-412) is where the backend fetches the web
+	// app's own index.html from, to serve it with a post's or profile's link
+	// preview tags filled in. The frontend container on the compose network
+	// by default.
+	FrontendInternalURL string
 }
 
 func Load() *Config {
@@ -84,6 +90,8 @@ func Load() *Config {
 
 		ATProtoBotHandle:      getEnv("ATPROTO_BOT_HANDLE", ""),
 		ATProtoBotAppPassword: getEnv("ATPROTO_BOT_APP_PASSWORD", ""),
+
+		FrontendInternalURL: getEnv("FRONTEND_INTERNAL_URL", "http://frontend:80"),
 	}
 
 	cfg.validate()

@@ -170,7 +170,7 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
       const domain = mentionDomains?.[part.slice(1).toLowerCase()]
       return (
-        <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">
+        <Link key={i} to={`/profile/${part.slice(1)}`} className={`text-agora-600 dark:text-agora-400 hover:underline font-medium${domain ? ' whitespace-nowrap' : ''}`}>
           {part}
           {domain && (
             <span title={`${domain}, a domain this account has verified it controls`} className="inline-block align-[-1px] ml-0.5 text-sky-600 dark:text-sky-400">

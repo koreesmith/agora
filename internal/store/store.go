@@ -897,11 +897,10 @@ var schema = []string{
 	)`,
 
 	// ── Unified connections (AGORA-182) ───────────────────────────────────────
-	// show_in_feed opts a specific fediverse follow into the main feed —
-	// default off, since a followed account's posts otherwise only surface in
-	// a friend list or custom feed the user deliberately built. Mirrors
-	// notify's per-follow, off-by-default shape rather than a global switch,
-	// so a few noisy accounts don't force an all-or-nothing choice.
+	// show_in_feed opts a specific fediverse follow into the main feed.
+	// Per-follow rather than a global switch, so a few noisy accounts don't
+	// force an all-or-nothing choice. Off by default here; AGORA-413 below
+	// moved the default to on.
 	`ALTER TABLE ap_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
 
 	// ── AT Proto opt-out toggle (AGORA-193) ───────────────────────────────────
@@ -1086,8 +1085,8 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(tag)`,
 
 	// AGORA-236: show_in_feed for a native Bluesky follow, mirroring
-	// ap_following.show_in_feed (AGORA-182) exactly — off by default, same
-	// per-follow noise-control shape as the fediverse side.
+	// ap_following.show_in_feed (AGORA-182), including AGORA-413 moving the
+	// default to on.
 	`ALTER TABLE at_following ADD COLUMN IF NOT EXISTS show_in_feed BOOLEAN NOT NULL DEFAULT false`,
 
 	// AGORA-255: FEP-044f quote-post approval. A Mastodon (or other
@@ -1846,4 +1845,13 @@ var schema = []string{
 		signature  TEXT        PRIMARY KEY,
 		expires_at TIMESTAMPTZ NOT NULL
 	)`,
+
+	// AGORA-413: a new Fediverse or Bluesky follow now shows in the main feed
+	// by default, since most people expect the accounts they follow to appear
+	// there; the home toggle in Connections still turns one off. Only the
+	// default changes: an existing follow at false can't be told apart from
+	// one its owner deliberately turned off, so none are flipped. No insert
+	// names the column, so the default is the whole change.
+	`ALTER TABLE ap_following ALTER COLUMN show_in_feed SET DEFAULT true`,
+	`ALTER TABLE at_following ALTER COLUMN show_in_feed SET DEFAULT true`,
 }

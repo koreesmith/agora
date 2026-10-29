@@ -489,7 +489,7 @@ export default function ConnectionsPage() {
             <h2 className="font-semibold text-sm">Your follows</h2>
             {following.length > 0 && (
               <p className="text-xs text-agora-400">
-                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (on by default, tap to hide) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
               </p>
             )}
             {following.length === 0 && (
@@ -714,7 +714,7 @@ export default function ConnectionsPage() {
             <h2 className="font-semibold text-sm">Your follows</h2>
             {bskyFollowing.length > 0 && (
               <p className="text-xs text-agora-400">
-                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (off by default) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
+                <List size={11} className="inline -mt-0.5" /> add to a friend list · <Home size={11} className="inline -mt-0.5" /> show in main feed (on by default, tap to hide) · <Bell size={11} className="inline -mt-0.5" /> notify on new posts
               </p>
             )}
             {bskyFollowing.length === 0 && (

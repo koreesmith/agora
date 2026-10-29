@@ -415,7 +415,7 @@ Remote actors following a **local** user. `id` uuid PK, `followed_user_id` FK→
 
 ### `ap_following`
 
-Local users following a **remote** fediverse actor — the reverse of `ap_followers`. `id` uuid PK, `follower_user_id` FK→users, `followed_actor_url`, `followed_inbox_url`, `accepted` boolean (false until the remote `Accept` arrives), `notify` boolean default `false` (per-follow notification opt-in, AGORA-166), `created_at`. **Unique:** `(follower_user_id, followed_actor_url)`.
+Local users following a **remote** fediverse actor — the reverse of `ap_followers`. `id` uuid PK, `follower_user_id` FK→users, `followed_actor_url`, `followed_inbox_url`, `accepted` boolean (false until the remote `Accept` arrives), `notify` boolean default `false` (per-follow notification opt-in, AGORA-166), `show_in_feed` boolean default `true` (whether this follow appears in the main feed, AGORA-182; default `false` until AGORA-413), `created_at`. **Unique:** `(follower_user_id, followed_actor_url)`.
 
 ### `ap_delivery_queue` / `page_ap_delivery_queue` / `instance_ap_delivery_queue`
 
@@ -465,7 +465,7 @@ The durable, replayable log backing `com.atproto.sync.subscribeRepos` — every 
 
 ### `at_following`
 
-Local users' native (non-bridged) Bluesky follows — analogous to `ap_following`, but AT Proto follows are unilateral with no accept/reject handshake. `id` uuid PK, `local_user_id` FK→users, `remote_did`, `remote_handle`, `display_name`, `avatar_url`, `rkey`, `record_cid`, `notify` boolean default `false`, `show_in_feed` boolean default `false` (AGORA-236), `created_at`. **Unique:** `(local_user_id, remote_did)`.
+Local users' native (non-bridged) Bluesky follows — analogous to `ap_following`, but AT Proto follows are unilateral with no accept/reject handshake. `id` uuid PK, `local_user_id` FK→users, `remote_did`, `remote_handle`, `display_name`, `avatar_url`, `rkey`, `record_cid`, `notify` boolean default `false`, `show_in_feed` boolean default `true` (AGORA-236; default `false` until AGORA-413), `created_at`. **Unique:** `(local_user_id, remote_did)`.
 
 ### `blocked_dids`
 

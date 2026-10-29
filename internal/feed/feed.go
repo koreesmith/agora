@@ -343,10 +343,9 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			    )
 			    OR (
 			      -- AGORA-182: a followed fediverse account's ingested posts join
-			      -- the main feed only if the caller opted this specific follow
-			      -- into it (show_in_feed) — off by default, since otherwise every
-			      -- fediverse follow would dump straight into the main feed with
-			      -- no per-account noise control.
+			      -- the main feed only while this follow's show_in_feed is on,
+			      -- the per-account noise control in Connections. New follows
+			      -- start on (AGORA-413).
 			      EXISTS(
 			        SELECT 1 FROM ap_following af
 			        JOIN users ru ON ru.ap_actor_url = af.followed_actor_url

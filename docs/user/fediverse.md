@@ -29,7 +29,7 @@ Following a Fediverse account doesn't automatically notify you every time they p
 1. Go to **Connections** in the left nav and pick the **Fediverse** tab.
 2. Enter their full handle (e.g. `user@mastodon.social`) or a profile URL. There's no way to search the Fediverse by name, the same limitation Mastodon's own remote search has.
 3. Confirm the preview and click **Follow**.
-4. By default their posts don't appear in your main feed. Flip the **home icon** on their row to include them, or go to **My Feeds** and build a custom feed around the "specific Fediverse account" or "all followed Fediverse accounts" filter.
+4. Their posts appear in your main feed. To keep someone out of it, flip the **home icon** on their row off. You can also go to **My Feeds** and build a custom feed around the "specific Fediverse account" or "all followed Fediverse accounts" filter.
 
 You can also follow directly from a Fediverse account's own profile page. Click through from any post of theirs, and you'll see the same Follow/notify controls there. If they follow you back, you'll see a **"Follows you"** pill next to their name.
 

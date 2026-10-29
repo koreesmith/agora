@@ -286,7 +286,7 @@ export default function FindPeopleStep({ instance, me, setNotes, next, back }: S
           )}
 
           <p className="text-sm text-agora-600 dark:text-agora-400">
-            Their posts won't crowd your main feed unless you choose to add them. You can also build a feed just for them in My Feeds.
+            Their posts show in your main feed. To hide someone from it, turn off the home icon on their row in Connections, or build a feed just for them in My Feeds.
           </p>
         </div>
       )}

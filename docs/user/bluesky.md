@@ -26,7 +26,7 @@ Bluesky federation is **on by default** but fully optional, with two levels of c
 1. Go to **Connections** in the left nav and pick the **Bluesky** tab.
 2. Enter their handle (e.g. `user.bsky.social`) or DID.
 3. Confirm the preview and click **Follow**.
-4. By default their posts don't appear in your main feed. Flip the **home icon** on their row to include them, or go to **My Feeds** and build a custom feed around the "specific Bluesky account" or "all followed Bluesky accounts" filter. You can also exclude one specific followed account from a custom feed if you want everyone *except* them.
+4. Their posts appear in your main feed. To keep someone out of it, flip the **home icon** on their row off. You can also go to **My Feeds** and build a custom feed around the "specific Bluesky account" or "all followed Bluesky accounts" filter. You can also exclude one specific followed account from a custom feed if you want everyone *except* them.
 
 You can also follow directly from a Bluesky account's profile page once you've seen one of their posts. If they follow you back, you'll see a **"Follows you"** pill next to their name.
 

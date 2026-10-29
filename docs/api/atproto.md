@@ -145,7 +145,7 @@ Deletes the `app.bsky.graph.follow` record and the local follow row.
 {
   "following": [{
     "id": "...", "remote_did": "...", "remote_handle": "...", "display_name": "...", "avatar_url": "...",
-    "notify": false, "show_in_feed": false, "follows_back": false, "created_at": "...",
+    "notify": false, "show_in_feed": true, "follows_back": false, "created_at": "...",
     "user_id": "..."
   }]
 }
@@ -158,7 +158,7 @@ Deletes the `app.bsky.graph.follow` record and the local follow row.
 
 ### `PUT /api/atproto/follow/{id}/show-in-feed`
 
-**Body:** `{ "show_in_feed": true }` — per-account opt-in to appear in the plain main feed (as opposed to only a custom feed built around this account). Off by default.
+**Body:** `{ "show_in_feed": true }` — whether this account appears in the plain main feed (as opposed to only a custom feed built around this account). On by default for new follows (AGORA-413).
 
 ### `GET /api/atproto/bridged-follows`
 

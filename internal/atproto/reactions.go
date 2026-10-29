@@ -19,12 +19,15 @@ const reactionPollLimit = 100
 // detected by diffing against the current set, not by an individual
 // record's own identity.
 func (s *Service) pollInboundReactions(ctx context.Context) {
+	// AGORA-373: an external_only post is stored 'private' but was delivered
+	// to Bluesky exactly like a public post, so its Likes/Reposts must still
+	// be polled — excluding it here silently dropped every reaction on one.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT ap.post_id, u.atproto_did, ap.rkey, ap.record_cid
 		FROM atproto_posts ap
 		JOIN posts p ON p.id = ap.post_id
 		JOIN users u ON u.id = ap.user_id
-		WHERE p.deleted_at IS NULL AND p.visibility = 'public'
+		WHERE p.deleted_at IS NULL AND (p.visibility = 'public' OR p.external_only = true)
 		  AND u.profile_private = false AND u.atproto_enabled = true
 	`)
 	if err != nil {

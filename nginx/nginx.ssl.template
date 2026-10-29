@@ -3,8 +3,44 @@ events {
 }
 
 http {
+    # AGORA-367: this file replaces the stock image's own /etc/nginx/nginx.conf
+    # wholesale (see docker-entrypoint-nginx.sh's `sed ... > nginx.conf`), so
+    # the mime table and default type it would otherwise provide have to be
+    # declared again here. Without this, every file /uploads/ serves directly
+    # goes out as text/plain (nginx's compiled-in fallback with no mime table
+    # loaded at all), which <img> tolerates via content sniffing and <video>
+    # does not.
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # ── Real client IP ────────────────────────────────────────────────────────
+    # This box is only ever reached through an internal-network reverse
+    # proxy (never directly from the public internet), so every connection
+    # nginx sees arrives from that one upstream hop rather than the real
+    # visitor — without this, $binary_remote_addr is the same address for
+    # every client, and every limit_req zone below rate-limits the sum of
+    # all traffic as if it were one caller. Trusting the private ranges
+    # that hop lives on and reading the real address back out of
+    # X-Forwarded-For (which it sets from the original client, e.g. via
+    # Cloudflare's CF-Connecting-IP upstream of it) restores per-client
+    # keying.
+    set_real_ip_from 10.0.0.0/8;
+    set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from 192.168.0.0/16;
+    real_ip_header X-Forwarded-For;
+
     # ── Rate limiting ─────────────────────────────────────────────────────────
-    limit_req_zone $binary_remote_addr zone=api:10m rate=30r/m;
+    # The api zone is the signed-in app's own traffic, and a single page load
+    # is a burst of it: the feed, friends, connections, notification and
+    # message counters, plus per-post requests, then 30s polling on top. At
+    # the old 30r/m with a burst of 20, a refresh or two drained the bucket
+    # and every request after that was refused until it refilled at one
+    # every two seconds, which the UI showed as an empty feed and empty
+    # friend and connection lists. Sized to absorb normal use; the endpoints
+    # that are actually expensive or abusable (login, password reset,
+    # invites, domain claims) keep their own tighter limits here and in the
+    # backend.
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
     limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
     limit_req_zone $binary_remote_addr zone=federation:10m rate=60r/m;
     # AGORA-206: AT Proto's unauthenticated-facing surface (identity
@@ -25,6 +61,10 @@ http {
     # subscription itself. A low rate is generous for legitimate relay
     # reconnects while still bounding connection-flood abuse.
     limit_req_zone $binary_remote_addr zone=firehose:10m rate=10r/m;
+
+    # 429 rather than nginx's default 503, so a client can tell "slow down"
+    # apart from the backend actually being down.
+    limit_req_status 429;
 
     # ── Redirect all HTTP to HTTPS ────────────────────────────────────────────
     server {
@@ -120,7 +160,7 @@ http {
         }
 
         location /api/ {
-            limit_req zone=api burst=20 nodelay;
+            limit_req zone=api burst=100 nodelay;
             proxy_pass         http://frontend:80/api/;
             proxy_http_version 1.1;
             proxy_set_header Host               $host;
@@ -198,6 +238,39 @@ http {
             proxy_http_version 1.1;
             proxy_set_header Host       $host;
             proxy_set_header X-Real-IP  $remote_addr;
+        }
+
+        # ── Post and profile pages, with link preview tags (AGORA-412) ───────
+        # The backend returns the app's own index.html with this post's or
+        # profile's title, description and image in the Open Graph and
+        # Twitter tags, which is what iMessage, Slack, Discord, Bluesky and
+        # Mastodon read for a link card. If the backend errors or is down, the
+        # page is served straight from the frontend as before. A rewrite rather
+        # than a variable in proxy_pass, so "backend" is resolved once at
+        # startup like every other upstream here.
+        location ~ ^/(post|profile)/ {
+            rewrite ^/(.*)$ /linkpreview/$1 break;
+            proxy_pass         http://backend:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host               $host;
+            proxy_set_header X-Real-IP          $remote_addr;
+            proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  $scheme;
+            proxy_connect_timeout 3s;
+            proxy_read_timeout    10s;
+            proxy_intercept_errors on;
+            error_page 404 500 502 503 504 = @spa;
+        }
+
+        location @spa {
+            # Undo the rewrite above, or the frontend is asked for /linkpreview/...
+            rewrite ^/linkpreview(/.*)$ $1 break;
+            proxy_pass         http://frontend:80;
+            proxy_http_version 1.1;
+            proxy_set_header Host               $host;
+            proxy_set_header X-Real-IP          $remote_addr;
+            proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  $scheme;
         }
 
         # ── SPA ───────────────────────────────────────────────────────────────

@@ -56,16 +56,32 @@ func RegisterAdminRoutes(r chi.Router, s *Service) {
 // fail. The instance actor's own delivery queue (instance_ap_delivery_queue)
 // is reserved for the instance actor's own authored traffic — the
 // Follow/Undo(Follow) subscription handshake (AGORA-220), not post content.
+// enabledRelayInboxes lists every inbox a local public post should reach beyond
+// its author's own followers.
+//
+// AGORA-322 folded peer timeline subscribers in here rather than adding a
+// second loop at each of the three call sites (Create, Update and Delete). The
+// two are the same thing from a delivery point of view, and separating them was
+// the shape most likely to end with a peer receiving posts but not their edits.
 func (s *Service) enabledRelayInboxes() []string {
+	inboxes := s.peerTimelineInboxes()
+
 	rows, err := s.db.Query(`SELECT inbox_url FROM relays WHERE status = 'enabled'`)
 	if err != nil {
-		return nil
+		return inboxes
 	}
 	defer rows.Close()
-	var inboxes []string
+	seen := map[string]bool{}
+	for _, i := range inboxes {
+		seen[i] = true
+	}
 	for rows.Next() {
 		var inbox string
-		if rows.Scan(&inbox) == nil {
+		// Deduplicated: an instance can be both a peer and a relay this
+		// instance subscribes to, and delivering twice is a duplicate the
+		// receiving end has to absorb.
+		if rows.Scan(&inbox) == nil && inbox != "" && !seen[inbox] {
+			seen[inbox] = true
 			inboxes = append(inboxes, inbox)
 		}
 	}
@@ -366,7 +382,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	// A relay surfaces accounts nobody locally follows — useful for
-	// top-level posts (discoverable via explore/search), but a reply into
+	// top-level posts (discoverable via search; Explore is limited to Agora peers), but a reply into
 	// some thread Agora has no other context for isn't independently
 	// useful the same way, and resolveReplyTarget has no local thread to
 	// attach it to anyway.
@@ -377,7 +393,8 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 		return
 	}
 	imageURLs, videoURL := matchAttachments(note.Attachment)
-	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
+	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 }
 
 // fetchRemoteNoteSignedAsInstance dereferences a relay-announced post URL,
@@ -464,13 +481,12 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // from accounts a local user has no reason to already know about. Mirrors
 // ingestFollowedPost's idempotent-insert/attachment-storage shape, but with
 // no ap_following gate and no per-follower notification loop, since there's
-// no follower list to notify — a relay post surfaces via explore/search
-// instead (its visibility='public', parent_id=NULL shape already qualifies
-// it for PublicFeed same as any other top-level public post). The existing
+// no follower list to notify — a relay post surfaces via search
+// instead (PublicFeed/Explore only carries local and Agora-peer posts). The existing
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.
-func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs []string, videoURL string, tags []string, emojis map[string]string, publishedAt time.Time) {
+func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs, imageAlts []string, videoURL string, tags []string, emojis map[string]string, publishedAt time.Time) {
 	if actorURL == "" || noteID == "" {
 		return
 	}
@@ -493,7 +509,7 @@ func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, i
 		// post) — expected, not an error.
 		return
 	}
-	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
 	s.storeHashtags(postID, tags) // AGORA-213
 }

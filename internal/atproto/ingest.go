@@ -3,11 +3,34 @@ package atproto
 import (
 	"context"
 	"log"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bluesky-social/indigo/api/bsky"
+
+	"github.com/agora-social/agora/internal/alttext"
+	"github.com/agora-social/agora/internal/linkify"
 )
+
+// blueskyRootRef pulls the thread root's strong ref off an ingested record
+// (AGORA-299).
+//
+// Present on any post that was itself a reply, and empty on a genuinely
+// top-level one, which is exactly the distinction the delivery side needs: an
+// empty root means "this really is the root" rather than "we did not look".
+//
+// Captured at ingest because it is already in the record being ingested.
+// Deriving it later would mean an AppView round trip per post to recover
+// something that was in our hands the first time.
+func blueskyRootRef(rec *bsky.FeedPost) (uri, cid string) {
+	if rec == nil || rec.Reply == nil || rec.Reply.Root == nil {
+		return "", ""
+	}
+	return rec.Reply.Root.Uri, rec.Reply.Root.Cid
+}
 
 // AGORA-197 chose AppView polling over consuming Bluesky's network-wide
 // firehose. Agora's existing firehose (AGORA-191) is outbound-only — this
@@ -38,9 +61,31 @@ func displayNameOr(displayName, fallback string) string {
 // the same fallback creating a local post already uses.
 func parseBlueskyTime(createdAt string) time.Time {
 	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-		return t
+		return clampPublished(t)
 	}
 	return time.Now()
+}
+
+// maxPublishedSkew is how far ahead of now an ingested record's own timestamp
+// may sit before it is treated as wrong. internal/federation has its own copy
+// for the ActivityPub and Agora-to-Agora ingest paths; keep the two in step.
+const maxPublishedSkew = 5 * time.Minute
+
+// clampPublished bounds a remote-supplied publish time (AGORA-332).
+//
+// An app.bsky.feed.post's createdAt is written by whoever controls the repo, so
+// a record can claim any time it likes. Every feed orders by published_at, so
+// an unbounded future value pins that post above everything else indefinitely.
+//
+// Deliberately one-sided, matching federation.clampPublished. An old timestamp
+// is left exactly as sent, because backfill produces legitimately old ones and
+// an old post sorts harmlessly downward.
+func clampPublished(t time.Time) time.Time {
+	now := time.Now()
+	if t.After(now.Add(maxPublishedSkew)) {
+		return now
+	}
+	return t
 }
 
 // getOrCreateRemoteATUser mirrors federation's getOrCreateRemoteAPUser/
@@ -78,24 +123,26 @@ func (s *Service) getOrCreateRemoteATUser(did, handle, displayName, avatarURL, c
 // storeInboundImages mirrors federation's own helper of the same name
 // (internal/federation/activitypub.go) — remote images are referenced by
 // URL (the AppView's CDN, in this case), not re-downloaded/re-hosted.
-func (s *Service) storeInboundImages(postID string, imageURLs []string) {
+// imageAlts are the matching descriptions (AGORA-400).
+func (s *Service) storeInboundImages(postID string, imageURLs, imageAlts []string) {
 	if len(imageURLs) == 0 {
 		return
 	}
-	s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, imageURLs[0], postID)
+	alts := alttext.Clean(imageAlts, len(imageURLs))
+	s.db.Exec(`UPDATE posts SET image_url = $1, image_alt = $2 WHERE id = $3`, imageURLs[0], alts[0], postID)
 	if len(imageURLs) > 1 {
 		for i, u := range imageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, postID, u, i, alts[i])
 		}
 	}
 }
 
 // storeInboundEmbed persists whatever richer content a Bluesky post's embed
 // carries beyond plain text. Images were already handled (AGORA-197); a
-// shared link and a picked GIF are indistinguishable at the lexicon level —
+// shared link and a picked GIF both arrive as app.bsky.embed.external —
 // Bluesky has no native GIF attachment type, its GIF picker just embeds a
-// Tenor URL as a normal app.bsky.embed.external, same as any link card — so
-// both fall out of the External case with no special-casing (AGORA-250).
+// Tenor URL as a normal link card (AGORA-250). storeInboundLink tells the
+// two apart by URL (AGORA-377).
 //
 // A quote-post embed (EmbedRecord_View, or the Record half of
 // RecordWithMedia) resolves the quoted post and wires it up exactly the way
@@ -182,13 +229,21 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 		return ""
 	}
 
+	rootURI, rootCID := blueskyRootRef(post)
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
-		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET
+			remote_post_id = EXCLUDED.remote_post_id,
+			-- AGORA-299: idempotent. Re-ingesting must not clear a root we
+			-- already hold, and must fill one we do not, so a post ingested
+			-- before this change is repaired the next time it is seen.
+			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
+			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, post.Text, rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt)).Scan(&postID)
+	`, authorID, textWithLinks(post), rec.Uri, rec.Cid, contentWarningFromLabels(post.Labels), parseBlueskyTime(post.CreatedAt),
+		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return ""
 	}
@@ -208,13 +263,14 @@ func (s *Service) ingestQuotedPost(ctx context.Context, rec *bsky.EmbedRecord_Vi
 }
 
 func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_View) {
-	var imageURLs []string
+	var imageURLs, imageAlts []string
 	for _, img := range imgs.Images {
 		if img.Fullsize != "" {
 			imageURLs = append(imageURLs, img.Fullsize)
+			imageAlts = append(imageAlts, img.Alt) // AGORA-400
 		}
 	}
-	s.storeInboundImages(postID, imageURLs)
+	s.storeInboundImages(postID, imageURLs, imageAlts)
 }
 
 // storeInboundLink maps a Bluesky link/GIF card onto Agora's own link
@@ -222,11 +278,20 @@ func (s *Service) storeInboundBskyImages(postID string, imgs *bsky.EmbedImages_V
 // already populates. Thumb/Uri are already fully-resolved CDN URLs on the
 // hydrated View type the AppView returns, not blob refs needing a separate
 // fetch, the same way EmbedImages_View.Fullsize already is.
+//
+// A GIF goes to image_url instead (AGORA-377), the column a locally-picked
+// GIF already lands in. Stored as a link card, a GIF reply rendered as an
+// empty comment, since comments carry image_url and no link preview at all,
+// and a GIF post rendered as a static thumbnail rather than the GIF itself.
 func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) {
 	if ext == nil || ext.External == nil || ext.External.Uri == "" {
 		return
 	}
 	e := ext.External
+	if isBlueskyGifURL(e.Uri) {
+		s.db.Exec(`UPDATE posts SET image_url = $1 WHERE id = $2`, e.Uri, postID)
+		return
+	}
 	var thumb string
 	if e.Thumb != nil {
 		thumb = *e.Thumb
@@ -235,6 +300,27 @@ func (s *Service) storeInboundLink(postID string, ext *bsky.EmbedExternal_View) 
 		UPDATE posts SET link_url = $1, link_title = $2, link_description = $3, link_image = $4, link_domain = $5
 		WHERE id = $6
 	`, e.Uri, e.Title, e.Description, thumb, domainFromURL(e.Uri), postID)
+}
+
+// isBlueskyGifURL reports whether an external embed's URI is a GIF from
+// Bluesky's GIF picker, which embeds a direct media file from its GIF
+// provider: Tenor (https://media.tenor.com/<id>/<name>.gif?hh=..&ww=..)
+// originally, KLIPY (https://static.klipy.com/ii/.../<slug>.gif?hh=..&ww=..)
+// since Bluesky switched providers. The same hosts Bluesky's own clients
+// accept before playing a link card as a GIF, so any other .gif link keeps
+// rendering as the link card its author shared.
+func isBlueskyGifURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || !strings.HasSuffix(strings.ToLower(u.Path), ".gif") {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "media.tenor.com":
+		return true
+	case "static.klipy.com":
+		return strings.HasPrefix(u.Path, "/ii/")
+	}
+	return false
 }
 
 // storeInboundVideo maps a native app.bsky.embed.video onto Agora's own
@@ -251,6 +337,54 @@ func (s *Service) storeInboundVideo(postID string, v *bsky.EmbedVideo_View) {
 		thumb = *v.Thumbnail
 	}
 	s.db.Exec(`UPDATE posts SET video_url = $1, video_thumb_url = $2 WHERE id = $3`, v.Playlist, thumb, postID)
+}
+
+// textWithLinks (AGORA-375) is the plain text Agora stores for an ingested
+// record: rec.Text with each #link facet's real URI folded back in. Bluesky
+// clients display a link however the author's app chose to shorten it
+// ("bit.ly/4jFFzI0", "example.com/long/pa..."), and only the facet holds the
+// actual URI, so storing rec.Text as-is would leave renderContent nothing
+// to link. linkify.PlainTextLink keeps the visible text whenever it already
+// links to the facet's URI on its own, and otherwise substitutes or appends
+// the URI. Facets are applied last-to-first so earlier byte offsets stay
+// valid; one that is malformed, overlaps another, or points at a non-web
+// URI is skipped rather than trusted.
+func textWithLinks(rec *bsky.FeedPost) string {
+	text := rec.Text
+	type link struct {
+		start, end int
+		uri        string
+	}
+	var links []link
+	for _, f := range rec.Facets {
+		if f == nil || f.Index == nil {
+			continue
+		}
+		start, end := int(f.Index.ByteStart), int(f.Index.ByteEnd)
+		if start < 0 || end > len(text) || start >= end || !utf8.RuneStart(text[start]) || (end < len(text) && !utf8.RuneStart(text[end])) {
+			continue
+		}
+		for _, feat := range f.Features {
+			if feat == nil || feat.RichtextFacet_Link == nil {
+				continue
+			}
+			uri := feat.RichtextFacet_Link.Uri
+			if l := strings.ToLower(uri); strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "http://") {
+				links = append(links, link{start, end, uri})
+			}
+			break
+		}
+	}
+	sort.SliceStable(links, func(i, j int) bool { return links[i].start > links[j].start })
+	limit := len(text)
+	for _, l := range links {
+		if l.end > limit {
+			continue // overlaps the facet after it
+		}
+		text = text[:l.start] + linkify.PlainTextLink(text[l.start:l.end], l.uri) + text[l.end:]
+		limit = l.start
+	}
+	return text
 }
 
 // storeHashtagsFromFacets (AGORA-213) mirrors federation's storeHashtags/
@@ -338,13 +472,15 @@ func (s *Service) ingestAuthorFeed(ctx context.Context, did string) {
 			continue
 		}
 
+		rootURI, rootCID := blueskyRootRef(rec)
 		var postID string
 		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
+			INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+			VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
 			ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
 			RETURNING id
-		`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
+		`, authorID, textWithLinks(rec), post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+			rootURI, rootCID).Scan(&postID)
 		if err != nil {
 			continue // ErrNoRows on redelivery/already-ingested — expected, not an error
 		}
@@ -421,13 +557,18 @@ func (s *Service) ingestFollowedRepost(ctx context.Context, did string, reason *
 		return
 	}
 
+	rootURI, rootCID := blueskyRootRef(rec)
 	var postID string
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6)
-		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET remote_post_id = EXCLUDED.remote_post_id
+		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, remote_post_cid, content_warning, published_at, bsky_root_uri, bsky_root_cid)
+		VALUES ($1, $2, 'public', NULL, true, $3, 'bsky.app', $4, $5, $6, $7, $8)
+		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO UPDATE SET
+			remote_post_id = EXCLUDED.remote_post_id,
+			bsky_root_uri = CASE WHEN EXCLUDED.bsky_root_uri != '' THEN EXCLUDED.bsky_root_uri ELSE posts.bsky_root_uri END,
+			bsky_root_cid = CASE WHEN EXCLUDED.bsky_root_cid != '' THEN EXCLUDED.bsky_root_cid ELSE posts.bsky_root_cid END
 		RETURNING id
-	`, authorID, rec.Text, post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt)).Scan(&postID)
+	`, authorID, textWithLinks(rec), post.Uri, post.Cid, contentWarningFromLabels(rec.Labels), parseBlueskyTime(rec.CreatedAt),
+		rootURI, rootCID).Scan(&postID)
 	if err != nil || postID == "" {
 		return
 	}

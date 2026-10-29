@@ -242,7 +242,7 @@ func (s *Service) SearchBlueskyPosts(w http.ResponseWriter, r *http.Request) {
 			URI:          p.Uri,
 			AuthorDID:    p.Author.Did,
 			AuthorHandle: p.Author.Handle,
-			Text:         rec.Text,
+			Text:         textWithLinks(rec),
 			CreatedAt:    rec.CreatedAt,
 		}
 		if p.Author.DisplayName != nil {

@@ -4,10 +4,11 @@ import { Link } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
-import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag } from 'lucide-react'
+import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, ThumbsUp, BadgeCheck } from 'lucide-react'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
+import { URL_TOKEN, linkHref, trimUrl } from '../../utils/linkify'
 import ReportModal from './ReportModal'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
@@ -16,13 +17,15 @@ import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
 function CommentReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-7 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
+    // AGORA-305: see PostCard's picker. Comments nest, so this one starts from an
+    // indented origin and has even less room than the post picker does.
+    <div className="absolute bottom-7 left-0 z-30 flex items-center gap-1 sm:gap-1.5 max-w-[calc(100vw-1rem)] overflow-x-auto bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 sm:px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
           data-reaction-type={r.type}
           title={r.label}
-          className={`text-xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+          className={`text-lg sm:text-xl leading-none transition-transform duration-150 px-0 sm:px-0.5 rounded-full select-none shrink-0 ${
             r.type === highlightedReaction ? 'scale-150' :
             r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
             'hover:scale-125'
@@ -132,9 +135,14 @@ function emojiImg(shortcode: string, url: string, key: string | number) {
   )
 }
 
+const CONTENT_TOKEN_RE = new RegExp(`(${URL_TOKEN}|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+(?:\\.[a-zA-Z0-9_-]+)+|@[a-zA-Z0-9_-]+|\\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)`, 'g')
+
 // Render text with @mentions as profile links, URLs as clickable links, and
 // (AGORA-258) recognized :shortcode: custom emoji as inline images.
-export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap) {
+// mentionDomains (AGORA-401) maps a mentioned local username, lowercased, to
+// its live custom domain, so a mention carries the same verified mark the
+// author line does.
+export function renderContent(text: string, linkClassName = "text-agora-600 dark:text-agora-400 hover:underline break-all", emojis?: EmojiMap, mentionDomains?: Record<string, string>) {
   // Split on @mentions (local @username, bridged fediverse @handle@instance.tld
   // — AGORA-163 —, or a single-@ dotted handle like @alice.bsky.social /
   // @alice@mastodon.social typed as one token — AGORA-276), +group-tags,
@@ -143,8 +151,9 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
   // is captured as one token, not truncated at the first dot. No nested
   // capturing groups within any alternative — String.split splices every
   // capture group's result into the output, so an inner group here would
-  // corrupt the parts array.
-  const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|@[a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+|@[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+|@[a-zA-Z0-9_-]+|\+[a-zA-Z0-9_-]+|#[a-zA-Z0-9_]+|:[a-zA-Z0-9_]+:)/g)
+  // corrupt the parts array. URLs include scheme-less ones like bit.ly/...
+  // (AGORA-375, see utils/linkify).
+  const parts = text.split(CONTENT_TOKEN_RE)
   return parts.map((part, i) => {
     // Fediverse mention (@handle@instance.tld) — links to the same
     // synthetic-username profile route already used everywhere else a
@@ -159,7 +168,17 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
       return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
     }
     if (/^@[a-zA-Z0-9_-]+$/.test(part)) {
-      return <Link key={i} to={`/profile/${part.slice(1)}`} className="text-agora-600 dark:text-agora-400 hover:underline font-medium">{part}</Link>
+      const domain = mentionDomains?.[part.slice(1).toLowerCase()]
+      return (
+        <Link key={i} to={`/profile/${part.slice(1)}`} className={`text-agora-600 dark:text-agora-400 hover:underline font-medium${domain ? ' whitespace-nowrap' : ''}`}>
+          {part}
+          {domain && (
+            <span title={`${domain}, a domain this account has verified it controls`} className="inline-block align-[-1px] ml-0.5 text-sky-600 dark:text-sky-400">
+              <BadgeCheck size={12} />
+            </span>
+          )}
+        </Link>
+      )
     }
     // AGORA-89: +group-slug links to group page
     if (/^\+[a-zA-Z0-9_-]+$/.test(part)) {
@@ -178,12 +197,14 @@ export function renderContent(text: string, linkClassName = "text-agora-600 dark
     if (emojis && /^:[a-zA-Z0-9_]+:$/.test(part) && emojis[part]) {
       return emojiImg(part, emojis[part], i)
     }
-    if (/^https?:\/\//i.test(part)) {
-      const url = part.replace(/[.,!?)]+$/, '')
+    // Odd indexes are the captured tokens; even ones are the text between.
+    const url = trimUrl(part)
+    const href = i % 2 === 1 && url ? linkHref(url, parts[i - 1] || parts[i - 2] || '') : null
+    if (href) {
       const trailing = part.slice(url.length)
       return (
         <span key={i}>
-          <a href={url} target="_blank" rel="noreferrer noopener" className={linkClassName}>{url}</a>
+          <a href={href} target="_blank" rel="noreferrer noopener" className={linkClassName}>{url}</a>
           {trailing}
         </span>
       )
@@ -522,7 +543,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
             </div>
           ) : (
             <>
-              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content, undefined, c.content_emojis)}</p>
+              <p className="text-sm text-agora-700 dark:text-agora-300 mt-0.5 break-words">{renderContent(c.content, undefined, c.content_emojis, c.mention_domains)}</p>
               {c.image_url && (
                 isGifUrl(c.image_url) ? (
                   <div className="mt-1 rounded-lg overflow-hidden">
@@ -597,11 +618,11 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
                   }
                 }}
                 onContextMenu={e => e.preventDefault()}
-                className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-red-500' : 'text-agora-400 hover:text-red-400'}`}
+                className={`flex items-center gap-1 text-xs transition-colors ${myReaction ? 'text-agora-700 dark:text-agora-200' : 'text-agora-400 hover:text-agora-600 dark:hover:text-agora-300'}`}
                 title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
               >
-                <span style={{ lineHeight: 1 }}>
-                  {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                <span className="flex items-center" style={{ lineHeight: 1 }}>
+                  {myReaction ? REACTION_MAP[myReaction]?.emoji : <ThumbsUp size={13} />}
                 </span>
               </button>
               {showReactionPicker && (
@@ -609,7 +630,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
               )}
             </div>
           ) : (
-            <span className="text-xs text-agora-300 dark:text-agora-600" title="Sign in to react">🤍</span>
+            <span className="inline-flex items-center text-agora-300 dark:text-agora-600" title="Sign in to react"><ThumbsUp size={13} /></span>
           )}
           {reactionCount > 0 && (
             <button

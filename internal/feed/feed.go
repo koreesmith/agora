@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/albums"
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/notifications"
@@ -68,11 +71,16 @@ func (s *Service) storeHashtags(postID string, tags []string) {
 
 // fedSender is the subset of federation.Service used here.
 type fedSender interface {
-	BroadcastToFriendInstances(userID string, activity any)
-	// BroadcastPublicPost/BroadcastDeletePost drive standard ActivityPub
-	// delivery to a user's fediverse followers (AGORA-145) — distinct from
-	// BroadcastToFriendInstances, which serves the older Agora-to-Agora protocol.
+	// BroadcastPublicPost/BroadcastDeletePost drive ActivityPub delivery to a
+	// user's followers (AGORA-145). Since AGORA-327 they are the only outbound
+	// content path: the legacy Agora-to-Agora broadcasts that used to fire
+	// alongside them are gone, so BroadcastToFriendInstances is no longer part
+	// of this interface.
 	BroadcastPublicPost(userID, postID string)
+	// AGORA-337: friends-only posts, addressed to remote friends by name.
+	BroadcastFriendsPost(userID, postID string)
+	// AGORA-342: the same for a post limited to one friend list.
+	BroadcastListPost(userID, postID string)
 	BroadcastDeletePost(userID, postID string)
 	// BroadcastUpdatePost delivers a signed Update when a federated post is
 	// edited (AGORA-150).
@@ -91,7 +99,10 @@ type fedSender interface {
 	// DeliverLike/DeliverUnlike (AGORA-158): outbound Like/Undo(Like) when
 	// liking/unliking a remote post — the reverse of handleInboundLike
 	// (AGORA-153), which only ever handled a remote actor liking one of ours.
-	DeliverLike(userID, postID string)
+	// reactionType (AGORA-360) is the exact reaction chosen — sent as-is to
+	// a confirmed Agora peer, or collapsed/retracted per AGORA-359's valence
+	// split for anyone else; DeliverLike itself decides which.
+	DeliverLike(userID, postID, reactionType string)
 	DeliverUnlike(userID, postID string)
 	// DeliverAnnounce/DeliverUnannounce (AGORA-159): outbound Announce/
 	// Undo(Announce) when reposting/un-reposting a remote post — the reverse
@@ -110,6 +121,10 @@ type fedSender interface {
 // protocols are independent opt-ins with no shared lifecycle.
 type atprotoSender interface {
 	BroadcastPost(userID, postID string)
+	// AGORA-384: pull a Bluesky thread's replies in before its comments are
+	// shown. Returns at once for a post that isn't a Bluesky thread, or one
+	// synced in the last minute.
+	SyncBlueskyThread(postID string)
 	// BroadcastPostUpdate/BroadcastPostDelete (AGORA-202/203) mirror
 	// fedSender's BroadcastUpdatePost/BroadcastDeletePost, but no-op
 	// internally (rather than needing a call-site check here) if the post
@@ -228,8 +243,19 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
-			  AND p.visibility != 'private'
+			  AND (
+			    p.visibility != 'private'
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
+			  -- AGORA-310: the same block guard the main feed has had all along.
+			  -- Being in one of your lists did not exempt somebody from a block,
+			  -- but this query never checked, so a blocked person's posts kept
+			  -- appearing in the one view built from a list you curated yourself.
+			  -- Symmetric, matching every other site: a block hides you from them
+			  -- as well as them from you.
+			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4
@@ -238,7 +264,13 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  AND (
 			    p.visibility = 'public'
 			    OR p.visibility = 'friends'
+			    -- Both sides of a list post are named 'group', but they mean
+			    -- different lists: $4 is the viewer's own, and a remote author's
+			    -- is never represented here at all (ADR-002 keeps membership off
+			    -- the wire). A remote list post is admitted by the audience row
+			    -- instead, which is the receiving end of the same idea.
 			    OR (p.visibility = 'group' AND p.group_id = $4)
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
 			  )
 			  AND (
 			    p.community_group_id IS NULL
@@ -278,9 +310,16 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			LEFT JOIN pages pg ON pg.id = p.page_id
 			WHERE p.parent_id IS NULL
 			  AND p.deleted_at IS NULL
-			  AND p.visibility != 'private'
+			  -- AGORA-342: a friend-list post from another Agora instance is stored
+			  -- 'private', so it stays hidden everywhere by default and surfaces
+			  -- only to the users it was actually addressed to.
+			  AND (
+			    p.visibility != 'private'
+			    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+			  )
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 			  AND (
 			    p.author_id = $1
 			    OR p.wall_user_id = $1
@@ -363,6 +402,8 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -625,9 +666,14 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.parent_id IS NULL
 		  AND p.deleted_at IS NULL
-		  AND p.visibility != 'private'
+		  -- AGORA-342: remote friend-list posts, hidden unless addressed to us.
+		  AND (
+		    p.visibility != 'private'
+		    OR EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)
+		  )
 		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+		  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
 		  AND (
 		    p.author_id = $1
 		    OR p.wall_user_id = $1
@@ -694,6 +740,8 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, userID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, userID)
 	s.enrichPhotos(posts)
 
@@ -709,6 +757,11 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 // guests and members alike: authored by non-profile_private users, top-level
 // (no comments), and not scoped to a wall/group/page. Unlike GetFeed this is
 // not personalized to a friend graph.
+//
+// Remote posts are limited to peered Agora instances (federated_instances only
+// ever holds Agora peers). Relay subscriptions and follows pull in posts from
+// the wider fediverse and Bluesky; those belong in the home feed of whoever
+// followed them, not in a showcase of this instance and its peers.
 func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
 	limit, offset := pageParams(r)
@@ -720,9 +773,13 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		viewerParam = nil
 	}
 
+	// AGORA-309: a hidden post is hidden from whoever hid it, so like the block
+	// clause this only applies when there is a viewer to hide it from. An
+	// anonymous reader of the public feed has hidden nothing.
 	blockClause := ""
 	if viewerID != "" {
-		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))`
+		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
+		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)`
 	}
 
 	rows, err := s.db.Query(fmt.Sprintf(`
@@ -758,6 +815,11 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 		  AND p.wall_user_id IS NULL
 		  AND p.community_group_id IS NULL
 		  AND p.page_id IS NULL
+		  AND (p.is_remote = false OR EXISTS (
+		    SELECT 1 FROM federated_instances fi
+		     WHERE LOWER(fi.domain) = LOWER(p.remote_instance)
+		       AND fi.status != 'blocked'
+		  ))
 		  %s
 		ORDER BY p.published_at DESC
 		LIMIT $2 OFFSET $3
@@ -770,6 +832,8 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 
@@ -898,6 +962,12 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build visibility filter
+	// AGORA-342: the receiving end of a remote friend-list post. It is stored
+	// 'private' and carries no group_id we could match, because the author's list
+	// does not exist on this instance; being named in the audience is the whole
+	// of the permission.
+	const audienceClause = `EXISTS (SELECT 1 FROM post_audience pa WHERE pa.post_id = p.id AND pa.user_id = $1)`
+
 	var visFilter string
 	switch {
 	case isSelf:
@@ -919,10 +989,13 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 					  AND fg.user_id = $2
 				)
 			)
+			OR ` + audienceClause + `
 		)`
 	default:
-		// Not friends, public profile: public only
-		visFilter = `p.visibility = 'public'`
+		// Not friends, public profile: public only. A remote author can still put
+		// a non-friend into one of their lists (AGORA-182/257 allow it locally
+		// too), so an explicit audience row is the one thing that gets past this.
+		visFilter = `(p.visibility = 'public' OR ` + audienceClause + `)`
 	}
 
 	// viewerID is compared against uuid columns; an empty string (guest) is
@@ -970,8 +1043,11 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"posts": posts})
 }
 
@@ -983,6 +1059,10 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content         string   `json:"content"`
 		ImageURL        string   `json:"image_url"`
 		ImageURLs       []string `json:"image_urls"`
+		// AGORA-400: descriptions, in the same order as image_urls. image_alt
+		// goes with a lone image_url.
+		ImageAlts       []string `json:"image_alts"`
+		ImageAlt        string   `json:"image_alt"`
 		VideoURL        string   `json:"video_url"`
 		VideoThumbURL   string   `json:"video_thumb_url"`
 		Visibility      string   `json:"visibility"`
@@ -998,6 +1078,20 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		PollMultipleChoice   bool     `json:"poll_multiple_choice"`
 		PollAllowsNewOptions bool     `json:"poll_allows_new_options"`
 		WallUserID           string   `json:"wall_user_id"`
+		// AGORA-370: per-post network targeting. Pointers so "omitted" (keep
+		// today's behaviour: respect the account's own activitypub_enabled /
+		// atproto_enabled plus the instance switch) is distinguishable from an
+		// explicit false (skip that network for this post) or true (attempt it,
+		// still subject to the same account/instance gates — a true from an
+		// account with the network off is a no-op, not an error). Only
+		// meaningful when Visibility is "public"; ignored otherwise.
+		FederateActivityPub *bool `json:"federate_activitypub"`
+		FederateATProto     *bool `json:"federate_atproto"`
+		// AGORA-371: a post that should never appear on Agora at all, only
+		// delivered outbound. Requires Visibility "public" (the same
+		// visibility a plain public post uses) and at least one of the two
+		// federate targets above.
+		ExternalOnly bool `json:"external_only"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -1025,7 +1119,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.ImageURL = req.ImageURLs[0]
 	} else if req.ImageURL != "" {
 		req.ImageURLs = []string{req.ImageURL}
+		if len(req.ImageAlts) == 0 {
+			req.ImageAlts = []string{req.ImageAlt}
+		}
 	}
+	imageAlts := alttext.Clean(req.ImageAlts, len(req.ImageURLs))
 
 	// Allow text, image, video, or poll — any one is sufficient (AGORA-119)
 	if req.Content == "" && req.ImageURL == "" && req.VideoURL == "" && len(pollOpts) == 0 {
@@ -1089,6 +1187,38 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "friends"
 	}
 
+	// AGORA-370: default true, matching today's behaviour (respect the
+	// account's own opt-in plus the instance switch), for every client that
+	// doesn't send these fields at all.
+	federateAP := true
+	if req.FederateActivityPub != nil {
+		federateAP = *req.FederateActivityPub
+	}
+	federateATProto := true
+	if req.FederateATProto != nil {
+		federateATProto = *req.FederateATProto
+	}
+
+	// AGORA-371: external_only posts follow the AGORA-342 pattern — stored
+	// visibility = 'private' so every existing feed/profile/search/hashtag/
+	// notification exclusion that already keys off 'private' hides it for
+	// free, delivered outbound anyway. req.Visibility itself is left alone
+	// (storedVisibility carries the override) so the "public" branches below
+	// that decide whether to fire the two broadcasts still fire exactly as
+	// they would for a plain public post.
+	storedVisibility := req.Visibility
+	if req.ExternalOnly {
+		if req.Visibility != "public" {
+			writeError(w, 400, "external_only requires public visibility")
+			return
+		}
+		if !federateAP && !federateATProto {
+			writeError(w, 400, "external_only requires at least one external network")
+			return
+		}
+		storedVisibility = "private"
+	}
+
 	var id string
 	err := s.db.QueryRow(`
 		INSERT INTO posts (author_id, content, image_url, video_url, video_thumb_url,
@@ -1096,15 +1226,15 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		                   link_url, link_title, link_description, link_image, link_domain,
 		                   wall_user_id, wall_status,
 		                   poll_multiple_choice, poll_allows_new_options,
-		                   poll_expires_at)
+		                   poll_expires_at, federate_ap, federate_atproto, external_only)
 		VALUES ($1, $2, $3, $18, $19, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END)
+		        CASE WHEN $17 > 0 THEN NOW() + ($17 * INTERVAL '1 hour') ELSE NULL END, $20, $21, $22)
 		RETURNING id
-	`, userID, req.Content, req.ImageURL, req.Visibility, communityGroupID, friendGroupID, req.ContentWarning,
+	`, userID, req.Content, req.ImageURL, storedVisibility, communityGroupID, friendGroupID, req.ContentWarning,
 		req.LinkURL, req.LinkTitle, req.LinkDescription, req.LinkImage, req.LinkDomain,
 		wallUserID, wallStatus,
 		req.PollMultipleChoice, req.PollAllowsNewOptions, req.PollExpiresHours,
-		req.VideoURL, req.VideoThumbURL).Scan(&id)
+		req.VideoURL, req.VideoThumbURL, federateAP, federateATProto, req.ExternalOnly).Scan(&id)
 	if err != nil {
 		writeError(w, 500, "could not create post")
 		return
@@ -1118,8 +1248,12 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// Insert photos if multiple
 	if len(req.ImageURLs) > 1 {
 		for i, u := range req.ImageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, id, u, i, imageAlts[i])
 		}
+	}
+	// AGORA-400: before the broadcast below, which reads the descriptions back.
+	if len(imageAlts) > 0 && imageAlts[0] != "" {
+		s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, imageAlts[0], id)
 	}
 
 	s.storeHashtags(id, extractHashtags(req.Content)) // AGORA-213
@@ -1127,7 +1261,13 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	go s.notifyMentions(req.Content, userID, id)
 	go s.notifyGroupTags(req.Content, userID, id) // AGORA-89
 	if wallUserID == nil {
-		go s.notifyPostFollowers(userID, id)
+		// AGORA-371: nobody on Agora should be notified about a post that
+		// isn't on Agora — notifyMentions above still fires for people
+		// actually @-mentioned, since that's a deliberate address, not a
+		// "someone you follow posted" fan-out.
+		if !req.ExternalOnly {
+			go s.notifyPostFollowers(userID, id)
+		}
 	} else if wallStatus == "approved" {
 		// Notify the wall owner
 		s.notif.Create(*wallUserID, userID, "wall_post", id, "")
@@ -1144,29 +1284,36 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Broadcast public posts to federated friend instances
-	if req.Visibility == "public" && s.fed != nil {
-		var username string
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-		go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-			"type":  "post",
-			"actor": username,
-			"object": map[string]any{
-				"id":            id,
-				"content":       req.Content,
-				"image_url":     req.ImageURL,
-				"visibility":    "public",
-				"author_handle": username,
-				"created_at":    timeNow(),
-			},
-		})
-		// AGORA-145: also deliver to standard ActivityPub followers (Mastodon etc.)
+	// AGORA-145: deliver to ActivityPub followers, which since AGORA-327 is the
+	// only outbound path. The legacy Agora-to-Agora "post" broadcast that used
+	// to fire alongside this is gone: it carried strictly less (no polls,
+	// content warnings, multiple attachments, video, custom emoji or edits) and
+	// the two keyed ingested posts differently, so a recipient who was both a
+	// legacy friend and an ActivityPub follower received the same post twice as
+	// two rows the dedup index could not collapse. See ADR-002.
+	if req.Visibility == "public" && s.fed != nil && federateAP {
 		go s.fed.BroadcastPublicPost(userID, id)
+	}
+
+	// AGORA-337: a friends-only post reaches friends on other Agora instances,
+	// addressed to them by name with no Public anywhere. Until now only public
+	// posts federated at all, so a remote friend was silently treated as though
+	// the friendship did not exist.
+	if req.Visibility == "friends" && s.fed != nil {
+		go s.fed.BroadcastFriendsPost(userID, id)
+	}
+
+	// AGORA-342: the same for a friend-list post, addressed to the members of
+	// that one list who live elsewhere. The list's name and the rest of its
+	// membership stay on this instance; each recipient learns only that they
+	// were included.
+	if req.Visibility == "group" && req.GroupID != "" && s.fed != nil {
+		go s.fed.BroadcastListPost(userID, id)
 	}
 
 	// AGORA-190: federate as an app.bsky.feed.post record, independent of
 	// the AP broadcast above — a separate protocol with its own opt-in.
-	if req.Visibility == "public" && s.atproto != nil {
+	if req.Visibility == "public" && s.atproto != nil && federateATProto {
 		go s.atproto.BroadcastPost(userID, id)
 	}
 
@@ -1223,8 +1370,17 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 	if authorID != viewerID {
 		switch visibility {
 		case "private":
-			writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private"})
-			return
+			// AGORA-342: a remote friend-list post is stored 'private' so that
+			// every filter hides it by default; the audience row is what lets
+			// the people it was addressed to open and reply to it.
+			var addressed bool
+			if viewerID != "" {
+				s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_audience WHERE post_id = $1 AND user_id = $2)`, id, viewerID).Scan(&addressed)
+			}
+			if !addressed {
+				writeJSON(w, 403, map[string]string{"error": "access_denied", "reason": "private"})
+				return
+			}
 		case "friends", "group":
 			// Check friendship
 			var isFriend bool
@@ -1313,8 +1469,11 @@ func (s *Service) GetPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
+	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
 	writeJSON(w, 200, map[string]any{"post": posts[0]})
 }
 
@@ -1356,16 +1515,15 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 			// no-ops if the original post isn't remote.
 			go s.fed.DeliverUnannounce(authorID, id, *repostOfID)
 		} else {
-			var username string
-			s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-			go s.fed.BroadcastToFriendInstances(userID, map[string]any{
-				"type":  "delete_post",
-				"actor": username,
-				"object": map[string]string{"id": id},
-			})
-			// AGORA-145: notify standard ActivityPub followers too. Uses authorID,
-			// not the deleter (userID may be an admin/moderator), since the Delete
-			// must come from the same actor that federated the original post.
+			// AGORA-145: notify ActivityPub followers. Uses authorID, not the
+			// deleter (userID may be an admin/moderator), since the Delete must
+			// come from the same actor that federated the original post.
+			//
+			// AGORA-327: the legacy "delete_post" broadcast that used to fire
+			// alongside this is gone, for the same reason its "post"
+			// counterpart is. A delete has to reach everyone the Create did, so
+			// removing one without the other would have been the wrong order:
+			// both go together.
 			go s.fed.BroadcastDeletePost(authorID, id)
 		}
 	}
@@ -1403,9 +1561,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.notif.Create(authorID, userID, notifType, postID, "")
 	}
-	// AGORA-158: federate the like if the target is a remote post.
+	// AGORA-158: federate the like if the target is a remote post. The
+	// plain heart button is always exactly a "like" reaction (AGORA-360).
 	if s.fed != nil {
-		go s.fed.DeliverLike(userID, postID)
+		go s.fed.DeliverLike(userID, postID, "like")
 	}
 	// AGORA-201: same reasoning as the fediverse call above, for a Bluesky target.
 	if s.atproto != nil {
@@ -1429,11 +1588,6 @@ func (s *Service) UnlikePost(w http.ResponseWriter, r *http.Request) {
 
 // ── Reactions (AGORA-25) ──────────────────────────────────────────────────────
 
-var validReactions = map[string]bool{
-	"like": true, "love": true, "laugh": true, "wow": true, "angry": true,
-	"care": true, "pride": true, "thankful": true, "vomit": true,
-}
-
 func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	postID := chi.URLParam(r, "id")
@@ -1442,9 +1596,30 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		Type string `json:"type"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	if !validReactions[req.Type] {
+	// Normalize rather than reject: a mobile build predating AGORA-305 still
+	// offers `vomit`, and nothing can force those clients to update.
+	reactionType, ok := store.NormalizeReaction(req.Type)
+	if !ok {
 		writeError(w, 400, "invalid reaction type")
 		return
+	}
+	req.Type = reactionType
+
+	// AGORA-359/360: captured before the upsert below overwrites it. The fed
+	// call site below needs to know only whether anything changed at all —
+	// federation.Service.DeliverLike decides for itself what (if anything)
+	// that change is worth sending, since only it knows whether the target
+	// is a confirmed Agora peer. The atproto call site still needs the
+	// federates-as-Like boundary directly, since Bluesky is never "another
+	// Agora instance" and keeps AGORA-359's plain valence gate. Falls back
+	// to a legacy plain `likes` row when there's no existing `reactions`
+	// row, since that's the other place a prior "like" could be recorded —
+	// the upsert below always clears it once a `reactions` row exists.
+	var prevType string
+	s.db.QueryRow(`SELECT reaction_type FROM reactions WHERE user_id = $1 AND post_id = $2`, userID, postID).Scan(&prevType)
+	wasFederatedLike := store.FederatesAsLike[prevType]
+	if prevType == "" {
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM likes WHERE user_id = $1 AND post_id = $2)`, userID, postID).Scan(&wasFederatedLike)
 	}
 
 	// Upsert — replaces any existing reaction from this user on this post
@@ -1478,16 +1653,31 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
 	}
 
-	// AGORA-158: standard ActivityPub only has a plain Like, no concept of
-	// emoji reaction types — federate only when the reaction is exactly
-	// "like", the same restriction Mastodon's own favourite maps to.
-	if s.fed != nil && req.Type == "like" {
-		go s.fed.DeliverLike(userID, postID)
-	}
-	// AGORA-201: app.bsky.feed.like is likewise a plain like with no emoji
-	// concept, same restriction as the fediverse call above.
-	if s.atproto != nil && req.Type == "like" {
-		go s.atproto.DeliverLike(userID, postID)
+	if prevType != req.Type {
+		// AGORA-360: always tell the fediverse side about a genuine change,
+		// on every switch — including between two reactions on the same
+		// side of the valence boundary (love -> pride), and including a
+		// negative one (sad -> angry). DeliverLike itself decides what (if
+		// anything) that's worth sending: the exact reaction to a confirmed
+		// Agora peer, a plain Like to anyone else if it's positive/neutral,
+		// or a retraction if it's negative and there's nothing truthful to
+		// send. ReactPost has no way to know which of those applies, so it
+		// no longer tries to.
+		if s.fed != nil {
+			go s.fed.DeliverLike(userID, postID, req.Type)
+		}
+		// AGORA-359: Bluesky is never "another Agora instance" to send the
+		// precise reaction to, so this side keeps the plain valence gate —
+		// send/retract only on actually crossing the boundary.
+		if s.atproto != nil {
+			nowFederatesAsLike := store.FederatesAsLike[req.Type]
+			switch {
+			case nowFederatesAsLike && !wasFederatedLike:
+				go s.atproto.DeliverLike(userID, postID)
+			case !nowFederatesAsLike && wasFederatedLike:
+				go s.atproto.DeliverUnlike(userID, postID)
+			}
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "reacted", "type": req.Type})
@@ -1744,6 +1934,8 @@ func (s *Service) GetWall(w http.ResponseWriter, r *http.Request) {
 
 	posts := scanPosts(rows)
 	s.enrichReactions(posts, viewerID)
+	s.enrichCustomHandles(posts)
+	s.enrichNestedQuotes(posts)
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	writeJSON(w, 200, map[string]any{"posts": posts})
@@ -1953,7 +2145,7 @@ func (s *Service) enrichPhotos(posts []Post) {
 		args[i] = id
 	}
 	rows, err := s.db.Query(
-		fmt.Sprintf(`SELECT post_id, url FROM post_photos WHERE post_id IN (%s) ORDER BY post_id, position ASC`,
+		fmt.Sprintf(`SELECT post_id, url, alt FROM post_photos WHERE post_id IN (%s) ORDER BY post_id, position ASC`,
 			strings.Join(placeholders, ",")),
 		args...,
 	)
@@ -1961,22 +2153,49 @@ func (s *Service) enrichPhotos(posts []Post) {
 		return
 	}
 	defer rows.Close()
+	tableAlts := map[int][]string{}
 	for rows.Next() {
-		var postID, url string
-		rows.Scan(&postID, &url)
+		var postID, url, alt string
+		rows.Scan(&postID, &url, &alt)
 		if idx, ok := idxMap[postID]; ok {
 			posts[idx].PhotoURLs = append(posts[idx].PhotoURLs, url)
+			tableAlts[idx] = append(tableAlts[idx], alt)
 		}
+	}
+	// AGORA-400: a single-image post's description lives on the post itself.
+	imageAlts := map[string]string{}
+	if arows, err := s.db.Query(
+		fmt.Sprintf(`SELECT id, image_alt FROM posts WHERE id IN (%s) AND image_alt <> ''`, strings.Join(placeholders, ",")),
+		args...,
+	); err == nil {
+		for arows.Next() {
+			var id, alt string
+			if arows.Scan(&id, &alt) == nil {
+				imageAlts[id] = alt
+			}
+		}
+		arows.Close()
 	}
 	// For posts with photos in the table, the image_url holds the first photo
 	// (set on insert). Ensure photo_urls always includes it as the first entry
 	// when the table has entries.
 	for i := range posts {
+		var alts []string
 		if len(posts[i].PhotoURLs) > 0 && posts[i].ImageURL != "" {
 			// photo_urls from the table already has position 0 = ImageURL
+			alts = tableAlts[i]
 		} else if posts[i].ImageURL != "" {
 			// single-image post: expose via photo_urls for uniform frontend access
 			posts[i].PhotoURLs = []string{posts[i].ImageURL}
+			alts = []string{imageAlts[posts[i].ID]}
+		}
+		// photo_alts lines up with photo_urls, and is left out entirely when
+		// no image has a description, the common case.
+		for _, a := range alts {
+			if a != "" {
+				posts[i].PhotoAlts = alts
+				break
+			}
 		}
 	}
 }
@@ -2128,6 +2347,12 @@ func (s *Service) Repost(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 	postID := chi.URLParam(r, "id")
 	viewerID := auth.UserIDFromCtx(r.Context())
+	// AGORA-384: a thread from Bluesky only ever had the replies this
+	// instance happened to ingest. Fetch the rest from Bluesky first, so the
+	// conversation is complete when it's opened.
+	if s.atproto != nil {
+		s.atproto.SyncBlueskyThread(postID)
+	}
 	// viewerID feeds a uuid column below; an empty string (guest) is invalid
 	// input for the uuid type, so use NULL instead.
 	var viewerParam any = viewerID
@@ -2155,6 +2380,8 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 		// comment's own content, mirroring Post.AuthorEmojis/ContentEmojis.
 		AuthorEmojis  json.RawMessage `json:"author_emojis,omitempty"`
 		ContentEmojis json.RawMessage `json:"content_emojis,omitempty"`
+		// AGORA-401: as Post.MentionDomains, for this comment's content.
+		MentionDomains map[string]string `json:"mention_domains,omitempty"`
 	}
 
 	scanComment := func(rows interface {
@@ -2288,6 +2515,22 @@ func (s *Service) GetComments(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// AGORA-401: one lookup for every mention in the thread, every level.
+	var walk func(cs []Comment, visit func(*Comment))
+	walk = func(cs []Comment, visit func(*Comment)) {
+		for i := range cs {
+			visit(&cs[i])
+			walk(cs[i].Replies, visit)
+		}
+	}
+	var mentioned []string
+	walk(comments, func(c *Comment) { mentioned = append(mentioned, mentionedLocalUsernames(c.Content)...) })
+	if byUsername := s.liveCustomDomains(mentioned); len(byUsername) > 0 {
+		walk(comments, func(c *Comment) {
+			c.MentionDomains = pickDomains(mentionedLocalUsernames(c.Content), byUsername)
+		})
 	}
 
 	writeJSON(w, 200, map[string]any{"comments": comments})
@@ -2454,6 +2697,10 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 		Content        *string  `json:"content"`
 		ImageURL       *string  `json:"image_url"`
 		ImageURLs      []string `json:"image_urls"`
+		// AGORA-400: descriptions in image order. Sent with image_urls they
+		// go with the new set; sent alone they re-describe the images the
+		// post already has, so fixing a description needs no re-upload.
+		ImageAlts      *[]string `json:"image_alts"`
 		Visibility     *string  `json:"visibility"`
 		FriendListID   *string  `json:"friend_list_id"`
 		ContentWarning *string  `json:"content_warning"`
@@ -2461,7 +2708,7 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json"); return
 	}
-	if req.Content == nil && req.ImageURL == nil && len(req.ImageURLs) == 0 && req.Visibility == nil && req.ContentWarning == nil {
+	if req.Content == nil && req.ImageURL == nil && len(req.ImageURLs) == 0 && req.ImageAlts == nil && req.Visibility == nil && req.ContentWarning == nil {
 		writeError(w, 400, "nothing to update"); return
 	}
 	// Normalize image_urls → image_url
@@ -2519,10 +2766,28 @@ func (s *Service) EditPost(w http.ResponseWriter, r *http.Request) {
 
 	// Replace photos if image_urls was provided
 	if len(req.ImageURLs) > 0 {
+		var given []string
+		if req.ImageAlts != nil {
+			given = *req.ImageAlts
+		}
+		alts := alttext.Clean(given, len(req.ImageURLs))
 		s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, id)
 		if len(req.ImageURLs) > 1 {
 			for pos, u := range req.ImageURLs {
-				s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, id, u, pos)
+				s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, id, u, pos, alts[pos])
+			}
+		}
+		s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, alts[0], id)
+	} else if req.ImageAlts != nil {
+		// AGORA-400: new descriptions for the images already there, by position.
+		var imageURL string
+		var photoCount int
+		s.db.QueryRow(`SELECT image_url, (SELECT COUNT(*) FROM post_photos WHERE post_id = $1) FROM posts WHERE id = $1`, id).Scan(&imageURL, &photoCount)
+		if imageURL != "" {
+			alts := alttext.Clean(*req.ImageAlts, max(photoCount, 1))
+			s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, alts[0], id)
+			for pos := 0; pos < photoCount; pos++ {
+				s.db.Exec(`UPDATE post_photos SET alt = $1 WHERE post_id = $2 AND position = $3`, alts[pos], id, pos)
 			}
 		}
 	}
@@ -2605,6 +2870,17 @@ type Post struct {
 	AuthorName     string  `json:"author_display_name"`
 	AuthorPronouns string  `json:"author_pronouns"`
 	AuthorAvatar   string  `json:"author_avatar_url"`
+	// AGORA-288: the author's own domain, if they have a live one (AGORA-278).
+	// Filled in by enrichCustomHandles rather than selected in the queries
+	// above — see that function for why it isn't a join.
+	AuthorCustomDomain string `json:"author_custom_domain,omitempty"`
+	// AGORA-411: a private profile's posts are hidden from signed-out
+	// visitors whatever their own visibility, so the client offers no Share
+	// link for them. Filled in by markPrivateAuthors.
+	AuthorProfilePrivate bool `json:"author_profile_private,omitempty"`
+	// AGORA-401: live custom domains of the local accounts @-mentioned in
+	// this post (and in the post it reposts), keyed by lowercased username.
+	MentionDomains map[string]string `json:"mention_domains,omitempty"`
 	Content        string  `json:"content"`
 	ImageURL       string  `json:"image_url"`
 	Visibility     string  `json:"visibility"`
@@ -2650,6 +2926,9 @@ type Post struct {
 	WallStatus       string  `json:"wall_status,omitempty"`
 	// Multi-photo (AGORA-93)
 	PhotoURLs []string `json:"photo_urls,omitempty"`
+	// AGORA-400: image descriptions, same order as photo_urls ("" for an
+	// image without one). Omitted when none of the images has one.
+	PhotoAlts []string `json:"photo_alts,omitempty"`
 	// Video (AGORA-119)
 	VideoURL      string `json:"video_url,omitempty"`
 	VideoThumbURL string `json:"video_thumb_url,omitempty"`
@@ -2663,6 +2942,7 @@ type Post struct {
 	RepostAuthorName     *string `json:"repost_author_display_name,omitempty"`
 	RepostAuthorPronouns *string `json:"repost_author_pronouns,omitempty"`
 	RepostAuthorAvatar   *string `json:"repost_author_avatar_url,omitempty"`
+	RepostAuthorCustomDomain string `json:"repost_author_custom_domain,omitempty"`
 	RepostContent        *string `json:"repost_content,omitempty"`
 	RepostImageURL       *string `json:"repost_image_url,omitempty"`
 	RepostCreatedAt      *string `json:"repost_created_at,omitempty"`
@@ -2679,6 +2959,11 @@ type Post struct {
 	RepostLinkDescription *string `json:"repost_link_description,omitempty"`
 	RepostLinkImage       *string `json:"repost_link_image,omitempty"`
 	RepostLinkDomain      *string `json:"repost_link_domain,omitempty"`
+	// AGORA-408: the post the reposted post itself quotes, when it is a quote (filled
+	// in by enrichNestedQuotes). Without it, sharing a quote post showed only
+	// the quoter's words, e.g. a one-line reaction to an article with the
+	// article gone.
+	RepostQuote *NestedQuote `json:"repost_quote,omitempty"`
 	// AGORA-258: custom emoji (shortcode -> image URL) for this post's author
 	// name, this post's own content, and (if this is a repost/quote-share) the
 	// reposted post's author name/content — each independently sourced from
@@ -2688,6 +2973,30 @@ type Post struct {
 	ContentEmojis       json.RawMessage `json:"content_emojis,omitempty"`
 	RepostAuthorEmojis  json.RawMessage `json:"repost_author_emojis,omitempty"`
 	RepostContentEmojis json.RawMessage `json:"repost_content_emojis,omitempty"`
+	// AGORA-372: set only on the author's own view of an external_only post
+	// (filled in by enrichExternalOnly, not scanned by scanPosts itself —
+	// see that function's comment). Never true for any other viewer: a
+	// 'private' + external_only row never reaches anyone else's post list
+	// in the first place, so there's nothing for enrichExternalOnly to find.
+	ExternalOnly bool   `json:"external_only,omitempty"`
+	OnlyOn       string `json:"only_on,omitempty"`
+}
+
+// NestedQuote (AGORA-408) is the second level of a share-of-a-quote: just enough of the
+// innermost post to render a compact card inside the quoted one.
+type NestedQuote struct {
+	ID             string          `json:"id"`
+	AuthorUsername string          `json:"author_username"`
+	AuthorName     string          `json:"author_display_name"`
+	AuthorAvatar   string          `json:"author_avatar_url,omitempty"`
+	AuthorEmojis   json.RawMessage `json:"author_emojis,omitempty"`
+	Content        string          `json:"content"`
+	ContentEmojis  json.RawMessage `json:"content_emojis,omitempty"`
+	ImageURL       string          `json:"image_url,omitempty"`
+	LinkURL        string          `json:"link_url,omitempty"`
+	LinkTitle      string          `json:"link_title,omitempty"`
+	LinkImage      string          `json:"link_image,omitempty"`
+	LinkDomain     string          `json:"link_domain,omitempty"`
 }
 
 // nonEmptyEmojisJSON normalizes a scanned emojis JSONB-as-text column value
@@ -2711,7 +3020,7 @@ func scanPosts(rows interface {
 	for rows.Next() {
 		var p Post
 		var authorEmojis, contentEmojis, repostAuthorEmojis, repostContentEmojis string
-		rows.Scan(
+		if err := rows.Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorName, &p.AuthorPronouns, &p.AuthorAvatar,
 			&p.Content, &p.ImageURL, &p.Visibility, &p.GroupID, &p.FriendListID, &p.GroupName, &p.GroupSlug,
 			&p.RepostOfID, &p.IsRemote, &p.RemoteInstance, &p.RemotePostID,
@@ -2726,7 +3035,18 @@ func scanPosts(rows interface {
 			&p.PageID, &p.PageSlug, &p.PageName, &p.PageAvatar,
 			&p.VideoURL, &p.VideoThumbURL,
 			&authorEmojis, &contentEmojis, &repostAuthorEmojis, &repostContentEmojis,
-		)
+		); err != nil {
+			// AGORA-355: this error used to be discarded, which meant a
+			// column-list drift between a query and this Scan call (e.g. a
+			// future federation/atproto column addition to one but not the
+			// other) would silently append a mostly-zero-valued Post instead
+			// of failing anywhere visible. Skipping the row and logging is
+			// strictly better than either silently corrupting it or blowing
+			// up every caller's signature for what should never happen in
+			// practice.
+			log.Printf("feed: scanPosts: skipping row after Scan error: %v", err)
+			continue
+		}
 		p.ReactionCounts = map[string]int{}
 		p.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
 		p.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
@@ -2736,6 +3056,278 @@ func scanPosts(rows interface {
 	}
 	if posts == nil { return []Post{} }
 	return posts
+}
+
+// enrichCustomHandles fills in each post author's live custom-domain handle
+// (AGORA-288). Done as one extra query over the already-scanned posts, in the
+// same shape as enrichReactions, rather than as a join in the feed queries
+// themselves: the author column list is repeated across a dozen SELECTs that
+// all have to stay positionally in step with scanPosts, and adding a
+// LEFT JOIN to every one of them — including the hottest queries in the app —
+// is a lot of risk and per-row cost for a label almost no author has.
+//
+// Keyed by username rather than user id because a repost's source author is
+// only ever scanned as a username, with no id column to match on.
+//
+// AGORA-401: the same lookup also covers everyone @-mentioned in a post or in
+// the post it reposts, filling MentionDomains, so a mention can carry the badge
+// too without a second query.
+func (s *Service) enrichCustomHandles(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	s.markPrivateAuthors(posts)
+	mentions := make([][]string, len(posts))
+	var names []string
+	for i, p := range posts {
+		names = append(names, p.AuthorUsername, derefOr(p.RepostAuthorUsername))
+		mentions[i] = append(mentionedLocalUsernames(p.Content), mentionedLocalUsernames(derefOr(p.RepostContent))...)
+		names = append(names, mentions[i]...)
+	}
+	byUsername := s.liveCustomDomains(names)
+	if len(byUsername) == 0 {
+		return
+	}
+
+	for i := range posts {
+		posts[i].AuthorCustomDomain = byUsername[strings.ToLower(posts[i].AuthorUsername)]
+		posts[i].RepostAuthorCustomDomain = byUsername[strings.ToLower(derefOr(posts[i].RepostAuthorUsername))]
+		posts[i].MentionDomains = pickDomains(mentions[i], byUsername)
+	}
+}
+
+// markPrivateAuthors (AGORA-411) sets AuthorProfilePrivate in one query over
+// the already-scanned posts, for the same reason enrichCustomHandles avoids a
+// join. It runs from enrichCustomHandles so every feed path that already
+// enriches handles gets it without another call site.
+func (s *Service) markPrivateAuthors(posts []Post) {
+	ids := make([]string, 0, len(posts))
+	for _, p := range posts {
+		ids = append(ids, p.AuthorID)
+	}
+	rows, err := s.db.Query(`SELECT id FROM users WHERE id = ANY($1::uuid[]) AND profile_private`, pq.Array(ids))
+	if err != nil {
+		log.Printf("feed: markPrivateAuthors: %v", err)
+		return
+	}
+	defer rows.Close()
+	private := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			private[id] = true
+		}
+	}
+	for i := range posts {
+		posts[i].AuthorProfilePrivate = private[posts[i].AuthorID]
+	}
+}
+
+// enrichNestedQuotes (AGORA-408) fills RepostQuote on every repost whose reposted post is
+// itself a quote, in one query over the already-scanned posts (the same shape
+// as enrichCustomHandles, for the same reason: keeping the positional column
+// lists of the feed SELECTs untouched). Only one extra level is resolved, so a
+// longer chain still ends after two cards.
+func (s *Service) enrichNestedQuotes(posts []Post) {
+	var ids []string
+	for _, p := range posts {
+		if p.RepostOfID != nil {
+			ids = append(ids, *p.RepostOfID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	rows, err := s.db.Query(`
+		SELECT mid.id, q.id, u.username, COALESCE(u.display_name,''), COALESCE(u.avatar_url,''),
+		       COALESCE(u.emojis::text,'{}'), COALESCE(q.content,''), COALESCE(q.emojis::text,'{}'),
+		       COALESCE(q.image_url,''), COALESCE(q.link_url,''), COALESCE(q.link_title,''),
+		       COALESCE(q.link_image,''), COALESCE(q.link_domain,'')
+		FROM posts mid
+		JOIN posts q ON q.id = mid.repost_of_id AND q.deleted_at IS NULL
+		JOIN users u ON u.id = q.author_id
+		WHERE mid.id = ANY($1) AND mid.deleted_at IS NULL
+		  AND q.visibility NOT IN ('private', 'friends') AND q.community_group_id IS NULL
+	`, pq.Array(ids))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	byMid := map[string]*NestedQuote{}
+	for rows.Next() {
+		var midID, authorEmojis, contentEmojis string
+		var q NestedQuote
+		if rows.Scan(&midID, &q.ID, &q.AuthorUsername, &q.AuthorName, &q.AuthorAvatar,
+			&authorEmojis, &q.Content, &contentEmojis,
+			&q.ImageURL, &q.LinkURL, &q.LinkTitle, &q.LinkImage, &q.LinkDomain) != nil {
+			continue
+		}
+		q.AuthorEmojis = json.RawMessage(nonEmptyEmojisJSON(authorEmojis))
+		q.ContentEmojis = json.RawMessage(nonEmptyEmojisJSON(contentEmojis))
+		byMid[midID] = &q
+	}
+	for i := range posts {
+		if posts[i].RepostOfID != nil {
+			posts[i].RepostQuote = byMid[*posts[i].RepostOfID]
+		}
+	}
+}
+
+// liveCustomDomains returns the live (verified and approved) custom domain of
+// each of the given usernames that has one, keyed by lowercased username.
+func (s *Service) liveCustomDomains(usernames []string) map[string]string {
+	seen := map[string]bool{}
+	var names []string
+	for _, n := range usernames {
+		if n = strings.ToLower(n); n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(`
+		SELECT LOWER(u.username), cd.domain
+		FROM custom_domains cd
+		JOIN users u ON u.id = cd.user_id
+		WHERE cd.protocol = 'atproto'
+		  AND cd.verification_status = 'verified' AND cd.approval_status = 'approved'
+		  AND LOWER(u.username) = ANY($1)
+	`, pq.Array(names))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	byUsername := map[string]string{}
+	for rows.Next() {
+		var username, domain string
+		if rows.Scan(&username, &domain) == nil {
+			byUsername[username] = domain
+		}
+	}
+	return byUsername
+}
+
+// pickDomains is the part of byUsername that a post's mentions refer to, or
+// nil when none of them has a live custom domain.
+func pickDomains(mentioned []string, byUsername map[string]string) map[string]string {
+	var out map[string]string
+	for _, n := range mentioned {
+		if d, ok := byUsername[n]; ok {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[n] = d
+		}
+	}
+	return out
+}
+
+// mentionedLocalUsernames returns the lowercased local usernames @-mentioned
+// in content (AGORA-401). A bare @name counts; the name half of a Fediverse
+// @name@instance.tld does not (the AGORA-163 rule notifyMentions follows), and
+// neither does a dotted handle like @name.bsky.social, which the web and
+// mobile renderers also treat as one non-local token.
+func mentionedLocalUsernames(content string) []string {
+	if !strings.Contains(content, "@") {
+		return nil
+	}
+	fediverseSpans := fediverseMentionRe.FindAllStringIndex(content, -1)
+	var out []string
+	for _, m := range mentionRe.FindAllStringSubmatchIndex(content, -1) {
+		inFediverse := false
+		for _, sp := range fediverseSpans {
+			if m[0] >= sp[0] && m[0] < sp[1] {
+				inFediverse = true
+				break
+			}
+		}
+		if inFediverse {
+			continue
+		}
+		if end := m[1]; end+1 < len(content) && content[end] == '.' && isHandleByte(content[end+1]) {
+			continue // @name.bsky.social
+		}
+		out = append(out, strings.ToLower(content[m[2]:m[3]]))
+	}
+	return out
+}
+
+func isHandleByte(b byte) bool {
+	return b == '_' || b == '-' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func derefOr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// onlyOnLabel derives AGORA-372's "only on ..." badge text from which
+// external network(s) an external_only post was sent to.
+func onlyOnLabel(federateAP, federateATProto bool) string {
+	switch {
+	case federateAP && federateATProto:
+		return "Only on the Fediverse and Bluesky"
+	case federateAP:
+		return "Only on the Fediverse"
+	case federateATProto:
+		return "Only on Bluesky"
+	default:
+		return ""
+	}
+}
+
+// enrichExternalOnly attaches AGORA-372's external_only flag and "only on
+// ..." label the same way enrichCustomHandles does: one extra targeted query
+// over the already-scanned ids, rather than adding two more columns to every
+// one of scanPosts' many SELECTs (and its single positional Scan call) for a
+// flag that's non-empty on exactly the viewer's own external-only posts.
+//
+// Safe to call after any scanPosts result, not just GetPost/GetUserPosts's:
+// a 'private' + external_only row only ever reaches its own author's post
+// list in the first place (see those two handlers' own access checks), so
+// for every other caller this simply finds nothing to attach.
+func (s *Service) enrichExternalOnly(posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]any, len(posts))
+	idxByID := map[string]int{}
+	for i, p := range posts {
+		ids[i] = p.ID
+		idxByID[p.ID] = i
+	}
+	ph := make([]string, len(ids))
+	for i := range ids {
+		ph[i] = fmt.Sprintf("$%d", i+1)
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT id, federate_ap, federate_atproto
+		FROM posts
+		WHERE external_only = true AND id IN (%s)
+	`, strings.Join(ph, ",")), ids...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var federateAP, federateATProto bool
+		if rows.Scan(&id, &federateAP, &federateATProto) != nil {
+			continue
+		}
+		i, ok := idxByID[id]
+		if !ok {
+			continue
+		}
+		posts[i].ExternalOnly = true
+		posts[i].OnlyOn = onlyOnLabel(federateAP, federateATProto)
+	}
 }
 
 // enrichReactions loads reaction counts and the current user's reaction for a slice of posts.

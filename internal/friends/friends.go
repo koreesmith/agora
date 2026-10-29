@@ -1,20 +1,33 @@
 package friends
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
 )
 
 // fedSender is the subset of federation.Service used here (avoids import cycle).
+//
+// AGORA-329: friend requests ride ActivityPub as a Follow carrying an
+// agora:friendRequest marker, so this package no longer builds activity
+// payloads itself. It names the two users and federation decides how to reach
+// them, which is what lets the actor URL be derived for a legacy stub that
+// predates the migration.
 type fedSender interface {
-	BroadcastToFriendInstances(userID string, activity any)
-	SendToUserInstance(remoteInstance, instanceURL string, activity any)
+	// CanFriend reports whether a remote account is an Agora user who can
+	// meaningfully receive a friend request, as opposed to a fediverse actor
+	// with no concept of one.
+	CanFriend(remoteUserID string) bool
+	SendFriendRequest(localUserID, addresseeUserID string)
+	SendFriendAccept(localUserID, requesterUserID string)
+	SendFriendUndo(localUserID, otherUserID string)
 }
 
 type Service struct {
@@ -34,6 +47,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/friends",                     s.ListFriends)
 	r.Get("/friends/requests",            s.ListRequests)
 	r.Post("/friends/request/{userID}",   s.SendRequest)
+	r.Delete("/friends/request/{userID}", s.CancelRequest) // AGORA-333
 	r.Post("/friends/accept/{userID}",    s.Accept)
 	r.Post("/friends/decline/{userID}",   s.Decline)
 	r.Delete("/friends/{userID}",         s.Unfriend)
@@ -45,6 +59,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/friend-groups/{groupID}/members",         s.ListGroupMembers)
 	r.Post("/friend-groups/{groupID}/members/{friendID}", s.AddToGroup)
 	r.Delete("/friend-groups/{groupID}/members/{friendID}", s.RemoveFromGroup)
+
+	// One account's membership across all of the caller's lists (AGORA-395)
+	r.Get("/friend-groups/memberships/{friendID}", s.ListMemberships)
+	r.Put("/friend-groups/memberships/{friendID}", s.SetMemberships)
 }
 
 // ── Friendships ───────────────────────────────────────────────────────────────
@@ -150,18 +168,20 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Check addressee exists
 	var exists bool
-	var addresseeAPActorURL string
-	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1), COALESCE((SELECT ap_actor_url FROM users WHERE id = $1), '')`, addresseeID).
-		Scan(&exists, &addresseeAPActorURL)
+	var addresseeIsRemote bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1), COALESCE((SELECT is_remote FROM users WHERE id = $1), false)`, addresseeID).
+		Scan(&exists, &addresseeIsRemote)
 	if !exists {
 		writeError(w, 404, "user not found")
 		return
 	}
-	// AGORA-167: a genuine ActivityPub actor has no concept of friending —
-	// only following (federation.FollowFediverseAccount) — so a friend
-	// request here would insert a pending row that can never be accepted.
-	if addresseeAPActorURL != "" {
-		writeError(w, 400, "fediverse accounts can't be added as friends — follow them instead")
+	// AGORA-167/329: a genuine fediverse actor has no concept of friending,
+	// only following, so a request would sit pending forever. An Agora user on
+	// another instance is a different case and is exactly who this is for, so
+	// the question is not "does this account have an actor URL" but "is the far
+	// end Agora". federation.CanFriend answers it.
+	if addresseeIsRemote && s.fed != nil && !s.fed.CanFriend(addresseeID) {
+		writeError(w, 400, "this account can't be added as a friend, follow them instead")
 		return
 	}
 
@@ -202,25 +222,12 @@ func (s *Service) SendRequest(w http.ResponseWriter, r *http.Request) {
 
 	go s.notif.Create(addresseeID, requesterID, "friend_request", "", "")
 
-	// If addressee is on a remote instance, send the request over federation
-	if s.fed != nil {
-		var isRemote bool
-		var remoteInstance, remoteUserID, requesterUsername string
-		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, addresseeID).
-			Scan(&isRemote, &remoteInstance, &remoteUserID)
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, requesterID).Scan(&requesterUsername)
-		if isRemote && remoteInstance != "" {
-			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":       "friend_request",
-				"actor":      requesterUsername,
-				"instance_id": domainFromCfg(s.db),
-				"timestamp":  time.Now().Unix(),
-				"object": map[string]string{
-					"from_handle": requesterUsername,
-					"to_handle":   remoteUserID,
-				},
-			})
-		}
+	// AGORA-329: a remote addressee gets a Follow carrying the friend-request
+	// marker, over ActivityPub. The local pending row above already exists, so
+	// a delivery failure leaves the sender's own view intact and the delivery
+	// queue retries on its own schedule.
+	if s.fed != nil && addresseeIsRemote {
+		go s.fed.SendFriendRequest(requesterID, addresseeID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request sent"})
@@ -246,28 +253,53 @@ func (s *Service) Accept(w http.ResponseWriter, r *http.Request) {
 
 	go s.notif.Create(requesterID, userID, "friend_accepted", "", "")
 
-	// If requester is remote, send accept back to their instance
-	if s.fed != nil {
-		var isRemote bool
-		var remoteInstance, remoteUserID, accepterUsername string
-		s.db.QueryRow(`SELECT is_remote, remote_instance, remote_user_id FROM users WHERE id = $1`, requesterID).
-			Scan(&isRemote, &remoteInstance, &remoteUserID)
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&accepterUsername)
-		if isRemote && remoteInstance != "" {
-			go s.fed.SendToUserInstance(remoteInstance, "https://"+remoteInstance, map[string]any{
-				"type":        "friend_accept",
-				"actor":       accepterUsername,
-				"instance_id": domainFromCfg(s.db),
-				"timestamp":   time.Now().Unix(),
-				"object": map[string]string{
-					"from_handle": accepterUsername,
-					"to_handle":   remoteUserID,
-				},
-			})
-		}
+	// AGORA-329: sends an Accept of their Follow and a marked Follow back, which
+	// is what makes the relationship mutual and starts content flowing both
+	// ways. Under the legacy protocol acceptance carried no follow at all, so a
+	// friendship could exist with nothing to show for it.
+	if s.fed != nil && s.isRemoteUser(requesterID) {
+		go s.fed.SendFriendAccept(userID, requesterID)
 	}
 
 	writeJSON(w, 200, map[string]string{"message": "friend request accepted"})
+}
+
+// CancelRequest withdraws a friend request the caller sent (AGORA-333).
+//
+// Deletes the row rather than marking it declined, which is what Decline does.
+// The two look similar and mean different things: a declined request is a
+// decision the addressee made and worth remembering, while a cancelled one
+// should leave no trace and let the sender try again immediately.
+func (s *Service) CancelRequest(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	addresseeID := chi.URLParam(r, "userID")
+
+	res, err := s.db.Exec(`
+		DELETE FROM friendships
+		WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'
+	`, userID, addresseeID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "no pending request to cancel")
+		return
+	}
+
+	// The addressee's notification now points at nothing they can act on.
+	s.db.Exec(`
+		DELETE FROM notifications
+		WHERE user_id = $1 AND actor_id = $2 AND type = 'friend_request'
+	`, addresseeID, userID)
+
+	// AGORA-329: withdraw the marked Follow on the remote side too, or the
+	// request stays pending in their list after it has gone from ours.
+	if s.fed != nil && s.isRemoteUser(addresseeID) {
+		go s.fed.SendFriendUndo(userID, addresseeID)
+	}
+
+	writeJSON(w, 200, map[string]string{"message": "friend request cancelled"})
 }
 
 func (s *Service) Decline(w http.ResponseWriter, r *http.Request) {
@@ -279,6 +311,12 @@ func (s *Service) Decline(w http.ResponseWriter, r *http.Request) {
 		WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
 		  AND status = 'pending'
 	`, otherID, userID)
+
+	// AGORA-329: declining ends the friendship, not the follow. The requester's
+	// Follow was accepted when it arrived, as any Follow is, and what was
+	// declined is the friendship on top of it. Someone who wants them gone
+	// entirely blocks or removes the follower, which are separate actions with
+	// their own meaning.
 	writeJSON(w, 200, map[string]string{"message": "request declined"})
 }
 
@@ -291,22 +329,63 @@ func (s *Service) Unfriend(w http.ResponseWriter, r *http.Request) {
 		WHERE (requester_id = $1 AND addressee_id = $2)
 		   OR (requester_id = $2 AND addressee_id = $1)
 	`, userID, otherID)
+
+	// AGORA-329: unfriending undoes the marked Follow this side sent. The
+	// remote side's own follow is theirs to undo, the same way unfriending
+	// locally does not reach into what the other person can see.
+	if s.fed != nil && s.isRemoteUser(otherID) {
+		go s.fed.SendFriendUndo(userID, otherID)
+	}
 	writeJSON(w, 200, map[string]string{"message": "unfriended"})
+}
+
+// isRemoteUser reports whether a users row is a stub for somebody on another
+// instance, which is the only case where a friendship action has to federate.
+func (s *Service) isRemoteUser(userID string) bool {
+	var isRemote bool
+	s.db.QueryRow(`SELECT COALESCE(is_remote, false) FROM users WHERE id = $1`, userID).Scan(&isRemote)
+	return isRemote
 }
 
 // ── Friend Groups ─────────────────────────────────────────────────────────────
 
+// ListGroups returns the caller's friend lists, each with the reach information
+// AGORA-345 needs to warn about a limited post that cannot stay limited.
+//
+// A list can contain a Mastodon or a Bluesky account (AGORA-182/257 allow it
+// deliberately), and posting to it behaves differently for each: another Agora
+// instance enforces the limit and carries the conversation back, Mastodon
+// honours the addressing but has no concept of the list and will not
+// participate in the fan-out, and Bluesky has no equivalent addressing at all
+// and is not delivered to.
+//
+// Returned from this endpoint rather than a new one because the composer
+// already calls it to populate the list picker, so the warning costs no extra
+// request and cannot lag behind the selection.
+//
+// "Is this an Agora instance" is answered by a federated_instances row, the
+// same signal CanFriend and friend_requests_from both read. A legacy stub
+// counts too: only Agora ever created one.
 func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
-	rows, _ := s.db.Query(`
+	rows, err := s.db.Query(`
 		SELECT g.id, g.name, g.created_at,
-		       COUNT(m.friend_id) as member_count
+		       COUNT(m.friend_id) AS member_count,
+		       COALESCE((array_agg(`+memberLabel+`) FILTER (WHERE `+isBluesky+`))[1:3], '{}') AS bluesky_names,
+		       COUNT(*) FILTER (WHERE `+isBluesky+`)   AS bluesky_count,
+		       COALESCE((array_agg(`+memberLabel+`) FILTER (WHERE `+isFediverse+`))[1:3], '{}') AS fediverse_names,
+		       COUNT(*) FILTER (WHERE `+isFediverse+`) AS fediverse_count
 		FROM friend_groups g
 		LEFT JOIN friend_group_members m ON m.group_id = g.id
+		LEFT JOIN users u ON u.id = m.friend_id
 		WHERE g.user_id = $1
 		GROUP BY g.id, g.name, g.created_at
 		ORDER BY g.name
 	`, userID)
+	if err != nil {
+		writeError(w, 500, "could not load lists")
+		return
+	}
 	defer rows.Close()
 
 	type Group struct {
@@ -314,16 +393,45 @@ func (s *Service) ListGroups(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		MemberCount int    `json:"member_count"`
 		CreatedAt   string `json:"created_at"`
+		// AGORA-345. Empty for the ordinary case, which is what keeps the
+		// composer quiet unless there is something specific to say.
+		BlueskyNames   []string `json:"bluesky_names"`
+		BlueskyCount   int      `json:"bluesky_count"`
+		FediverseNames []string `json:"fediverse_names"`
+		FediverseCount int      `json:"fediverse_count"`
 	}
 	var groups []Group
 	for rows.Next() {
 		var g Group
-		rows.Scan(&g.ID, &g.Name, &g.CreatedAt, &g.MemberCount)
+		rows.Scan(&g.ID, &g.Name, &g.CreatedAt, &g.MemberCount,
+			pq.Array(&g.BlueskyNames), &g.BlueskyCount,
+			pq.Array(&g.FediverseNames), &g.FediverseCount)
+		if g.BlueskyNames == nil { g.BlueskyNames = []string{} }
+		if g.FediverseNames == nil { g.FediverseNames = []string{} }
 		groups = append(groups, g)
 	}
 	if groups == nil { groups = []Group{} }
 	writeJSON(w, 200, map[string]any{"groups": groups})
 }
+
+// Member classification for ListGroups, kept as named fragments so the three
+// uses of each cannot drift apart.
+const (
+	memberLabel = `COALESCE(NULLIF(u.display_name, ''), u.username)`
+
+	// 'bsky.app' is the marker AT Proto ingestion stamps on Bluesky-origin
+	// rows, never used by fediverse ingestion.
+	isBluesky = `u.is_remote = true AND u.remote_instance = 'bsky.app'`
+
+	// Remote, not Bluesky, and not on an instance we know to be Agora.
+	isFediverse = `u.is_remote = true
+	               AND COALESCE(u.remote_instance, '') NOT IN ('', 'bsky.app')
+	               AND COALESCE(u.remote_user_id, '') = ''
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM federated_instances fi
+	                  WHERE LOWER(fi.domain) = LOWER(u.remote_instance)
+	               )`
+)
 
 func (s *Service) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
@@ -351,25 +459,84 @@ func (s *Service) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"message": "group deleted"})
 }
 
+// ownsGroup reports whether groupID is one of userID's lists. An ID that is
+// not a UUID is simply not theirs, rather than a query error.
+func (s *Service) ownsGroup(userID, groupID string) (bool, error) {
+	if _, err := uuid.Parse(groupID); err != nil {
+		return false, nil
+	}
+	var ownerID string
+	err := s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, groupID).Scan(&ownerID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return ownerID == userID, nil
+}
+
+// canList reports whether friendID may be put on one of userID's lists.
+//
+// AGORA-182/AGORA-257: list membership isn't friendship-only. A followed
+// fediverse or Bluesky account can join a list too, read-side only. There's
+// no mutual "accept" for a one-way follow, so the bar is just "the caller
+// follows them": for fediverse that's an accepted ap_following row (matching
+// ListFollowing's own join against ap_following.followed_actor_url =
+// users.ap_actor_url); for Bluesky there's no accept concept at all (AT Proto
+// follows are unilateral), mirroring the at_following/atproto_remote_did join
+// feed.go's Custom Feeds "atproto_account" filter already uses for the same
+// eligibility question.
+func (s *Service) canList(userID, friendID string) (bool, error) {
+	if _, err := uuid.Parse(friendID); err != nil {
+		return false, nil
+	}
+	var ok bool
+	err := s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE status = 'accepted'
+			  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+		) OR EXISTS(
+			SELECT 1 FROM ap_following af
+			JOIN users u ON u.ap_actor_url = af.followed_actor_url
+			WHERE af.follower_user_id = $1 AND af.accepted = true AND u.id = $2
+		) OR EXISTS(
+			SELECT 1 FROM at_following af
+			JOIN users u ON u.atproto_remote_did = af.remote_did
+			WHERE af.local_user_id = $1 AND u.id = $2
+		)
+	`, userID, friendID).Scan(&ok)
+	return ok, err
+}
+
+const notListableMsg = "can only add friends or followed Fediverse or Bluesky accounts to lists"
+
 func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	groupID := chi.URLParam(r, "groupID")
 
-	// Verify ownership
-	var ownerID string
-	s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, groupID).Scan(&ownerID)
-	if ownerID != userID {
+	owns, err := s.ownsGroup(userID, groupID)
+	if err != nil {
+		writeError(w, 500, "could not load list")
+		return
+	}
+	if !owns {
 		writeError(w, 403, "forbidden")
 		return
 	}
 
-	rows, _ := s.db.Query(`
+	rows, err := s.db.Query(`
 		SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_remote, u.remote_instance, COALESCE(u.emojis::text,'{}')
 		FROM friend_group_members m
 		JOIN users u ON u.id = m.friend_id
 		WHERE m.group_id = $1
 		ORDER BY u.display_name
 	`, groupID)
+	if err != nil {
+		writeError(w, 500, "could not load list members")
+		return
+	}
 	defer rows.Close()
 
 	type Member struct {
@@ -385,59 +552,52 @@ func (s *Service) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var m Member
 		var emojis string
-		rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance, &emojis)
+		if err := rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsRemote, &m.RemoteInstance, &emojis); err != nil {
+			writeError(w, 500, "could not load list members")
+			return
+		}
 		m.Emojis = json.RawMessage(emojis)
 		members = append(members, m)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "could not load list members")
+		return
 	}
 	if members == nil { members = []Member{} }
 	writeJSON(w, 200, map[string]any{"members": members})
 }
 
+// AGORA-395: these two used to answer 200 whatever the write did, so a failed
+// insert or delete looked like a success to the client.
 func (s *Service) AddToGroup(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromCtx(r.Context())
 	groupID := chi.URLParam(r, "groupID")
 	friendID := chi.URLParam(r, "friendID")
 
-	// Verify group ownership
-	var ownerID string
-	s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, groupID).Scan(&ownerID)
-	if ownerID != userID {
+	owns, err := s.ownsGroup(userID, groupID)
+	if err != nil {
+		writeError(w, 500, "could not update list")
+		return
+	}
+	if !owns {
 		writeError(w, 403, "forbidden")
 		return
 	}
 
-	// AGORA-182/AGORA-257: list membership isn't friendship-only — a
-	// followed fediverse or Bluesky account can join a list too, read-side
-	// only. There's no mutual "accept" for a one-way follow, so the bar is
-	// just "the caller follows them" — for fediverse that's an accepted
-	// ap_following row (matching ListFollowing's own join against
-	// ap_following.followed_actor_url = users.ap_actor_url); for Bluesky
-	// there's no accept concept at all (AT Proto follows are unilateral),
-	// mirroring the at_following/atproto_remote_did join feed.go's Custom
-	// Feeds "atproto_account" filter already uses for the same eligibility
-	// question.
-	var ok bool
-	s.db.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM friendships
-			WHERE status = 'accepted'
-			  AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
-		) OR EXISTS(
-			SELECT 1 FROM ap_following af
-			JOIN users u ON u.ap_actor_url = af.followed_actor_url
-			WHERE af.follower_user_id = $1 AND af.accepted = true AND u.id = $2
-		) OR EXISTS(
-			SELECT 1 FROM at_following af
-			JOIN users u ON u.atproto_remote_did = af.remote_did
-			WHERE af.local_user_id = $1 AND u.id = $2
-		)
-	`, userID, friendID).Scan(&ok)
+	ok, err := s.canList(userID, friendID)
+	if err != nil {
+		writeError(w, 500, "could not update list")
+		return
+	}
 	if !ok {
-		writeError(w, 400, "can only add friends or followed fediverse/bluesky accounts to lists")
+		writeError(w, 400, notListableMsg)
 		return
 	}
 
-	s.db.Exec(`INSERT INTO friend_group_members (group_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, groupID, friendID)
+	if _, err := s.db.Exec(`INSERT INTO friend_group_members (group_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, groupID, friendID); err != nil {
+		writeError(w, 500, "could not update list")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"message": "added to group"})
 }
 
@@ -446,15 +606,207 @@ func (s *Service) RemoveFromGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "groupID")
 	friendID := chi.URLParam(r, "friendID")
 
-	var ownerID string
-	s.db.QueryRow(`SELECT user_id FROM friend_groups WHERE id = $1`, groupID).Scan(&ownerID)
-	if ownerID != userID {
+	owns, err := s.ownsGroup(userID, groupID)
+	if err != nil {
+		writeError(w, 500, "could not update list")
+		return
+	}
+	if !owns {
 		writeError(w, 403, "forbidden")
 		return
 	}
 
-	s.db.Exec(`DELETE FROM friend_group_members WHERE group_id = $1 AND friend_id = $2`, groupID, friendID)
+	if _, err := uuid.Parse(friendID); err == nil {
+		if _, err := s.db.Exec(`DELETE FROM friend_group_members WHERE group_id = $1 AND friend_id = $2`, groupID, friendID); err != nil {
+			writeError(w, 500, "could not update list")
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]string{"message": "removed from group"})
+}
+
+// ── One account across all lists (AGORA-395) ─────────────────────────────────
+//
+// The add-to-lists modal used to learn an account's membership by fetching
+// every list's full member list, one request per list, and to save by sending
+// one add or remove per changed list, all in parallel. Any of those requests
+// failing (a burst over the API rate limit was enough) left the modal guessing
+// at membership and applied whichever writes happened to get through. These two
+// replace both fan-outs with a single request each, and the write is all or
+// nothing.
+
+// membershipsOf returns the IDs of userID's lists that friendID is on.
+func membershipsOf(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, userID, friendID string) ([]string, error) {
+	rows, err := q.Query(`
+		SELECT g.id
+		FROM friend_groups g
+		JOIN friend_group_members m ON m.group_id = g.id
+		WHERE g.user_id = $1 AND m.friend_id = $2
+		ORDER BY g.name
+	`, userID, friendID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListMemberships answers GET /friend-groups/memberships/{friendID} with
+// {"group_ids": [...]}, the caller's lists the account is on.
+func (s *Service) ListMemberships(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	friendID := chi.URLParam(r, "friendID")
+	if _, err := uuid.Parse(friendID); err != nil {
+		writeError(w, 400, "invalid account id")
+		return
+	}
+
+	ids, err := membershipsOf(s.db, userID, friendID)
+	if err != nil {
+		writeError(w, 500, "could not load this account's lists")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"group_ids": ids})
+}
+
+// SetMemberships answers PUT /friend-groups/memberships/{friendID} with a body
+// of {"add": [...], "remove": [...]} list IDs. Every change is applied in one
+// transaction or none is, and the response is the resulting membership in the
+// same shape ListMemberships returns.
+//
+// It takes the changes rather than a full replacement set so that a list the
+// client never showed (made in another tab after the modal opened, say) is left
+// alone. Adding to a list the account is already on, or removing from one it is
+// not on, is a no-op, so a retry after an unknown outcome is safe.
+func (s *Service) SetMemberships(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+	friendID := chi.URLParam(r, "friendID")
+	if _, err := uuid.Parse(friendID); err != nil {
+		writeError(w, 400, "invalid account id")
+		return
+	}
+
+	var req struct {
+		Add    []string `json:"add"`
+		Remove []string `json:"remove"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid request")
+		return
+	}
+
+	add, okAdd := uuidSet(req.Add)
+	remove, okRemove := uuidSet(req.Remove)
+	if !okAdd || !okRemove {
+		writeError(w, 400, "invalid list id")
+		return
+	}
+	all := append(keys(add), keys(remove)...)
+	for id := range add {
+		if remove[id] {
+			writeError(w, 400, "a list can't be both added and removed")
+			return
+		}
+	}
+
+	if len(add) > 0 {
+		ok, err := s.canList(userID, friendID)
+		if err != nil {
+			writeError(w, 500, "could not update lists")
+			return
+		}
+		if !ok {
+			writeError(w, 400, notListableMsg)
+			return
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "could not update lists")
+		return
+	}
+	defer tx.Rollback()
+
+	// Every list named has to be the caller's. Locking them also keeps one from
+	// being deleted between this check and the writes below.
+	if len(all) > 0 {
+		var owned int
+		if err := tx.QueryRow(`
+			SELECT COUNT(*) FROM (
+				SELECT id FROM friend_groups WHERE user_id = $1 AND id = ANY($2::uuid[]) FOR SHARE
+			) g
+		`, userID, pq.Array(all)).Scan(&owned); err != nil {
+			writeError(w, 500, "could not update lists")
+			return
+		}
+		if owned != len(all) {
+			writeError(w, 409, "one of these lists no longer exists")
+			return
+		}
+	}
+
+	if len(add) > 0 {
+		if _, err := tx.Exec(`
+			INSERT INTO friend_group_members (group_id, friend_id)
+			SELECT unnest($1::uuid[]), $2
+			ON CONFLICT DO NOTHING
+		`, pq.Array(keys(add)), friendID); err != nil {
+			writeError(w, 500, "could not update lists")
+			return
+		}
+	}
+	if len(remove) > 0 {
+		if _, err := tx.Exec(`
+			DELETE FROM friend_group_members WHERE friend_id = $1 AND group_id = ANY($2::uuid[])
+		`, friendID, pq.Array(keys(remove))); err != nil {
+			writeError(w, 500, "could not update lists")
+			return
+		}
+	}
+
+	ids, err := membershipsOf(tx, userID, friendID)
+	if err != nil {
+		writeError(w, 500, "could not update lists")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "could not update lists")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"group_ids": ids})
+}
+
+// uuidSet dedupes ids in canonical form (so two spellings of one ID count
+// once), reporting false if any of them is not a UUID.
+func uuidSet(ids []string) (map[string]bool, bool) {
+	set := map[string]bool{}
+	for _, id := range ids {
+		u, err := uuid.Parse(id)
+		if err != nil {
+			return nil, false
+		}
+		set[u.String()] = true
+	}
+	return set, true
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -464,10 +816,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-func domainFromCfg(db *store.DB) string {
-	var domain string
-	db.QueryRow(`SELECT value FROM instance_settings WHERE key = 'instance_domain'`).Scan(&domain)
-	return domain
 }

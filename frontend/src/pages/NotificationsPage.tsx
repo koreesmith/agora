@@ -3,9 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { notificationsApi, friendsApi } from '../api'
 import { formatDistanceToNow } from 'date-fns'
-import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud } from 'lucide-react'
+import { Bell, Heart, MessageCircle, UserPlus, UserCheck, UserX, Repeat2, Users, CheckCircle, XCircle, PenLine, ShieldAlert, BookOpen, Globe, Cloud, AlertCircle } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
 import { renderName } from '../components/feed/CommentsSection'
+import { REACTION_MAP } from '../utils/reactions'
 
 const typeIcon: Record<string, React.ReactNode> = {
   friend_request:        <UserPlus size={16} className="text-blue-500" />,
@@ -33,11 +34,44 @@ const typeIcon: Record<string, React.ReactNode> = {
   page_member_invite:    <UserPlus size={16} className="text-agora-500" />,
   fediverse_post:        <Globe size={16} className="text-sky-500" />,
   atproto_post:          <Cloud size={16} className="text-sky-500" />,
+  // AGORA-313: UserPlus marks these as follows the way friend_request does,
+  // and the sky tint carries the "from another network" cue the two post
+  // types above already use. The pair share an icon deliberately: which
+  // network it came from is in the text, and friend_request/waitlist_join set
+  // the precedent that near-related types can look alike.
+  fediverse_follow:      <UserPlus size={16} className="text-sky-500" />,
+  atproto_follow:        <UserPlus size={16} className="text-sky-500" />,
+
+  // AGORA-314: admin-attention type, so it takes the amber tint new_report
+  // and waitlist_join use rather than the sky one the "from another network"
+  // types share. What matters here is that an admin should look at it, not
+  // which network it came from.
+  federation_request:    <Globe size={16} className="text-amber-500" />,
+
+  // Custom domain handles (AGORA-287) — see systemNotifText below for why
+  // these are their own shape rather than another "<actor> did a thing".
+  custom_domain_live:     <CheckCircle size={16} className="text-green-500" />,
+  custom_domain_verified: <Globe size={16} className="text-amber-500" />,
+  custom_domain_failed:   <AlertCircle size={16} className="text-red-400" />,
+  custom_domain_lost:     <AlertCircle size={16} className="text-red-500" />,
+  custom_domain_rejected: <XCircle size={16} className="text-red-400" />,
 }
 
-const REACTION_EMOJIS: Record<string, string> = {
-  like: '❤️', love: '😍', laugh: '😂', angry: '😡',
-  care: '🤗', pride: '🏳️‍🌈', thankful: '🙏', vomit: '🤮',
+// AGORA-287: custom domain notifications come from the instance itself, not
+// from another person — there's no actor to name, and naming the admin who
+// reviewed a request would only invite them to be argued with personally.
+// They render as a whole sentence with the domain (carried in `data`) inlined,
+// rather than the "<actor> <predicate>" shape every other type is built from.
+const systemNotifText: Record<string, (domain: string) => string> = {
+  custom_domain_live:     d => `${d} is verified and live — it's your handle on Bluesky now`,
+  custom_domain_verified: d => `${d} is verified and waiting for an administrator to approve it`,
+  custom_domain_failed:   d => `We couldn't verify ${d} — tap to see what went wrong`,
+  custom_domain_lost:     d => `${d} stopped verifying, so your handle has gone back to the one this instance issued you`,
+  custom_domain_rejected: d => `Your request to use ${d} as your handle was declined`,
+  // AGORA-314: same shape and for the same reason: the "actor" is a server,
+  // not a person, so there is no name to lead with and `data` carries the
+  // domain.
+  federation_request:     d => `${d} has started federating with this instance`,
 }
 
 const notifText: Record<string, string> = {
@@ -48,7 +82,7 @@ const notifText: Record<string, string> = {
   post_reaction:         'reacted to your post',
   comment_reaction:      'reacted to your comment',
   post_comment:          'commented on your post',
-  post_repost:           'shared your post',
+  post_repost:           'reposted your post',
   post_mention:          'mentioned you in a post',
   comment_reply:         'replied to your comment',
   user_post:             'made a new post',
@@ -66,12 +100,20 @@ const notifText: Record<string, string> = {
   page_member_invite:    'invited you to join a page as a team member',
   fediverse_post:        'posted something new on the fediverse',
   atproto_post:          'posted something new on Bluesky',
+  fediverse_follow:      'followed you from the fediverse',
+  atproto_follow:        'followed you on Bluesky',
 }
 
 function notifTarget(n: any): string | null {
   switch (n.type) {
     case 'friend_request':
     case 'friend_accepted':
+    // AGORA-313: a follow has no post to land on, so it routes to the
+    // follower. Remote stubs carry the synthetic handle@domain username
+    // upsertRemoteAPUser/getOrCreateRemoteATUser build, which /profile
+    // already resolves.
+    case 'fediverse_follow':
+    case 'atproto_follow':
       return n.actor_username ? `/profile/${n.actor_username}` : null
     case 'post_like':
     case 'comment_like':
@@ -103,6 +145,14 @@ function notifTarget(n: any): string | null {
       return '/admin?tab=reports'
     case 'waitlist_join':
       return '/admin?tab=waitlist'
+    case 'federation_request':
+      return '/admin?tab=federation'
+    case 'custom_domain_live':
+    case 'custom_domain_verified':
+    case 'custom_domain_failed':
+    case 'custom_domain_lost':
+    case 'custom_domain_rejected':
+      return '/settings?tab=bluesky'
     default:
       return null
   }
@@ -270,8 +320,19 @@ function NotifAvatar({ n }: { n: any }) {
 }
 
 function NotifBody({ n }: { n: any }) {
+  const system = systemNotifText[n.type]
+  if (system) {
+    return (
+      <div className="flex-1 min-w-0">
+        <p className="text-sm">{system(n.data || 'your custom domain')}</p>
+        <p className="text-xs text-agora-400 mt-0.5">
+          {formatDistanceToNow(new Date(n.created_at), { addSuffix: true })}
+        </p>
+      </div>
+    )
+  }
   const reactionEmoji = (n.type === 'post_reaction' || n.type === 'comment_reaction') && n.data
-    ? ` ${REACTION_EMOJIS[n.data] || ''}` : ''
+    ? ` ${REACTION_MAP[n.data]?.emoji || ''}` : ''
   const actorText = n.grouped
     ? groupedActorText(n.actors ?? [], n.count ?? 1)
     : renderName(n.actor_display_name || n.actor_username, n.actor_emojis)

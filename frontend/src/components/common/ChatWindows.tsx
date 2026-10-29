@@ -8,6 +8,7 @@ import { useChatStore } from '../../store/chat'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { isGifUrl } from '../../utils/gif'
 import { renderContent } from '../feed/CommentsSection'
+import { REACTIONS, reactionDisplay } from '../../utils/reactions'
 import { formatDistanceToNow } from 'date-fns'
 
 interface Participant {
@@ -46,8 +47,6 @@ interface Conversation {
 function otherParticipant(conv: Conversation, myId: string) {
   return conv.participants?.find(p => p.user_id !== myId)
 }
-
-const REACTIONS = ['❤️', '😂', '😮', '😢', '👍', '👎']
 
 // ── Single floating chat window ───────────────────────────────────────────────
 
@@ -225,8 +224,8 @@ function ChatWindow({ convId, minimized, index }: { convId: string; minimized: b
                       {showReactionPicker === msg.id && (
                         <div className={`absolute bottom-6 ${isOwn ? 'right-0' : 'left-0'} bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-xl shadow-lg p-1 flex gap-0.5 z-10`}>
                           {REACTIONS.map(r => (
-                            <button key={r} onClick={() => reactMsg.mutate({ id: msg.id, reaction: r })}
-                              className="text-base hover:scale-125 transition-transform p-0.5">{r}</button>
+                            <button key={r.type} title={r.label} onClick={() => reactMsg.mutate({ id: msg.id, reaction: r.type })}
+                              className="text-base hover:scale-125 transition-transform p-0.5">{r.emoji}</button>
                           ))}
                         </div>
                       )}
@@ -261,9 +260,10 @@ function ChatWindow({ convId, minimized, index }: { convId: string; minimized: b
                         {Object.entries(msg.reactions.reduce((acc, r) => {
                           acc[r.reaction] = (acc[r.reaction] || 0) + 1
                           return acc
-                        }, {} as Record<string, number>)).map(([emoji, count]) => (
-                          <span key={emoji} className="text-xs bg-agora-100 dark:bg-agora-700 rounded-full px-1.5 py-0.5">
-                            {emoji} {count}
+                        }, {} as Record<string, number>)).map(([type, count]) => (
+                          <span key={type} title={reactionDisplay(type).label}
+                            className="text-xs bg-agora-100 dark:bg-agora-700 rounded-full px-1.5 py-0.5">
+                            {reactionDisplay(type).emoji} {count}
                           </span>
                         ))}
                       </div>

@@ -41,6 +41,7 @@ import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
 import PageSettingsPage  from './pages/PageSettingsPage'
 import ExplorePage       from './pages/ExplorePage'
+import WelcomePage       from './pages/WelcomePage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -98,6 +99,9 @@ function AppRoutes() {
       <Route path="/verify-email-change" element={<VerifyEmailChangePage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/change-password" element={<RequireAuth><ChangePasswordPage /></RequireAuth>} />
+      {/* AGORA-388: the getting started wizard is a full page of its own,
+          outside the member Layout, which is what redirects new accounts here. */}
+      <Route path="/welcome"        element={<RequireAuth><WelcomePage /></RequireAuth>} />
       <Route path="/privacy"        element={<PrivacyPage />} />
       <Route path="/terms"          element={<TermsPage />} />
       <Route path="/support"        element={<SupportPage />} />

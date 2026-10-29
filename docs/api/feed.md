@@ -57,7 +57,7 @@ Author or admin only. Soft-deletes.
 **Response 200:** `{"like_count": 4}`
 
 ## `POST /api/posts/{id}/react`
-**Body:** `{"type": "like|love|laugh|wow|angry|care|pride|thankful|vomit"}`
+**Body:** `{"type": "like|love|laugh|wow|care|thankful|pride|sad|angry|dislike"}`
 **Response 200:** Reaction summary
 
 ## `DELETE /api/posts/{id}/react`

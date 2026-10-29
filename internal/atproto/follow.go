@@ -2,6 +2,7 @@ package atproto
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -82,7 +83,26 @@ func (s *Service) resolveBlueskyActor(ctx context.Context, actor string) (*blues
 // this instance's own follows of them), so there's no local count to read;
 // the AppView's own profile view already returns all four fields in one
 // call, the same one resolveBlueskyActor already uses.
+// remoteActorStatsTTL mirrors federation's own constant of the same name
+// (AGORA-355) — kept as a separate copy rather than a shared import since
+// the two packages don't otherwise depend on each other, only on the same
+// underlying remote_actor_stats table.
+const remoteActorStatsTTL = 30 * time.Minute
+
 func (s *Service) GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
+	if followers, following, posts, bio, _, fetchedAt, hit := s.cachedRemoteActorStats(did); hit {
+		if time.Since(fetchedAt) >= remoteActorStatsTTL {
+			go s.fetchAndCacheRemoteActorStats(did)
+		}
+		return followers, following, posts, bio, true
+	}
+	return s.fetchAndCacheRemoteActorStats(did)
+}
+
+// fetchAndCacheRemoteActorStats does the live AppView call GetRemoteActorStats
+// used to do unconditionally on every call (AGORA-355) — now only reached on
+// a cache miss or background refresh.
+func (s *Service) fetchAndCacheRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
 	profile, err := bsky.ActorGetProfile(context.Background(), s.appviewClient(), did)
 	if err != nil || profile == nil {
 		return 0, 0, 0, "", false
@@ -99,7 +119,32 @@ func (s *Service) GetRemoteActorStats(did string) (followers, following, posts i
 	if profile.Description != nil {
 		bio = *profile.Description
 	}
+	s.cacheRemoteActorStats(did, followers, following, posts, bio)
 	return followers, following, posts, bio, true
+}
+
+// cachedRemoteActorStats/cacheRemoteActorStats share the remote_actor_stats
+// table with federation's own identically-named helpers (see that package's
+// activitypub.go) — the same table, keyed by either an ap_actor_url or a
+// Bluesky DID, which never collide in practice (one always starts with
+// "https://", the other always with "did:"). locked has no AT Proto
+// equivalent, so it's always written/read as false here.
+func (s *Service) cachedRemoteActorStats(actorKey string) (followers, following, posts int, bio string, locked bool, fetchedAt time.Time, ok bool) {
+	err := s.db.QueryRow(`
+		SELECT followers, following, posts, bio, locked, fetched_at FROM remote_actor_stats WHERE actor_key = $1
+	`, actorKey).Scan(&followers, &following, &posts, &bio, &locked, &fetchedAt)
+	return followers, following, posts, bio, locked, fetchedAt, err == nil
+}
+
+func (s *Service) cacheRemoteActorStats(actorKey string, followers, following, posts int, bio string) {
+	if _, err := s.db.Exec(`
+		INSERT INTO remote_actor_stats (actor_key, followers, following, posts, bio, locked, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, false, NOW())
+		ON CONFLICT (actor_key) DO UPDATE
+		  SET followers = $2, following = $3, posts = $4, bio = $5, fetched_at = NOW()
+	`, actorKey, followers, following, posts, bio); err != nil {
+		log.Printf("atproto: failed to cache remote actor stats for %s: %v", actorKey, err)
+	}
 }
 
 // ResolveBlueskyHandle serves the "search a Bluesky handle" step (AGORA-195)
@@ -346,6 +391,133 @@ func (s *Service) ListBlueskyFollowing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{"following": list})
+}
+
+// followerProfileBatchSize caps each app.bsky.actor.getProfiles call used to
+// hydrate unresolved at_followers rows — 25 is the same undocumented-but-
+// established limit followsMeBatch's own comment cites for getRelationships.
+const followerProfileBatchSize = 25
+
+// ListBlueskyFollowers returns the caller's own inbound Bluesky followers
+// (AGORA-348), self-scoped only. at_followers stores nothing but the bare DID
+// (see the table's own doc comment in internal/store/store.go), so an entry
+// with no cached stub yet is hydrated here via a batched
+// app.bsky.actor.getProfiles call rather than one profile fetch per follower.
+//
+// Unlike the fediverse side, this list is only ever as fresh as the last
+// pollFollowersFor walk (AT Proto never delivers a follow to us — see that
+// function's own doc comment), so the response also reports whether this
+// account has ever been seeded and when it last synced, letting the caller
+// distinguish "no followers yet" from "not synced yet" rather than rendering
+// both as an empty list.
+func (s *Service) ListBlueskyFollowers(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromCtx(r.Context())
+
+	rows, err := s.db.Query(`
+		SELECT atf.follower_did, atf.first_seen_at,
+		       COALESCE(u.id::text, ''), COALESCE(u.username, ''), COALESCE(u.display_name, ''), COALESCE(u.avatar_url, ''),
+		       EXISTS(SELECT 1 FROM at_following af WHERE af.local_user_id = $1 AND af.remote_did = atf.follower_did)
+		FROM at_followers atf
+		LEFT JOIN users u ON u.atproto_remote_did = atf.follower_did
+		WHERE atf.local_user_id = $1
+		ORDER BY atf.first_seen_at DESC
+	`, userID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer rows.Close()
+
+	type followerEntry struct {
+		DID         string `json:"did"`
+		CreatedAt   string `json:"created_at"`
+		UserID      string `json:"user_id,omitempty"`
+		Handle      string `json:"handle,omitempty"`
+		DisplayName string `json:"display_name,omitempty"`
+		AvatarURL   string `json:"avatar_url,omitempty"`
+		// The inverse of ListBlueskyFollowing's FollowsBack — whether the
+		// caller already follows this follower back.
+		FollowingBack bool `json:"following_back"`
+	}
+	var list []followerEntry
+	for rows.Next() {
+		var f followerEntry
+		var createdAt time.Time
+		if rows.Scan(&f.DID, &createdAt, &f.UserID, &f.Handle, &f.DisplayName, &f.AvatarURL, &f.FollowingBack) == nil {
+			f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+			list = append(list, f)
+		}
+	}
+
+	var unresolvedIdx []int
+	var unresolvedDIDs []string
+	for i, f := range list {
+		if f.UserID == "" {
+			unresolvedIdx = append(unresolvedIdx, i)
+			unresolvedDIDs = append(unresolvedDIDs, f.DID)
+		}
+	}
+	if len(unresolvedDIDs) > 0 {
+		client := s.appviewClient()
+		profiles := map[string]*bsky.ActorDefs_ProfileViewDetailed{}
+		for start := 0; start < len(unresolvedDIDs); start += followerProfileBatchSize {
+			end := start + followerProfileBatchSize
+			if end > len(unresolvedDIDs) {
+				end = len(unresolvedDIDs)
+			}
+			out, err := bsky.ActorGetProfiles(r.Context(), client, unresolvedDIDs[start:end])
+			if err != nil {
+				log.Printf("atproto: could not batch-resolve followers for %s: %v", userID, err)
+				continue
+			}
+			for _, p := range out.Profiles {
+				if p != nil {
+					profiles[p.Did] = p
+				}
+			}
+		}
+		for _, idx := range unresolvedIdx {
+			p, ok := profiles[list[idx].DID]
+			if !ok {
+				continue // unresolvable — omitted below, not returned as a bare DID
+			}
+			var displayName, avatarURL string
+			if p.DisplayName != nil {
+				displayName = *p.DisplayName
+			}
+			if p.Avatar != nil {
+				avatarURL = *p.Avatar
+			}
+			uid, err := s.getOrCreateRemoteATUser(p.Did, p.Handle, displayName, avatarURL, "")
+			if err != nil {
+				continue
+			}
+			list[idx].UserID = uid
+			list[idx].Handle = p.Handle
+			list[idx].DisplayName = displayName
+			list[idx].AvatarURL = avatarURL
+		}
+	}
+
+	out := list[:0]
+	for _, f := range list {
+		if f.UserID != "" {
+			out = append(out, f)
+		}
+	}
+	if out == nil {
+		out = []followerEntry{}
+	}
+
+	var seeded bool
+	var syncedAt sql.NullTime
+	s.db.QueryRow(`SELECT atproto_followers_seeded, atproto_followers_synced_at FROM users WHERE id = $1`, userID).
+		Scan(&seeded, &syncedAt)
+	resp := map[string]any{"followers": out, "seeded": seeded}
+	if syncedAt.Valid {
+		resp["synced_at"] = syncedAt.Time.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, 200, resp)
 }
 
 // getRelationshipsBatchSize caps each app.bsky.graph.getRelationships call's

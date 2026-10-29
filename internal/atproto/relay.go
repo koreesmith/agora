@@ -54,7 +54,23 @@ func (s *Service) StartRelayCrawl(ctx context.Context) {
 	const maxBackoff = 24 * time.Hour
 	const reconfirmInterval = 6 * time.Hour
 	const disabledPollInterval = 5 * time.Minute
+	// startupGrace gives the reverse-proxy chain in front of this instance
+	// (docker-compose's frontend, and nginx behind it) time to finish coming
+	// up before the first crawl request goes out. Without it, this goroutine
+	// starts as soon as the backend process does, which in the default
+	// compose stack is well before frontend/nginx are listening — the
+	// relay's synchronous describeServer probe then hits a closed port and
+	// bounces back as a spurious "server is not a PDS" failure on every
+	// fresh start, even though the retry loop below would recover on its
+	// own a minute later anyway.
+	const startupGrace = 30 * time.Second
 	backoff := time.Minute
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(startupGrace):
+	}
 
 	for {
 		// AGORA-193: re-checked every cycle rather than once at startup —

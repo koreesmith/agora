@@ -84,6 +84,16 @@ func TestHtmlToPlainText(t *testing.T) {
 			want: "my blog (https://example.com/blog)",
 		},
 		{
+			name: "scheme-less link text that already links to its href is kept (AGORA-375)",
+			in:   `move on. <a href="https://bit.ly/4jFFzI0">bit.ly/4jFFzI0</a>`,
+			want: "move on. bit.ly/4jFFzI0",
+		},
+		{
+			name: "shortened link text is replaced by its full href (AGORA-375)",
+			in:   `<a href="https://example.com/long/path">example.com/long/pa…</a>`,
+			want: "https://example.com/long/path",
+		},
+		{
 			name: "empty link text falls back to the bare href",
 			in:   `<a href="https://example.com"></a>`,
 			want: "https://example.com",
@@ -107,5 +117,76 @@ func TestHtmlToPlainText(t *testing.T) {
 				t.Errorf("HTMLToPlainText(%s) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// AGORA-308: a remote actor's icon/image is spec'd as ActivityStreams
+// Image|Link, which allows either a single object or an array of them.
+// Decoding straight into a single-object struct used to throw a type-mismatch
+// error that aborted the whole actor decode the moment a remote server (e.g.
+// Threads) sent an array instead, discarding an otherwise-valid profile.
+func TestApImageFieldUnmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{
+			name: "single object (Mastodon-style)",
+			json: `{"type":"Image","url":"https://example.com/avatar.png"}`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "array of objects (Threads-style)",
+			json: `[{"type":"Image","url":"https://example.com/avatar.png"}]`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "array with an empty-url entry before a populated one",
+			json: `[{"type":"Image","url":""},{"type":"Image","url":"https://example.com/avatar.png"}]`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "bare string URL (Link shorthand)",
+			json: `"https://example.com/avatar.png"`,
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "null",
+			json: `null`,
+			want: "",
+		},
+		{
+			name: "empty array",
+			json: `[]`,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f apImageField
+			if err := f.UnmarshalJSON([]byte(tc.json)); err != nil {
+				t.Fatalf("UnmarshalJSON(%s) returned error: %v", tc.json, err)
+			}
+			if f.URL != tc.want {
+				t.Errorf("UnmarshalJSON(%s).URL = %q, want %q", tc.json, f.URL, tc.want)
+			}
+		})
+	}
+}
+
+// AGORA-375: an outbound Note links a scheme-less URL too, to https://, so
+// it is clickable on Mastodon-style clients the same as it is on Agora.
+func TestLinkifyURLs(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"see https://example.com/a.", `see <a href="https://example.com/a" rel="nofollow noopener noreferrer" target="_blank">https://example.com/a</a>.`},
+		{"see bit.ly/4jFFzI0!", `see <a href="https://bit.ly/4jFFzI0" rel="nofollow noopener noreferrer" target="_blank">bit.ly/4jFFzI0</a>!`},
+		{"edit readme.md, mail bob@example.com", "edit readme.md, mail bob@example.com"},
+	}
+	for _, tc := range cases {
+		if got := linkifyURLs(tc.in); got != tc.want {
+			t.Errorf("linkifyURLs(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

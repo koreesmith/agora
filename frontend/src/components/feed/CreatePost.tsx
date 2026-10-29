@@ -1,16 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video } from 'lucide-react'
-import { feedApi, friendsApi, previewApi, pagesApi } from '../../api'
+import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video, Info } from 'lucide-react'
+import { feedApi, friendsApi, previewApi, pagesApi, authApi } from '../../api'
 import api from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
+import { findFirstUrl } from '../../utils/linkify'
+import AltTextModal from '../common/AltTextModal'
 
-// Detect the first URL in a string
-const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/i
 
 interface Preview {
   url: string
@@ -20,11 +20,18 @@ interface Preview {
   domain: string
 }
 
-export default function CreatePost() {
+// AGORA-391: autoFocus is for "Write your first post" at the end of the
+// getting started wizard, which lands on the feed ready to type.
+export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) {
   const { user } = useAuthStore()
   const qc = useQueryClient()
   const [content, setContent] = useState('')
   const [imageUrls, setImageUrls] = useState<string[]>([])
+  // AGORA-400: descriptions keyed by image URL, so adding, removing and
+  // reordering images never leaves one describing the wrong picture.
+  const [altByUrl, setAltByUrl] = useState<Record<string, string>>({})
+  const [altEditing, setAltEditing] = useState<string | null>(null)
+  const imageAlts = imageUrls.map(u => altByUrl[u] || '')
   const [visibility, setVisibility] = useState('friends')
   // Post-as-page identity selector
   const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
@@ -42,6 +49,13 @@ export default function CreatePost() {
   const [groupTagQuery, setGroupTagQuery] = useState('')
   const groupDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [friendListId, setFriendListId] = useState('')
+  // AGORA-374: per-post network targeting, only meaningful for Public.
+  // Defaults to "on" for every network — the untouched state that produces
+  // the same payload (no federate_activitypub/federate_atproto/
+  // external_only fields at all) as before this control existed.
+  const [agoraEnabled, setAgoraEnabled] = useState(true)
+  const [federateAP, setFederateAP] = useState(true)
+  const [federateATProto, setFederateATProto] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [showUploadModal, setShowUploadModal] = useState(false)
   const uploadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -68,6 +82,26 @@ export default function CreatePost() {
   })
   const friendLists = groupsData?.groups || []
 
+  // AGORA-374: activitypub_enabled/atproto_enabled aren't part of the login
+  // response the auth store is seeded from (see SettingsPage's own
+  // 'my-profile' query, which this shares a cache key with), so a user who
+  // hasn't visited Settings this session would otherwise never see either
+  // chip even with both networks on. Falls back to the store's copy so a
+  // component that already populated it (e.g. Settings, visited earlier in
+  // the session) doesn't flash the chips away while this query is in flight.
+  const { data: freshProfile } = useQuery({
+    queryKey: ['my-profile'],
+    queryFn: () => authApi.me().then(r => r.data),
+    staleTime: 60_000,
+  })
+  const apEnabled = freshProfile?.activitypub_enabled ?? user?.activitypub_enabled
+  const atprotoEnabled = freshProfile?.atproto_enabled ?? user?.atproto_enabled
+  // AGORA-345: only the list actually being posted to, so the reach notice
+  // below tracks the picker rather than describing every list at once.
+  const selectedList = visibility === 'group'
+    ? friendLists.find((g: any) => g.id === friendListId)
+    : null
+
   // Load pages owned by current user (for post-as-page)
   const { data: myPagesData } = useQuery({
     queryKey: ['pages-mine'],
@@ -81,8 +115,9 @@ export default function CreatePost() {
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
 
-    const match = content.match(URL_RE)
-    const url = match ? match[0].replace(/[.,!?)]+$/, '') : '' // strip trailing punctuation
+    // First URL, scheme-less ones like bit.ly/... included (AGORA-375).
+    const found = findFirstUrl(content)
+    const url = found?.href ?? ''
 
     if (!url) {
       setPreview(null)
@@ -98,7 +133,7 @@ export default function CreatePost() {
       if (imageUrls.length === 0) {
         setImageUrls([url])
         // Strip the URL from the content so it doesn't show as text
-        setContent(c => c.replace(url, '').trim())
+        setContent(c => c.replace(found!.text, '').trim())
       }
       return
     }
@@ -153,11 +188,21 @@ export default function CreatePost() {
         return pagesApi.createPost(selectedPageSlug, {
           content,
           image_urls: imageUrls,
+          image_alts: imageAlts,
         })
       }
+      // AGORA-374: omit the targeting fields entirely when the author left
+      // the control at its default (everything on) — the payload for anyone
+      // who never touches it is byte-for-byte what it was before this
+      // control existed.
+      const usingDefaultTargeting = agoraEnabled && federateAP && federateATProto
+      const targeting = visibility === 'public' && !usingDefaultTargeting
+        ? { federate_activitypub: federateAP, federate_atproto: federateATProto, external_only: !agoraEnabled }
+        : {}
       return feedApi.createPost({
         content,
         image_urls: imageUrls,
+        image_alts: imageAlts,
         video_url: videoUrl || undefined,
         video_thumb_url: videoThumbUrl || undefined,
         visibility,
@@ -172,16 +217,18 @@ export default function CreatePost() {
         poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
         poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
         poll_expires_hours: pollEnabled ? pollExpiresHours : 0,
+        ...targeting,
       })
     },
     onSuccess: () => {
-      setContent(''); setImageUrls([]); setFriendListId('')
+      setContent(''); setImageUrls([]); setAltByUrl({}); setFriendListId('')
       stopVideoPolling(); localStorage.removeItem('agora_pending_video_job')
       setVideoUrl(''); setVideoThumbUrl(''); setVideoProcessing(false)
       setTwEnabled(false); setTwLabel('')
       setPollEnabled(false); setPollOptions(['', ''])
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
       setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
+      setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true)
       qc.invalidateQueries({ queryKey: ['feed'] })
     },
   })
@@ -310,9 +357,14 @@ export default function CreatePost() {
   ]
 
   const validPoll = !pollEnabled || pollOptions.filter(o => o.trim()).length >= 2
+  // AGORA-374: at least one of Agora/Fediverse/Bluesky must stay on — turning
+  // all of them off would post nowhere at all. Irrelevant outside Public,
+  // where the targeting control isn't shown and the three flags stay at
+  // their default "on".
+  const validTargeting = visibility !== 'public' || agoraEnabled || federateAP || federateATProto
   const canPost = (content.trim() || imageUrls.length > 0 || videoUrl || (pollEnabled && pollOptions.filter(o => o.trim()).length >= 2))
     && !create.isPending && !uploading && !uploadingVideo && !videoProcessing
-    && (!twEnabled || twLabel.trim()) && validPoll
+    && (!twEnabled || twLabel.trim()) && validPoll && validTargeting
 
   return (
     <>
@@ -413,6 +465,7 @@ export default function CreatePost() {
             onPaste={handlePaste}
             placeholder="What's on your mind? Use @username to tag someone."
             rows={3}
+            autoFocus={autoFocus}
             autoComplete="off"
             data-1p-ignore="true"
             data-lpignore="true"
@@ -486,13 +539,24 @@ export default function CreatePost() {
               {isGifUrl(url) && (
                 <span className="absolute top-1 left-1 bg-black/60 text-white text-xs font-bold px-1 py-0.5 rounded z-10">GIF</span>
               )}
-              <img src={url} alt="" className={`rounded-lg w-full object-cover ${imageUrls.length === 1 ? 'max-h-48' : 'h-32'} ${isGifUrl(url) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
-              <button onClick={() => setImageUrls(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
+              <img src={url} alt={altByUrl[url] || ''} className={`rounded-lg w-full object-cover ${imageUrls.length === 1 ? 'max-h-48' : 'h-32'} ${isGifUrl(url) ? '' : 'bg-agora-50 dark:bg-agora-900'}`} />
+              <button onClick={() => setImageUrls(prev => prev.filter((_, i) => i !== idx))} aria-label="Remove image" className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
                 <X size={10} />
+              </button>
+              {/* AGORA-400 */}
+              <button type="button" onClick={() => setAltEditing(url)}
+                aria-label={altByUrl[url] ? 'Edit image description' : 'Add image description'}
+                className="absolute bottom-1 left-1 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-black/70 text-white hover:bg-black/85">
+                {altByUrl[url] ? 'ALT ✓' : '+ ALT'}
               </button>
             </div>
           ))}
         </div>
+      )}
+      {altEditing && (
+        <AltTextModal imageUrl={altEditing} initial={altByUrl[altEditing] || ''}
+          onSave={alt => setAltByUrl(m => ({ ...m, [altEditing]: alt }))}
+          onClose={() => setAltEditing(null)} />
       )}
 
       {/* Link preview loading */}
@@ -686,7 +750,14 @@ export default function CreatePost() {
         </button>
 
         {/* Visibility */}
-        <select value={visibility} onChange={e => setVisibility(e.target.value)}
+        <select value={visibility} onChange={e => {
+            const v = e.target.value
+            setVisibility(v)
+            // AGORA-374: the targeting control only ever applies to Public —
+            // reset it going into or out of that visibility so a choice made
+            // earlier can't linger and silently apply to a later post.
+            if (v !== 'public') { setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true) }
+          }}
           className="text-xs bg-transparent text-agora-600 dark:text-agora-300 border border-agora-200 dark:border-agora-600 rounded-lg px-2 py-1.5 focus:outline-none">
           {visOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -706,7 +777,110 @@ export default function CreatePost() {
           {create.isPending ? 'Posting…' : 'Post'}
         </button>
       </div>
+
+      {/* AGORA-374: per-post network targeting, offered only for Public —
+          Friends/Friend List posts can't reach an external network at all
+          (AGORA-369's own out-of-scope), so the control stays hidden there
+          rather than offering choices that would do nothing. Hidden entirely
+          when the account has neither network enabled: there is nothing to
+          choose between, only Agora. */}
+      {visibility === 'public' && (apEnabled || atprotoEnabled) && (
+        <div className="flex items-center gap-1.5 flex-wrap pl-13">
+          <span className="text-xs text-agora-400">Post to:</span>
+          <NetworkChip label="Agora" active={agoraEnabled} onClick={() => setAgoraEnabled(v => !v)} />
+          {apEnabled && (
+            <NetworkChip label="Fediverse" active={federateAP} onClick={() => setFederateAP(v => !v)} />
+          )}
+          {atprotoEnabled && (
+            <NetworkChip label="Bluesky" active={federateATProto} onClick={() => setFederateATProto(v => !v)} />
+          )}
+        </div>
+      )}
+      {visibility === 'public' && !agoraEnabled && (
+        <p className={`text-xs pl-13 ${validTargeting ? 'text-agora-400' : 'text-red-500'}`}>
+          {!validTargeting
+            ? 'Pick at least one place for this post to go.'
+            : federateAP && federateATProto
+            ? 'This post will only appear on the Fediverse and Bluesky, not on Agora.'
+            : federateAP
+            ? 'This post will only appear on the Fediverse, not on Agora.'
+            : 'This post will only appear on Bluesky, not on Agora.'}
+        </p>
+      )}
+
+      {/* AGORA-345: quiet unless lossy. Nothing is shown for the ordinary case,
+          because a standing warning on every limited post trains people to
+          ignore it and costs it its value on the one post that needs it. */}
+      <AudienceReach list={selectedList} />
     </div>
     </>
+  )
+}
+
+// NetworkChip is one toggle in AGORA-374's network-targeting control.
+function NetworkChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${
+        active
+          ? 'bg-agora-100 dark:bg-agora-700 border-agora-400 text-agora-700 dark:text-agora-200'
+          : 'border-agora-200 dark:border-agora-600 text-agora-400 hover:border-agora-400'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
+// AudienceReach says what will happen to the members of a limited audience
+// whose servers cannot honour the limit, and says nothing otherwise.
+//
+// Two levels, because the two cases genuinely differ. A Bluesky account is not
+// delivered to at all, which is the closest thing to a defect from the author's
+// point of view. A fediverse account does receive it, and their server does keep
+// it unlisted, but there is no Close Friends concept there and it will not carry
+// replies back to the rest of the list.
+//
+// Named rather than counted: "Dave will not see replies from the rest of this
+// list" is something an author can act on, where "1 member has reduced
+// functionality" is not. Posting is never blocked and the audience is never
+// silently changed; the author chose this list, and the job here is only to see
+// that they are not surprised by it.
+function AudienceReach({ list }: { list: any }) {
+  if (!list) return null
+
+  const names = (all: string[], total: number) => {
+    if (total > all.length) return `${all.join(', ')} and ${total - all.length} other${total - all.length === 1 ? '' : 's'}`
+    if (all.length > 1) return `${all.slice(0, -1).join(', ')} and ${all[all.length - 1]}`
+    return all[0] || ''
+  }
+
+  const bsky = list.bluesky_count > 0
+  const fedi = list.fediverse_count > 0
+  if (!bsky && !fedi) return null
+
+  return (
+    <div className="mt-2 flex items-start gap-2 text-xs text-agora-500 dark:text-agora-400">
+      <Info size={13} className="mt-0.5 flex-shrink-0" />
+      <div className="space-y-0.5">
+        {bsky && (
+          <p>
+            <span className="font-medium">{names(list.bluesky_names, list.bluesky_count)}</span>
+            {list.bluesky_count === 1 ? ' is' : ' are'} on Bluesky, which has no way to receive a post
+            limited to a list, so they will not get this one.
+          </p>
+        )}
+        {fedi && (
+          <p>
+            <span className="font-medium">{names(list.fediverse_names, list.fediverse_count)}</span>
+            {' will get this and their server will keep it unlisted, but it has no concept of this list, '}
+            so replies there will not reach the rest of it.
+          </p>
+        )}
+      </div>
+    </div>
   )
 }

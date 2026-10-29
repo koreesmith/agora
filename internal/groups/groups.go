@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/agora-social/agora/internal/alttext"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/store"
@@ -541,6 +542,7 @@ type GroupPost struct {
 	AuthorRole   string            `json:"author_role"`
 	Content      string            `json:"content"`
 	ImageURL     string            `json:"image_url"`
+	ImageAlt     string            `json:"image_alt,omitempty"` // AGORA-400
 	LikeCount    int               `json:"like_count"`
 	CommentCount int               `json:"comment_count"`
 	Liked        bool              `json:"liked"`
@@ -583,7 +585,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT p.id, p.author_id, u.username, u.display_name, u.avatar_url,
 		       COALESCE(m.role,'') AS author_role,
-		       p.content, p.image_url,
+		       p.content, p.image_url, p.image_alt,
 		       (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 		       (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
 		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
@@ -607,7 +609,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p GroupPost
 		rows.Scan(&p.ID, &p.AuthorID, &p.Username, &p.DisplayName, &p.AvatarURL,
-			&p.AuthorRole, &p.Content, &p.ImageURL,
+			&p.AuthorRole, &p.Content, &p.ImageURL, &p.ImageAlt,
 			&p.LikeCount, &p.CommentCount, &p.Liked, &p.CreatedAt)
 		posts = append(posts, p)
 	}
@@ -751,6 +753,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		Content     string   `json:"content"`
 		ImageURL    string   `json:"image_url"`
 		ImageURLs   []string `json:"image_urls"`
+		ImageAlts   []string `json:"image_alts"` // AGORA-400, in image_urls order
+		ImageAlt    string   `json:"image_alt"`  // with a lone image_url
 		PollOptions []string `json:"poll_options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -777,7 +781,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		req.ImageURL = req.ImageURLs[0]
 	} else if req.ImageURL != "" {
 		req.ImageURLs = []string{req.ImageURL}
+		if len(req.ImageAlts) == 0 {
+			req.ImageAlts = []string{req.ImageAlt}
+		}
 	}
+	imageAlts := alttext.Clean(req.ImageAlts, len(req.ImageURLs))
 
 	if req.Content == "" && req.ImageURL == "" && len(pollOpts) == 0 {
 		writeError(w, 400, "content required"); return
@@ -800,8 +808,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	// Insert photos if multiple (AGORA-174)
 	if len(req.ImageURLs) > 1 {
 		for i, u := range req.ImageURLs {
-			s.db.Exec(`INSERT INTO post_photos (post_id, url, position) VALUES ($1, $2, $3)`, postID, u, i)
+			s.db.Exec(`INSERT INTO post_photos (post_id, url, position, alt) VALUES ($1, $2, $3, $4)`, postID, u, i, imageAlts[i])
 		}
+	}
+	if len(imageAlts) > 0 && imageAlts[0] != "" {
+		s.db.Exec(`UPDATE posts SET image_alt = $1 WHERE id = $2`, imageAlts[0], postID)
 	}
 
 	s.db.Exec(`UPDATE community_groups SET post_count = post_count + 1 WHERE id = $1`, groupID)

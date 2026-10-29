@@ -99,7 +99,11 @@ Soft-deletes (sets `deleted_at`). Content replaced with placeholder in UI.
 ### `ReactMessage(w, r)` / `UnreactMessage(w, r)`
 `POST /api/messages/{id}/react` / `DELETE /api/messages/{id}/react`
 
-**Body (react):** `{"type": "string"}`
+**Body (react):** `{"reaction": "like|love|laugh|wow|care|thankful|pride|sad|angry|dislike"}`
+
+Same reaction set as posts, validated through `store.NormalizeReaction`. Raw
+emoji glyphs are also accepted and rewritten to the type name, since pre-v4.0.0
+mobile builds sent glyphs here and cannot be forced to update.
 
 ### `MarkRead(w, r)`
 `POST /api/conversations/{id}/read`

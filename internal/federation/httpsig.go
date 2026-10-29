@@ -165,17 +165,82 @@ func (s *Service) verifyInboundSignature(r *http.Request, body []byte) (string, 
 		}
 	}
 
-	pubKey, err := s.fetchActorPublicKeySigned(sp.keyID)
+	pubKey, fromCache, err := s.fetchActorPublicKeySigned(sp.keyID)
 	if err != nil {
 		return "", fmt.Errorf("fetch actor public key: %w", err)
 	}
 
 	signingString := buildSigningString(r, sp.headers)
 	hashed := sha256.Sum256([]byte(signingString))
+	verifyErr := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed[:], sp.signature)
+	if verifyErr != nil && fromCache {
+		// The cached key may simply be stale (the remote rotated it since we
+		// last fetched) rather than the signature being forged — one live
+		// re-fetch before giving up, so a rotation doesn't sit broken until
+		// remoteActorKeyTTL expires.
+		if liveKey, liveErr := s.fetchActorPublicKeyLive(sp.keyID); liveErr == nil {
+			verifyErr = rsa.VerifyPKCS1v15(liveKey, crypto.SHA256, hashed[:], sp.signature)
+		}
+	}
+	if verifyErr != nil {
+		return "", fmt.Errorf("signature verification failed: %w", verifyErr)
+	}
+	return strings.SplitN(sp.keyID, "#", 2)[0], nil
+}
+
+// signedFetchMaxSkew bounds how far a signed GET's Date may be from now, so a
+// captured request can't be replayed later to read a private profile.
+const signedFetchMaxSkew = time.Hour
+
+// verifySignedFetchCached (AGORA-381) verifies the HTTP Signature on a GET
+// and returns the signing actor, using only an already-cached public key.
+//
+// It must never fetch a key over the network. Verifying means fetching the
+// requester's actor document, and that fetch is itself a signed GET the
+// requester's server would verify the same way, so two instances that both
+// did this could keep asking each other indefinitely. A friend's key is
+// always cached anyway: friends have exchanged signed activities (the
+// friend request, its Accept, follows) before any of this matters. The cached
+// key is used whatever its age, since the TTL only governs when the inbox
+// path refreshes it.
+func (s *Service) verifySignedFetchCached(r *http.Request) (string, error) {
+	sp, err := parseSignatureHeader(r.Header.Get("Signature"))
+	if err != nil {
+		return "", err
+	}
+	signed := map[string]bool{}
+	for _, h := range sp.headers {
+		signed[strings.ToLower(h)] = true
+	}
+	// Without these a signature made for one request could be presented on
+	// another: a different path, a different host, or much later.
+	for _, h := range []string{"(request-target)", "host", "date"} {
+		if !signed[h] {
+			return "", fmt.Errorf("signature does not cover %s", h)
+		}
+	}
+	date, err := http.ParseTime(r.Header.Get("Date"))
+	if err != nil {
+		return "", fmt.Errorf("bad Date header: %w", err)
+	}
+	if skew := time.Since(date); skew > signedFetchMaxSkew || skew < -signedFetchMaxSkew {
+		return "", errors.New("Date is too far from now")
+	}
+
+	actorURL := strings.SplitN(sp.keyID, "#", 2)[0]
+	pubPEM, _, ok := s.cachedActorPublicKeyPEM(actorURL)
+	if !ok {
+		return "", errors.New("signer's key is not cached")
+	}
+	pubKey, err := parseRSAPublicKeyPEM(pubPEM)
+	if err != nil {
+		return "", err
+	}
+	hashed := sha256.Sum256([]byte(buildSigningString(r, sp.headers)))
 	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed[:], sp.signature); err != nil {
 		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
-	return strings.SplitN(sp.keyID, "#", 2)[0], nil
+	return actorURL, nil
 }
 
 func parseRSAPublicKeyPEM(pemStr string) (*rsa.PublicKey, error) {

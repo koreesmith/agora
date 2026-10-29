@@ -3,6 +3,8 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { pagesApi, feedApi, moderationApi } from '../api'
 import { useAuthStore } from '../store/auth'
+import AltBadge from '../components/common/AltBadge'
+import AltTextModal from '../components/common/AltTextModal'
 import {
   Users, Settings, Flag, X, Heart, MessageCircle, Image,
   CheckCircle, BookOpen, MoreHorizontal, PenLine, Pencil, Trash2,
@@ -25,6 +27,9 @@ export default function PageProfilePage() {
   const [composeContent, setComposeContent] = useState('')
   const [composeUploading, setComposeUploading] = useState(false)
   const [composeImageUrls, setComposeImageUrls] = useState<string[]>([])
+  // AGORA-400: descriptions keyed by image URL, as in the main composer
+  const [composeAlts, setComposeAlts] = useState<Record<string, string>>({})
+  const [altEditing, setAltEditing] = useState<string | null>(null)
   const [showReport, setShowReport] = useState(false)
   const [reportReason, setReportReason] = useState('')
   const [reportSent, setReportSent] = useState(false)
@@ -93,10 +98,12 @@ export default function PageProfilePage() {
     mutationFn: () => pagesApi.createPost(slug!, {
       content: composeContent,
       image_urls: composeImageUrls,
+      image_alts: composeImageUrls.map(u => composeAlts[u] || ''),
     }),
     onSuccess: () => {
       setComposeContent('')
       setComposeImageUrls([])
+      setComposeAlts({})
       setShowCompose(false)
       qc.invalidateQueries({ queryKey: ['page-feed', slug] })
       qc.invalidateQueries({ queryKey: ['page', slug] })
@@ -288,14 +295,25 @@ export default function PageProfilePage() {
               <div className={`grid gap-1.5 ${composeImageUrls.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
                 {composeImageUrls.map((url, idx) => (
                   <div key={idx} className="relative">
-                    <img src={url} alt="" className="rounded-lg w-full h-32 object-cover" />
+                    <img src={url} alt={composeAlts[url] || ''} className="rounded-lg w-full h-32 object-cover" />
                     <button onClick={() => setComposeImageUrls(prev => prev.filter((_, i) => i !== idx))}
+                      aria-label="Remove image"
                       className="absolute top-1 right-1 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center hover:bg-black/80">
                       <X size={10} />
+                    </button>
+                    <button type="button" onClick={() => setAltEditing(url)}
+                      aria-label={composeAlts[url] ? 'Edit image description' : 'Add image description'}
+                      className="absolute bottom-1 left-1 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-black/70 text-white hover:bg-black/85">
+                      {composeAlts[url] ? 'ALT ✓' : '+ ALT'}
                     </button>
                   </div>
                 ))}
               </div>
+            )}
+            {altEditing && (
+              <AltTextModal imageUrl={altEditing} initial={composeAlts[altEditing] || ''}
+                onSave={alt => setComposeAlts(m => ({ ...m, [altEditing]: alt }))}
+                onClose={() => setAltEditing(null)} />
             )}
             <div className="flex items-center gap-2 pt-2 border-t border-agora-100 dark:border-agora-700">
               <label className={`btn-ghost p-2 cursor-pointer ${composeImageUrls.length >= 4 ? 'opacity-40 pointer-events-none' : ''}`}>
@@ -400,7 +418,10 @@ export default function PageProfilePage() {
                   <>
                     {post.content && <p className="text-sm text-agora-800 dark:text-agora-200 whitespace-pre-wrap">{post.content}</p>}
                     {post.image_url && (
-                      <img src={post.image_url} alt="" className="rounded-lg w-full max-h-72 object-cover" />
+                      <div className="relative">
+                        <img src={post.image_url} alt={post.image_alt || ''} className="rounded-lg w-full max-h-72 object-cover" />
+                        <AltBadge alt={post.image_alt} />
+                      </div>
                     )}
                   </>
                 )}

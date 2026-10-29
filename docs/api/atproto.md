@@ -10,7 +10,7 @@ All of this is gated on `instance_settings['atproto_enabled']` (instance-wide) �
 
 ### `GET /.well-known/did.json`
 
-Resolved by the `Host` header (`username.instance.tld`) — serves that user's DID document.
+Resolved by the `Host` header — either the per-user subdomain (`username.instance.tld`) or a verified custom domain the user has claimed (AGORA-283, see [Custom Domains API](custom-domains.md)). Serves that user's DID document.
 
 **Response 200:**
 ```json
@@ -31,11 +31,19 @@ Resolved by the `Host` header (`username.instance.tld`) — serves that user's D
   }]
 }
 ```
-**Response 404** if the subdomain doesn't resolve to an eligible user (not remote, not private, `atproto_enabled=true`, no deletion scheduled).
+**Response 404** if the host doesn't resolve to an eligible user (not remote, not private, `atproto_enabled=true`, no deletion scheduled).
+
+A user with a live custom domain (AGORA-282) gets it as an additional `alsoKnownAs` entry, listed **first** since AT Proto reads the leading entry as the primary handle:
+
+```json
+"alsoKnownAs": ["at://alice.example", "at://alice.agora.example.com"]
+```
+
+The `id` is unaffected — a custom domain is a verified alias, not a DID migration, and the instance-issued handle stays published alongside it. An entry appears only while the claim is both `verification_status = 'verified'` and `approval_status = 'approved'`; a lapsed or unapproved claim simply isn't listed, which is what makes the fallback to the instance handle automatic.
 
 ### `GET /.well-known/atproto-did`
 
-**Response 200** (`text/plain`): the bare DID, e.g. `did:web:alice.agora.example.com`. Used by AT Proto's own mutual handle/DID verification.
+**Response 200** (`text/plain`): the bare DID, e.g. `did:web:alice.agora.example.com`. Used by AT Proto's own mutual handle/DID verification. Resolves for a verified custom domain `Host` as well as the per-user subdomain.
 
 ---
 

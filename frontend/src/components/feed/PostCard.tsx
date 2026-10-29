@@ -1,14 +1,18 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { feedApi, friendsApi } from '../../api'
+import { feedApi, friendsApi, hiddenPostsApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow, format } from 'date-fns'
 import CommentsSection, { renderContent, renderName } from './CommentsSection'
 import ReportModal from './ReportModal'
 import { handle } from '../../utils/handle'
 import { isGifUrl, isDirectGifUrl } from '../../utils/gif'
+import CustomHandle from '../common/CustomHandle'
+import AltBadge from '../common/AltBadge'
+import AltTextModal from '../common/AltTextModal'
+import ShareMenu, { isShareable } from './ShareMenu'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -21,11 +25,22 @@ interface Post {
   author_display_name: string
   author_pronouns: string
   author_avatar_url: string
+  // AGORA-288: a domain the author has verified they control, shown alongside
+  // @username rather than replacing it — see components/common/CustomHandle.
+  author_custom_domain?: string
+  repost_author_custom_domain?: string
   is_remote?: boolean
   remote_instance?: string
+  // The post's id on its home network: an ActivityPub object URL, or an
+  // at:// URI for a Bluesky post. AGORA-411 shares it instead of our permalink.
+  remote_url?: string
   content: string
   image_url: string
   visibility: string
+  // AGORA-372: set only on the author's own view of an external_only post —
+  // never present for any other viewer.
+  external_only?: boolean
+  only_on?: string
   content_warning: string
   link_url: string
   link_title: string
@@ -33,6 +48,7 @@ interface Post {
   link_image: string
   link_domain: string
   group_id?: string
+  author_profile_private?: boolean
   friend_list_id?: string
   group_name?: string
   group_slug?: string
@@ -47,6 +63,21 @@ interface Post {
   repost_link_description?: string
   repost_link_image?: string
   repost_link_domain?: string
+  // AGORA-408: the post the reposted post itself quotes, so sharing a quote keeps the
+  // thing it was quoting (e.g. the article a one-line reaction was about)
+  repost_quote?: {
+    id: string
+    author_username: string
+    author_display_name: string
+    author_emojis?: Record<string, string>
+    content: string
+    content_emojis?: Record<string, string>
+    image_url?: string
+    link_url?: string
+    link_title?: string
+    link_image?: string
+    link_domain?: string
+  }
   like_count: number
   comment_count: number
   repost_count: number
@@ -71,6 +102,8 @@ interface Post {
   wall_status?: string
   // Multi-photo (AGORA-93)
   photo_urls?: string[]
+  // AGORA-400: descriptions, same order as photo_urls; absent when none
+  photo_alts?: string[]
   // Video (AGORA-119)
   video_url?: string
   video_thumb_url?: string
@@ -87,6 +120,9 @@ interface Post {
   content_emojis?: Record<string, string>
   repost_author_emojis?: Record<string, string>
   repost_content_emojis?: Record<string, string>
+  // AGORA-401: live custom domains of the local accounts mentioned in content
+  // or repost_content, keyed by lowercased username
+  mention_domains?: Record<string, string>
 }
 
 // AGORA-273: an exact, locale-formatted timestamp — shown outright on the
@@ -110,13 +146,16 @@ const visIcons: Record<string, React.ReactNode> = {
 
 function ReactionPicker({ activeReaction, highlightedReaction }: { activeReaction?: string; highlightedReaction?: string | null }) {
   return (
-    <div className="absolute bottom-9 left-0 z-30 flex items-center gap-1.5 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-3 py-2 shadow-xl">
+    // AGORA-305: ten reactions overflow a phone viewport at the old sizing (405px
+    // against 375px), so the glyphs and spacing step down below sm. max-w plus
+    // overflow-x is the backstop for anything the sizing alone can't cover.
+    <div className="absolute bottom-9 left-0 z-30 flex items-center gap-1 sm:gap-1.5 max-w-[calc(100vw-1rem)] overflow-x-auto bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-600 rounded-full px-2 sm:px-3 py-2 shadow-xl">
       {REACTIONS.map(r => (
         <button
           key={r.type}
           data-reaction-type={r.type}
           title={r.label}
-          className={`text-2xl leading-none transition-transform duration-150 px-0.5 rounded-full select-none ${
+          className={`text-xl sm:text-2xl leading-none transition-transform duration-150 px-0 sm:px-0.5 rounded-full select-none shrink-0 ${
             r.type === highlightedReaction ? 'scale-150' :
             r.type === activeReaction ? 'bg-agora-100 dark:bg-agora-700 ring-2 ring-agora-400 scale-110' :
             'hover:scale-125'
@@ -274,7 +313,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
         <p className="text-xs font-medium text-agora-400 dark:text-agora-500">🔒 This poll has ended</p>
       )}
       {!isExpired && isRemote && (
-        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">📡 Results from the fediverse — voting happens on the original post</p>
+        <p className="text-xs font-medium text-agora-400 dark:text-agora-500">📡 Results from the Fediverse — voting happens on the original post</p>
       )}
       {!isExpired && !isRemote && post.poll_expires_at && (
         <p className="text-xs text-agora-400 dark:text-agora-500">⏱ Closes {new Date(post.poll_expires_at).toLocaleString()}</p>
@@ -385,6 +424,9 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
 export default function PostCard({ post, invalidateKey = 'feed', detail = false }: { post: Post, invalidateKey?: string, detail?: boolean }) {
   const [lightboxPhotos, setLightboxPhotos] = useState<string[] | null>(null)
   const [lightboxIdx, setLightboxIdx] = useState(0)
+  // AGORA-400: the post's images and their descriptions, in the same order
+  const photos: string[] = post.photo_urls && post.photo_urls.length > 0 ? post.photo_urls : post.image_url ? [post.image_url] : []
+  const photoAlts: string[] = photos.map((_, i) => post.photo_alts?.[i] || '')
   const [twExpanded, setTwExpanded] = useState(false)
   const navigate = useNavigate()
   const { user } = useAuthStore()
@@ -413,6 +455,8 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
   const [editFriendListId, setEditFriendListId] = useState(post.friend_list_id || '')
   const [editTwEnabled, setEditTwEnabled] = useState(!!post.content_warning)
   const [editTwLabel, setEditTwLabel] = useState(post.content_warning || '')
+  const [editAlts, setEditAlts] = useState<string[]>(photoAlts)
+  const [editAltIdx, setEditAltIdx] = useState<number | null>(null)
 
   const { data: groupsData } = useQuery({
     queryKey: ['friend-lists'],
@@ -500,12 +544,23 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
     onSuccess: invalidate,
   })
 
+  // AGORA-309. Shares invalidate with delete, so the post leaves the list it is
+  // sitting in without a bespoke removal path: from the reader's point of view
+  // the two have the same immediate effect, and only one of them is permanent.
+  const hide = useMutation({
+    mutationFn: () => hiddenPostsApi.hide(post.id),
+    onSuccess: invalidate,
+  })
+
   const edit = useMutation({
     mutationFn: () => feedApi.editPost(post.id, {
       content: editContent,
       visibility: editVisibility,
       friend_list_id: editVisibility === 'group' ? editFriendListId : undefined,
       content_warning: editTwEnabled ? editTwLabel : '',
+      // AGORA-400: sent only when a description changed, so an ordinary edit
+      // leaves the images and their descriptions alone.
+      ...(editAlts.some((a, i) => a !== photoAlts[i]) ? { image_alts: editAlts } : {}),
     }),
     onSuccess: () => { setEditing(false); invalidate() },
   })
@@ -526,7 +581,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
       setSharedConfirm(true)
       setTimeout(() => setSharedConfirm(false), 2500)
     },
-    onError: (e: any) => alert(e.response?.data?.error || 'Could not share post'),
+    onError: (e: any) => alert(e.response?.data?.error || 'Could not repost'),
   })
 
   const closeShareModal = () => {
@@ -625,6 +680,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   {handle(post.author_username, post.is_remote, post.remote_instance)}
                 </span>
               )}
+              {!post.page_id && <CustomHandle domain={post.author_custom_domain} />}
               <span className="text-agora-300 dark:text-agora-600 text-xs">·</span>
               {detail ? (
                 <span className="text-agora-400 text-xs" title={exactTimestamp(post)}>
@@ -640,6 +696,13 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
               <span className="text-agora-300 dark:text-agora-600 flex items-center gap-0.5 text-xs">
                 {visIcons[post.visibility]}
               </span>
+              {/* AGORA-372/374: only ever set on the author's own view — no
+                  other viewer's post list can contain one of these rows. */}
+              {post.external_only && post.only_on && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-agora-100 dark:bg-agora-700 text-agora-600 dark:text-agora-300">
+                  {post.only_on}
+                </span>
+              )}
             </div>
 
             {/* Menu — edit/delete/report all require auth */}
@@ -652,7 +715,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   <div className="absolute right-0 top-6 z-10 bg-white dark:bg-agora-800 border border-agora-200 dark:border-agora-700 rounded-lg shadow-lg py-1 min-w-[140px]"
                     onBlur={() => setShowMenu(false)}>
                     {isOwn && !post.repost_of_id && (
-                      <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setShowMenu(false) }}
+                      <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setEditAlts(photoAlts); setShowMenu(false) }}
                         className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
                         <Pencil size={14} /> Edit
                       </button>
@@ -661,6 +724,18 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       <button onClick={() => { if (confirm('Delete post?')) del.mutate(); setShowMenu(false) }}
                         className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
                         <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                    {/* AGORA-309: hiding one post, for the times when a
+                        specific post is unwanted but the author is not. Needs
+                        no modal, unlike Report: it is reversible, affects
+                        nobody else, and notifies no one. Not offered on your
+                        own posts, where it would be a no-op nobody asked for. */}
+                    {!isOwn && (
+                      <button onClick={() => { hide.mutate(); setShowMenu(false) }}
+                        disabled={hide.isPending}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-400 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        <EyeOff size={14} /> Hide post
                       </button>
                     )}
                     {!isOwn && (
@@ -738,6 +813,30 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 )}
               </div>
 
+              {/* AGORA-400: describe the post's images after the fact */}
+              {photos.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-xs text-agora-400">Image descriptions</p>
+                  <div className="flex flex-wrap gap-2">
+                    {photos.map((url, i) => (
+                      <div key={i} className="relative w-16 h-16">
+                        <img src={url} alt={editAlts[i] || ''} className="w-16 h-16 rounded-lg object-cover bg-agora-50 dark:bg-agora-900" />
+                        <button type="button" onClick={() => setEditAltIdx(i)}
+                          aria-label={editAlts[i] ? `Edit description of image ${i + 1}` : `Add a description to image ${i + 1}`}
+                          className="absolute bottom-0.5 left-0.5 rounded px-1 py-0.5 text-[9px] font-bold tracking-wide bg-black/70 text-white hover:bg-black/85">
+                          {editAlts[i] ? 'ALT ✓' : '+ ALT'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  {editAltIdx !== null && (
+                    <AltTextModal imageUrl={photos[editAltIdx]} initial={editAlts[editAltIdx] || ''}
+                      onSave={alt => setEditAlts(prev => prev.map((a, i) => i === editAltIdx ? alt : a))}
+                      onClose={() => setEditAltIdx(null)} />
+                  )}
+                </div>
+              )}
+
               {/* Visibility picker — hidden for community group posts */}
               {!post.group_id && (
                 <div className="space-y-1.5">
@@ -799,7 +898,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
               {/* Content — the author's own words (their commentary, when this is a repost) */}
               {post.content && (
                 <p className="text-sm text-agora-800 dark:text-agora-200 mt-1 whitespace-pre-wrap break-words">
-                  {renderContent(post.content, undefined, post.content_emojis)}
+                  {renderContent(post.content, undefined, post.content_emojis, post.mention_domains)}
                 </p>
               )}
 
@@ -826,10 +925,11 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       <span className="text-agora-400 dark:text-agora-500 text-xs">({post.repost_author_pronouns})</span>
                     )}
                     <span className="text-agora-400 text-xs">{handle(post.repost_author_username!)}</span>
+                    <CustomHandle domain={post.repost_author_custom_domain} />
                   </div>
                   {post.repost_content && (
                     <p className="text-sm text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words">
-                      {renderContent(post.repost_content, undefined, post.repost_content_emojis)}
+                      {renderContent(post.repost_content, undefined, post.repost_content_emojis, post.mention_domains)}
                     </p>
                   )}
                   {post.repost_image_url && (
@@ -867,6 +967,64 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       </div>
                     </a>
                   )}
+                  {/* AGORA-408: the quoted post's own quote, one level further in and
+                      kept compact, so the context it was reacting to survives */}
+                  {post.repost_quote && (() => {
+                    const q = post.repost_quote
+                    return (
+                      <div
+                        onClick={e => {
+                          if ((e.target as HTMLElement).closest('a')) return
+                          e.stopPropagation()
+                          navigate(`/post/${q.id}`)
+                        }}
+                        className="mt-2 border border-agora-200 dark:border-agora-600 rounded-lg p-2.5 hover:bg-agora-100 dark:hover:bg-agora-700 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5 flex-wrap text-xs">
+                          <Link to={`/profile/${q.author_username}`}
+                            className="font-semibold text-agora-800 dark:text-agora-200 hover:underline">
+                            {q.author_display_name ? renderName(q.author_display_name, q.author_emojis) : q.author_username}
+                          </Link>
+                          <span className="text-agora-400">{handle(q.author_username)}</span>
+                        </div>
+                        {q.content && (
+                          <p className="text-xs text-agora-700 dark:text-agora-300 mt-1 whitespace-pre-wrap break-words line-clamp-4">
+                            {renderContent(q.content, undefined, q.content_emojis, post.mention_domains)}
+                          </p>
+                        )}
+                        {q.image_url && (
+                          <img src={q.image_url} alt="" className="mt-1.5 rounded-md max-h-40 object-cover w-full" />
+                        )}
+                        {q.link_url && (
+                          <a
+                            href={q.link_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1.5 flex gap-2 border border-agora-200 dark:border-agora-600 rounded-lg overflow-hidden hover:bg-agora-50 dark:hover:bg-agora-700/50 transition-colors"
+                          >
+                            {q.link_image && (
+                              <img
+                                src={q.link_image}
+                                alt=""
+                                className="w-12 h-12 object-cover flex-shrink-0 bg-agora-100 dark:bg-agora-700"
+                                onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                              />
+                            )}
+                            <div className="flex-1 min-w-0 p-1.5">
+                              <p className="text-[11px] text-agora-400 flex items-center gap-1">
+                                <ExternalLink size={9} /> {q.link_domain}
+                              </p>
+                              {q.link_title && (
+                                <p className="text-xs font-semibold line-clamp-2 text-agora-800 dark:text-agora-200">
+                                  {q.link_title}
+                                </p>
+                              )}
+                            </div>
+                          </a>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
               )}
 
@@ -912,7 +1070,6 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
 
               {/* Image(s) */}
               {(() => {
-                const photos: string[] = post.photo_urls && post.photo_urls.length > 0 ? post.photo_urls : post.image_url ? [post.image_url] : []
                 if (photos.length === 0) return null
 
                 // Single GIF share-page link
@@ -934,8 +1091,9 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   }
                   if (isDirectGif) {
                     return (
-                      <div className="mt-2 rounded-lg overflow-hidden">
-                        <img src={url} alt="" className="w-full max-h-[32rem] object-contain rounded-lg" />
+                      <div className="relative mt-2 rounded-lg overflow-hidden">
+                        <img src={url} alt={photoAlts[0]} className="w-full max-h-[32rem] object-contain rounded-lg" />
+                        <AltBadge alt={photoAlts[0]} />
                       </div>
                     )
                   }
@@ -951,22 +1109,26 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 return (
                   <div className={`mt-2 grid gap-1 ${gridClass}`}>
                     {photos.map((url, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => { setLightboxPhotos(photos); setLightboxIdx(idx) }}
-                        className={`relative overflow-hidden rounded-lg focus:outline-none ${photos.length === 3 && idx === 2 ? 'col-span-2' : ''}`}
-                      >
-                        <img
-                          src={url}
-                          alt=""
-                          className={`w-full object-cover hover:opacity-95 transition-opacity cursor-zoom-in bg-agora-50 dark:bg-agora-900 ${
-                            photos.length === 1 ? 'max-h-[32rem] object-contain' : 'h-48'
-                          }`}
-                        />
-                        {photos.length > 1 && photos.length === 4 && idx === 3 && (
-                          <span className="sr-only">Photo {idx + 1} of {photos.length}</span>
-                        )}
-                      </button>
+                      // AGORA-400: the ALT badge is a button too, so it sits
+                      // beside the image's button rather than inside it.
+                      <div key={idx} className={`relative ${photos.length === 3 && idx === 2 ? 'col-span-2' : ''}`}>
+                        <button
+                          onClick={() => { setLightboxPhotos(photos); setLightboxIdx(idx) }}
+                          className="block w-full overflow-hidden rounded-lg focus:outline-none"
+                        >
+                          <img
+                            src={url}
+                            alt={photoAlts[idx]}
+                            className={`w-full object-cover hover:opacity-95 transition-opacity cursor-zoom-in bg-agora-50 dark:bg-agora-900 ${
+                              photos.length === 1 ? 'max-h-[32rem] object-contain' : 'h-48'
+                            }`}
+                          />
+                          {photos.length > 1 && photos.length === 4 && idx === 3 && (
+                            <span className="sr-only">Photo {idx + 1} of {photos.length}</span>
+                          )}
+                        </button>
+                        <AltBadge alt={photoAlts[idx]} />
+                      </div>
                     ))}
                   </div>
                 )
@@ -1013,10 +1175,17 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   )}
                   <img
                     src={lightboxPhotos[lightboxIdx]}
-                    alt=""
+                    alt={photoAlts[lightboxIdx] || ''}
                     className="max-w-[90vw] max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
                     onClick={e => e.stopPropagation()}
                   />
+                  {/* AGORA-400: the lightbox only ever shows this post's own photos */}
+                  {photoAlts[lightboxIdx] && (
+                    <p onClick={e => e.stopPropagation()}
+                      className="absolute bottom-12 left-1/2 -translate-x-1/2 max-w-[min(90vw,40rem)] max-h-32 overflow-y-auto rounded-lg bg-black/70 px-3 py-2 text-sm text-white whitespace-pre-wrap z-10">
+                      {photoAlts[lightboxIdx]}
+                    </p>
+                  )}
                 </div>
               )}
                 </>
@@ -1074,11 +1243,14 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       }
                     }}
                     onContextMenu={e => e.preventDefault()}
-                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-red-500 ${myReaction ? 'text-red-500' : ''}`}
+                    className={`flex items-center gap-1.5 text-sm transition-colors hover:text-agora-700 dark:hover:text-agora-200 ${myReaction ? 'text-agora-700 dark:text-agora-200' : ''}`}
                     title={myReaction ? 'Hold to change reaction' : 'Like · Hold for more reactions'}
                   >
-                    <span className="text-base leading-none" style={{lineHeight:1}}>
-                      {myReaction ? REACTION_MAP[myReaction]?.emoji : '🤍'}
+                    {/* AGORA-305: unreacted is an outline thumb, matching the
+                        sibling action icons. The filled glyph only appears once
+                        the user has actually reacted. */}
+                    <span className="flex items-center text-base leading-none" style={{lineHeight:1}}>
+                      {myReaction ? REACTION_MAP[myReaction]?.emoji : <ThumbsUp size={16} />}
                     </span>
                     <span className="text-sm">{post.reaction_count || ''}</span>
                   </button>
@@ -1088,7 +1260,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 </div>
               ) : (
                 <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to react">
-                  <span className="text-base leading-none" style={{lineHeight:1}}>🤍</span>
+                  <span className="flex items-center text-base leading-none" style={{lineHeight:1}}><ThumbsUp size={16} /></span>
                   <span className="text-sm">{post.reaction_count || ''}</span>
                 </span>
               )}
@@ -1104,19 +1276,25 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 <button
                   onClick={() => post.visibility === 'public' ? setShowShare(true) : undefined}
                   disabled={post.visibility !== 'public'}
-                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be shared' : 'Share this post'}
+                  title={post.visibility !== 'public' ? 'Friends-only posts cannot be reposted' : 'Repost'}
+                  aria-label="Repost"
                   className={`flex items-center gap-1.5 text-sm transition-colors ${sharedConfirm ? 'text-green-500 font-medium' : post.reposted ? 'text-green-500' : post.visibility !== 'public' ? 'text-agora-300 dark:text-agora-600 cursor-not-allowed' : 'hover:text-green-500'}`}>
                   <Repeat2 size={16} />
                   {sharedConfirm
-                    ? <span className="text-xs">Shared!</span>
+                    ? <span className="text-xs">Reposted!</span>
                     : <span>{post.repost_count || ''}</span>}
                 </button>
               ) : (
-                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to share">
+                <span className="flex items-center gap-1.5 text-sm text-agora-300 dark:text-agora-600" title="Sign in to repost">
                   <Repeat2 size={16} />
                   <span>{post.repost_count || ''}</span>
                 </span>
               )}
+
+              {/* AGORA-411: sending a link somewhere else, as opposed to the
+                  Repost beside it. Guests get it too, since a public post's
+                  permalink works for them. */}
+              {isShareable(post) && <ShareMenu post={post} />}
             </div>
 
             {/* Reaction summary bar */}
@@ -1140,7 +1318,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeShareModal}>
           <div className="bg-white dark:bg-agora-800 rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between p-4 border-b border-agora-100 dark:border-agora-700">
-              <h2 className="font-bold text-lg">Share post</h2>
+              <h2 className="font-bold text-lg">Repost</h2>
               <button onClick={closeShareModal} className="btn-ghost p-1 rounded-full"><X size={18} /></button>
             </div>
             <div className="p-4 space-y-3">
@@ -1181,7 +1359,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   <span className="text-sm font-semibold text-agora-800 dark:text-agora-200">{post.author_display_name ? renderName(post.author_display_name, post.author_emojis) : post.author_username}</span>
                   <span className="text-xs text-agora-400">@{post.author_username}</span>
                 </div>
-                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis)}</p>}
+                {post.content && <p className="text-sm text-agora-700 dark:text-agora-300 line-clamp-4">{renderContent(post.content, undefined, post.content_emojis, post.mention_domains)}</p>}
                 {post.image_url && <img src={post.image_url} alt="" className="rounded-lg max-h-40 object-cover w-full" />}
               </div>
 
@@ -1223,7 +1401,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                 className="btn-primary flex items-center gap-1.5"
               >
                 <Repeat2 size={14} />
-                {repost.isPending ? 'Sharing…' : 'Share'}
+                {repost.isPending ? 'Reposting…' : 'Repost'}
               </button>
             </div>
           </div>

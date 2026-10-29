@@ -7,7 +7,7 @@ Agora federates three ways, side by side:
 
 1. **Standard ActivityPub** — talks to the real fediverse (Mastodon, Pleroma, Akkoma, etc.). This is the primary, actively-developed protocol and the subject of most of this document.
 2. **Native AT Protocol** — Agora acts as its own PDS and talks directly to Bluesky/the AT Proto network, no bridge involved. Separate service, separate document: see [AT Protocol Service](atproto.md).
-3. **A legacy custom Agora-to-Agora protocol** — Ed25519-signed, pre-dates ActivityPub support, and only ever talks to other Agora instances. Still live (see [Legacy protocol](#legacy-agora-to-agora-protocol) below) but not being extended further.
+3. **Agora-to-Agora peering** on top of ActivityPub. There was once a custom Ed25519-signed protocol here; AGORA-330 deleted it and everything Agora-to-Agora now rides ActivityPub with Agora vocabulary where the standard has no equivalent. See [Agora-to-Agora peering](#agora-to-agora-peering) below and [ADR-002](../adr/002-agora-to-agora-federation-protocol.md).
 
 ## Constructor
 
@@ -23,7 +23,7 @@ Two independent instance-wide toggles, both admin-settable in **Admin → Settin
 
 | Setting | Governs | Default |
 |---|---|---|
-| `federation_enabled` | The legacy custom protocol | off |
+| `federation_enabled` | The Agora-native surface: instance info, peering, cross-instance handle lookup and search. Formerly also the legacy transport, which AGORA-330 removed. | off |
 | `activitypub_enabled` | Standard ActivityPub | **on** (any value other than the literal string `"false"`) |
 
 `activityPubEnabled()` defaults *on* deliberately — an instance that already had federation configured shouldn't silently lose fediverse discoverability the moment ActivityPub support shipped.
@@ -37,8 +37,8 @@ There's also a **per-account** opt-out: `users.activitypub_enabled` (default `tr
 | `GET /.well-known/webfinger?resource=acct:user@domain` | Resolves a handle to an actor URL (`WebFinger`). Checks users first, falls back to pages on a slug/username collision — user wins. |
 | `GET /.well-known/host-meta` | XRD document pointing back at WebFinger (`HostMeta`). Some implementations still probe this before trying WebFinger directly. |
 | `GET /.well-known/nodeinfo` → `GET /nodeinfo/2.0` | NodeInfo (AGORA-171) — software name/version, protocols, user count. Used by instance directories and Mastodon's own "About this server" panel, not by anything Agora itself calls. |
-| `GET /federation/users/{handle}` | Content-negotiated: `Accept: application/activity+json` (or `application/ld+json`) returns the actor document (`writeActorObject`); anything else returns the legacy flat-JSON profile (`GetUser`). |
-| `GET /federation/pages/{slug}` | Actor document for a page — always ActivityPub JSON, no legacy fallback (pages never had one). |
+| `GET /federation/users/{handle}` | Content-negotiated: `Accept: application/activity+json` (or `application/ld+json`) returns the actor document (`writeActorObject`); anything else returns Agora's own flat-JSON profile (`GetUser`), which peers and the web client both read. |
+| `GET /federation/pages/{slug}` | Actor document for a page. Always ActivityPub JSON, with no flat-JSON alternative (pages never had one). |
 | `GET /federation/instance` | The **instance actor** (AGORA-219) — a single actor document representing the instance itself, not any one user. Used for instance-level operations that shouldn't be attributed to a specific admin: relay subscriptions (below) and delivery to instances that require every requester to be a signable actor. |
 | `GET /federation/instance/outbox` | Always an empty `OrderedCollection` — the instance actor never authors content, only relay Follow/Undo handshakes. |
 
@@ -46,7 +46,7 @@ The actor document includes `publicKey` (RSA, PEM-encoded — see below), `inbox
 
 ## Per-actor RSA keys & HTTP Signatures
 
-Every user and page actor has its own RSA keypair — **not** the instance-wide Ed25519 key the legacy protocol uses. Stored PEM-encoded in `users.federation_public_key`/`federation_private_key` (and the equivalent `pages` columns), generated lazily on first use (`getOrCreateUserKeyPair`/`getOrCreatePageKeyPair`).
+Every user and page actor has its own RSA keypair. (Agora once also had an instance-wide Ed25519 key for the legacy transport; AGORA-330 deleted both the transport and the key.) Stored PEM-encoded in `users.federation_public_key`/`federation_private_key` (and the equivalent `pages` columns), generated lazily on first use (`getOrCreateUserKeyPair`/`getOrCreatePageKeyPair`).
 
 Every outbound POST (activity delivery) and every outbound GET that needs to survive an "authorized fetch" instance (Threads, `AUTHORIZED_FETCH` Mastodon — see below) is signed per [draft-cavage HTTP Signatures](https://datatracker.ietf.org/doc/html/draft-cavage-http-signatures), the scheme real-world ActivityPub implementations actually expect (not the newer RFC 9421). `signRequest`/`verifyInboundSignature`/`buildSigningString` are the shared machinery; `Inbox` verifies every inbound activity's signature before processing it — an unverified activity's `actor`/`attributedTo` fields are treated as untrusted and only `verifiedActor` (derived from the signature's keyId) is ever used for authorization decisions.
 
@@ -71,7 +71,7 @@ Every outbound POST (activity delivery) and every outbound GET that needs to sur
 | `Undo(Announce)` | `handleInboundUndoAnnounce` | Removes it. |
 | `Accept`/`Reject` (of a `Follow`) | `handleInboundAcceptFollow`/`handleInboundRejectFollow` | Confirms or clears a pending outbound follow in `ap_following`. |
 
-**Instance blocking (unified in AGORA-177).** Two independent tables both express an instance-level block: `federated_instances.status = 'blocked'` (managed from Admin → Federation) and `instance_bans` (managed from Admin → Fediverse → Instance Bans). Before AGORA-177 these were checked inconsistently — `instance_bans` in particular was **never actually enforced anywhere**. `isInstanceBlocked(domain)` (`federation.go`) now checks both tables with one call, and is consulted at every relevant point: inbound `Follow`, inbound replies, inbound `Like`/`Announce` target resolution, mention resolution, actor lookup, outbound follow, and the legacy protocol's own inbox + signature verification. Neither table needs a row in the other to take effect. `BanInstance` normalizes its input (strips scheme/trailing slash, lowercases) so a pasted URL and a bare domain hit the same row. The AT Proto side reuses `instance_bans` as its own PDS-host block scope — see [AT Protocol Service → Blocking](atproto.md#blocking).
+**Instance blocking (unified in AGORA-177).** Two independent tables both express an instance-level block: `federated_instances.status = 'blocked'` (managed from Admin → Federation) and `instance_bans` (managed from Admin → Fediverse → Instance Bans). Before AGORA-177 these were checked inconsistently, and `instance_bans` in particular was **never actually enforced anywhere**. `isInstanceBlocked(domain)` (`federation.go`) now checks both tables with one call, and is consulted at every relevant point: inbound `Follow`, inbound replies, inbound `Like`/`Announce` target resolution, mention resolution, actor lookup, and outbound follow. Neither table needs a row in the other to take effect. `BanInstance` normalizes its input (strips scheme/trailing slash, lowercases) so a pasted URL and a bare domain hit the same row. The AT Proto side reuses `instance_bans` as its own PDS-host block scope; see [AT Protocol Service → Blocking](atproto.md#blocking).
 
 ## Outbound activities
 
@@ -131,25 +131,54 @@ Two custom-feed filter types (AGORA-146) surface followed fediverse accounts thr
 - `ap_following.notify` (AGORA-166) — per-followed-account notification opt-in, default `false`. Following someone doesn't imply getting notified of their posts, same as a local profile follow. `ingestFollowedPost`'s notification loop requires both this **and** the account-level `users.fediverse_notifications_enabled` toggle (the global kill switch) to be true.
 - `ToggleFollowNotify` — flips the per-account flag; surfaced both on the Fediverse follows list and directly on a followed account's own profile page (AGORA-167).
 
-## Legacy Agora-to-Agora protocol
+## Agora-to-Agora peering
 
-Kept for backwards compatibility with older Agora instances, not extended further. Ed25519-signed, instance-wide key (not per-actor), `X-Agora-Signature` header over the raw request body.
+Agora instances recognise each other and federate as peers, but they no longer speak a protocol of their own. There was one: Ed25519-signed with an instance-wide key, carrying `post`, `delete_post`, `friend_request`, `friend_accept` and `profile_update` activities. AGORA-330 deleted it. Everything Agora-to-Agora now rides ActivityPub, with Agora vocabulary only where ActivityPub has no equivalent. See [ADR-002](../adr/002-agora-to-agora-federation-protocol.md) for why.
 
-```go
-func (s *Service) InstanceInfo(w, r)      // GET /.well-known/agora-instance
-func (s *Service) Inbox(w, r)             // POST /federation/inbox — shared by BOTH protocols. A
-                                           // cheap probe of the body ("@context" present, or
-                                           // type is "Follow"/"Undo") routes to the standard
-                                           // ActivityPub path (handleStandardInbox) before the
-                                           // legacy Ed25519 verification ever runs — a standard
-                                           // activity has no "signature"/"instance_id" fields and
-                                           // would otherwise always fail that check.
-func (s *Service) BroadcastToFriendInstances(userID, activity)
-func (s *Service) SendToUserInstance(remoteInstance, instanceURL, activity)
-```
+What is left is identification and peering, which were never part of the transport:
 
-Legacy activity types: `post`, `delete_post`, `friend_request`, `friend_accept`, `profile_update` — see `docs/api/federation.md` for payload shapes. Verification (`verifyActivity`) fetches the remote instance's Ed25519 public key from its own `/.well-known/agora-instance` and caches it in `federated_instances`.
+- `GET /.well-known/agora-instance` (`InstanceInfo`) answers with this instance's name, description, rules and user count. Only Agora serves it, so answering it at all is how one instance recognises another as Agora, which NodeInfo does not establish with enough specificity. It no longer publishes a `public_key`: nothing signs with an instance-wide key any more, and `api_version` moved to `2` to say so.
+- `FetchInstanceInfo(domain)` reads that endpoint behind the SSRF-safe dialer, and is what an admin adding a peer goes through.
+- `registerInboundPeer(domain)` records a peer that contacted us first and notifies admins once. This used to be a side effect of fetching a peer's signing key to verify a legacy activity; with that gone it is called deliberately, from the ActivityPub activities that carry Agora vocabulary (a marked `Follow`, or a `Create` with an audience marker). Those are the traffic where peering means something, which keeps every Mastodon server that ever delivers here out of a list that means "Agora instances we federate with".
+- `federated_instances` remains the peer list behind Admin → Federation: direction (AGORA-321), disconnect (AGORA-320), first-contact notification (AGORA-314), and the `peered_only` mode of `friend_requests_from`. Its `public_key` column is retained but no longer written.
+
+**Legacy rows still exist.** Users cached over the old protocol are keyed on `(remote_user_id, remote_instance)` with no `ap_actor_url`, and may hold real friendships. They stay, and `remoteAgoraActorURL`/`remoteUserIDForActor` bridge them onto ActivityPub identity. `syncStaleRemoteUsers` still refreshes them through Agora's own `/federation/users/{handle}`, and since AGORA-330 is scoped to exactly those rows: an ActivityPub row has no `remote_user_id` and could never sync there.
+
+**An inbound legacy activity** is no longer understood. It reaches `handleStandardInbox` and is refused as the unrecognised JSON it is, which is the intended outcome rather than a gap.
+
+## Peer timeline exchange (AGORA-322)
+
+An admin can turn a peer's public timeline on, and those posts then appear locally without any local user following anyone there. This is the cold-start problem: a new instance has a sparse Explore tab, and the only bulk alternative is a public relay, which brings the whole fediverse firehose. It also gives peering an observable purpose, since before this an admin added an instance and nothing happened.
+
+**It lands in Explore, never the home feed.** The home feed is friends and follows, and nothing an admin does should put content there. Explore already carries remote posts from any account this instance knows about.
+
+**The two directions are independent**, which is why they are two columns on `federated_instances` rather than one status:
+
+- `timeline_exchange`: our subscription to them. Turning it on sends a `Follow` from the instance actor (the relay handshake's shape, since that is what this is) and makes their signer a relay source for ingest, so `handleInboundCreate` takes the AGORA-222 path that does not require a local follower.
+- `carries_our_timeline`: their subscription to us, which they decide and we only report. Set when `handleInboundFollowInstance` accepts a `Follow` of `/federation/instance`.
+
+Conflating them would let one instance's admin silently change another's outbound delivery volume.
+
+Accepted from any instance that is not blocked: public posts are public and already readable through a user's outbox, so `isInstanceBlocked` remains the enforcement point. What a subscription adds is outbound volume, which is why an inbound one goes through `registerInboundPeer` and shows up in the Federation tab with the usual admin notification rather than in a separate, invisible subscriber list.
+
+Delivery folds into `enabledRelayInboxes`, which all three of Create, Update and Delete already call, rather than adding a second loop at each site: separating them was the shape most likely to end with a peer receiving posts but not their edits. Deduplicated, since a host can be both a peer and a relay. Blocking or disconnecting a peer clears both flags, so an unblock does not silently resume the exchange.
+
+Both default off, including for peers that already exist: turning this on changes what every local user sees in Explore.
+
+## Direct messages (AGORA-323)
+
+Messages were local-only until AGORA-323: `internal/dm` had no `fedSender` at all, so a conversation with somebody on another instance was written here and never left. They now ride ActivityPub in the shape Mastodon already uses for a direct message: a `Create` carrying a `Note` addressed to exactly one actor, with no `Public` and no followers collection anywhere. A side effect of using the standard shape is that this works with Mastodon users too, not only with other Agora instances.
+
+- **Outbound** (`internal/federation/dm.go`): `SendDirectMessage`, `SendDirectMessageUpdate`, `SendDirectMessageDelete`, called from `internal/dm` after the local row exists so a delivery failure leaves the sender's own view intact and the queue retries. The object id is `<actor>/messages/<id>`, deliberately not under `/posts/` so `localPostIDFromURL` can never resolve a message as a federatable post target.
+- **Inbound**: `handleInboundCreate` tries `handleInboundDirectMessage` first, so a message never reaches the post path. A Note is a direct message when it carries `agora:directMessage`, or (for Mastodon, which has no such marker) when it is addressed to exactly one actor with no `inReplyTo` and no Public.
+- **Policy is the local policy.** `dm_privacy` (`everyone`/`friends`/`nobody`), the block check, and the `is_accepted` request state already decide who may message whom here, and an inbound federated message is checked against the same settings. A user's answer to "who can message me" therefore means the same thing whatever instance the sender is on; a separate federated policy would have produced two answers to one question.
+- **Dedup** is `messages.remote_message_id`, unique where non-empty. Peers retry on their own schedule and a conversation is the worst place to see a message twice.
+- **Live delivery**: federation stores the message and hands it back to `internal/dm` through `DeliverInboundMessage`, which owns the socket hub. Federation owns the wire and the storage; the hub stays where it is.
+
+**Deliberately not built.** Group conversations spanning instances: `conversation_participants` supports more than two people, but a conversation across three instances is a much larger problem, and `remoteRecipient` returns nothing unless the conversation is one-to-one. Read state, which is not something to report to another server. Any form of end-to-end encryption: an ActivityPub direct message is readable by the administrators of both instances, and the conversation UI says so rather than implying a privacy that does not exist.
 
 ## Background workers
 
-`StartBackgroundSync(ctx)` starts three independent pollers: `drainQueue` (legacy protocol retries), `drainAPQueue` (standard ActivityPub user deliveries), `drainPageAPQueue` (page deliveries). Each retries with backoff and gives up after enough failed attempts, logging the failure rather than retrying forever.
+`StartBackgroundSync(ctx)` starts the delivery pollers: `drainAPQueue` (standard ActivityPub user deliveries), `drainPageAPQueue` (page deliveries) and `drainInstanceAPQueue` (relay traffic), plus `refreshInstances` (peer liveness) and `syncStaleRemoteUsers` (legacy stub profiles). Each delivery poller retries with backoff and gives up after `maxDeliveryAttempts` (10) failed attempts rather than retrying forever. The legacy protocol's own `drainQueue` went with it in AGORA-330.
+
+**Delivery logging (AGORA-325, extended to the ActivityPub queue by AGORA-338).** `drainAPQueue` logs a peer's *first* failure and its eventual abandonment, and stays quiet for the retries in between so an instance that's down for a day doesn't produce a line per activity per attempt. Recording failures only to a `last_error` column, as both queues once did, makes a completely broken federation path indistinguishable from an idle one from outside the database. That is how AGORA-316 stayed hidden long enough for every legacy activity ever sent to be silently rejected, and the reason the ActivityPub queue was not left in the same state. The inbound side logs an activity that verifies but is then dropped (unknown type, unresolvable local user), for the same reason.

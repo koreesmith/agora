@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/store"
@@ -19,6 +21,25 @@ type Service struct {
 	cfg      *config.Config
 	notifSvc notifSender
 	media    mediaStore
+	fed      fedResolver
+}
+
+// fedResolver is the subset of federation.Service used here, declared locally
+// and satisfied structurally so this package doesn't take a dependency on the
+// whole federation service (the same shape feed/users/friends use). Set after
+// construction via SetFed, since main builds the admin service first.
+//
+// AGORA-324: AddInstance used to resolve a remote instance itself with a bare
+// http.Client. Going through federation means it inherits the SSRF-safe dialer
+// and the key validation rather than keeping a second, weaker copy.
+type fedResolver interface {
+	FetchInstanceInfo(domain string) (normalizedDomain, name, publicKeyB64 string, err error)
+	// AGORA-322: turning a peer's timeline exchange on or off. The federation
+	// side owns it because turning it on sends a Follow and turning it off
+	// sends an Undo, neither of which belongs in an admin handler.
+	SetTimelineExchange(domain string, on bool) error
+	// AGORA-381: refresh every remote profile people here see, now.
+	RefreshAllRemoteProfiles() bool
 }
 
 type notifSender interface {
@@ -34,6 +55,8 @@ type mediaStore interface {
 func NewService(db *store.DB, cfg *config.Config, notifSvc notifSender, media mediaStore) *Service {
 	return &Service{db: db, cfg: cfg, notifSvc: notifSvc, media: media}
 }
+
+func (s *Service) SetFed(f fedResolver) { s.fed = f }
 
 func RegisterRoutes(r chi.Router, s *Service) {
 	// Settings
@@ -62,6 +85,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/admin/federation/instances",              s.AddInstance)
 	r.Post("/admin/federation/instances/{id}/block",   s.BlockInstance)
 	r.Post("/admin/federation/instances/{id}/unblock", s.UnblockInstance)
+	r.Delete("/admin/federation/instances/{id}",       s.DisconnectInstance)
+	// AGORA-322: per-peer timeline exchange.
+	r.Put("/admin/federation/instances/{id}/timeline", s.SetInstanceTimelineExchange)
 
 	// Instance rules
 	r.Get("/admin/rules",             s.ListRules)
@@ -78,6 +104,13 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// Media cleanup
 	r.Get("/admin/media/orphans",    s.ScanOrphans)
 	r.Delete("/admin/media/orphans", s.DeleteOrphans)
+
+	// AGORA-380: remote media cache
+	r.Get("/admin/media/remote-cache",        s.GetRemoteMediaCache)
+	r.Put("/admin/media/remote-cache",        s.UpdateRemoteMediaCache)
+	r.Post("/admin/media/remote-cache/prune", s.PruneRemoteMediaCache)
+	r.Delete("/admin/media/remote-cache",     s.ClearRemoteMediaCache)
+	r.Post("/admin/federation/refresh-profiles", s.RefreshRemoteProfiles)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -92,6 +125,19 @@ var adminEditableSettings = map[string]bool{
 	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "deletion_grace_days": true, "logo_url": true,
 	"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
 	"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
+	// AGORA-285: 'auto' or 'manual' — whether a DNS-verified custom domain
+	// claim goes live on its own or waits in the approval queue (AGORA-286).
+	"custom_domain_approval": true,
+	// AGORA-329: 'anyone' or 'peered_only', who may send a friend request.
+	"friend_requests_from": true,
+	// AGORA-361: 'true' or 'false', whether the sole user of a single-user
+	// instance may claim the instance's own domain as their handle.
+	"single_user_domain_handle": true,
+	// AGORA-406: extra email domains to refuse at signup, on top of the
+	// built-in disposable list. Comma or newline separated.
+	"blocked_email_domains": true,
+	// AGORA-407: 'on' or 'off', the proof-of-work signup check.
+	"signup_challenge": true,
 }
 
 func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
@@ -150,11 +196,18 @@ func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Service) GetStats(w http.ResponseWriter, r *http.Request) {
 	var totalUsers, postsToday, activeUsers7d, pendingReports int
 
+	// AGORA-356: postsToday/activeUsers7d had no is_remote filter, so a
+	// followed fediverse/Bluesky account's ingested posts inflated both —
+	// "Active (7d)" in particular counted every remote author whose post we
+	// happened to ingest that week as if they were an active local user.
+	// A remote-ingested post row is always flagged is_remote = true itself
+	// (mirroring its author), so filtering the post is enough here — no
+	// join back to users is needed.
 	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_remote = false`).Scan(&totalUsers)
-	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE created_at > NOW() - INTERVAL '1 day' AND deleted_at IS NULL`).Scan(&postsToday)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE created_at > NOW() - INTERVAL '1 day' AND deleted_at IS NULL AND is_remote = false`).Scan(&postsToday)
 	s.db.QueryRow(`
 		SELECT COUNT(DISTINCT author_id) FROM posts
-		WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL
+		WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL AND is_remote = false
 	`).Scan(&activeUsers7d)
 	s.db.QueryRow(`SELECT COUNT(*) FROM reports WHERE status = 'pending'`).Scan(&pendingReports)
 
@@ -322,15 +375,27 @@ func (s *Service) RevokeInvite(w http.ResponseWriter, r *http.Request) {
 
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
+// auditPageSize is a var so tests can page through a handful of rows.
+var auditPageSize = 50
+
+// GetAuditLog answers GET /admin/audit-log?page=N, newest first.
+//
+// AGORA-397: it used to return the latest 200 and ignore page, so mobile's
+// Previous/Next did nothing. It now pages and says whether there is more, and
+// names the account a user-targeted action was about (target_id alone is a
+// UUID nobody can read).
 func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 0 { page = 0 }
+
 	rows, err := s.db.Query(`
 		SELECT a.id, a.action, a.target_type, a.target_id, a.details, a.created_at,
 		       u.username
 		FROM audit_log a
 		LEFT JOIN users u ON u.id = a.actor_id
-		ORDER BY a.created_at DESC
-		LIMIT 200
-	`)
+		ORDER BY a.created_at DESC, a.id
+		LIMIT $1 OFFSET $2
+	`, auditPageSize+1, page*auditPageSize)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -338,22 +403,60 @@ func (s *Service) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Entry struct {
-		ID         string  `json:"id"`
-		Action     string  `json:"action"`
-		TargetType string  `json:"target_type"`
-		TargetID   string  `json:"target_id"`
-		Details    string  `json:"details"`
-		CreatedAt  string  `json:"created_at"`
-		Actor      *string `json:"actor_username"`
+		ID             string  `json:"id"`
+		Action         string  `json:"action"`
+		TargetType     string  `json:"target_type"`
+		TargetID       string  `json:"target_id"`
+		TargetUsername *string `json:"target_username"`
+		Details        string  `json:"details"`
+		CreatedAt      string  `json:"created_at"`
+		Actor          *string `json:"actor_username"`
 	}
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Details, &e.CreatedAt, &e.Actor)
+		if err := rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Details, &e.CreatedAt, &e.Actor); err != nil {
+			writeError(w, 500, "db error")
+			return
+		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	hasMore := len(entries) > auditPageSize
+	if hasMore { entries = entries[:auditPageSize] }
+
+	// Looked up separately rather than joined: target_id is text, and casting
+	// users.id to match it would cost a scan of users for every row.
+	var userIDs []string
+	for _, e := range entries {
+		if e.TargetType == "user" {
+			if _, err := uuid.Parse(e.TargetID); err == nil {
+				userIDs = append(userIDs, e.TargetID)
+			}
+		}
+	}
+	if len(userIDs) > 0 {
+		names := map[string]string{}
+		urows, err := s.db.Query(`SELECT id, username FROM users WHERE id = ANY($1::uuid[])`, pq.Array(userIDs))
+		if err == nil {
+			for urows.Next() {
+				var id, name string
+				if urows.Scan(&id, &name) == nil { names[id] = name }
+			}
+			urows.Close()
+		}
+		for i := range entries {
+			if name, ok := names[entries[i].TargetID]; ok && entries[i].TargetType == "user" {
+				entries[i].TargetUsername = &name
+			}
+		}
+	}
+
 	if entries == nil { entries = []Entry{} }
-	writeJSON(w, 200, map[string]any{"entries": entries})
+	writeJSON(w, 200, map[string]any{"entries": entries, "has_more": hasMore})
 }
 
 // ── Federation ────────────────────────────────────────────────────────────────
@@ -366,45 +469,53 @@ func (s *Service) AddInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "domain required")
 		return
 	}
-	domain := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(req.Domain), "https://"), "http://")
-	domain = strings.Split(domain, "/")[0]
+	if s.fed == nil {
+		writeError(w, 503, "federation service unavailable")
+		return
+	}
 
-	// Fetch instance info to verify it's a real Agora instance
+	// AGORA-324: resolution and host validation live in
+	// federation.FetchInstanceInfo, behind the SSRF-safe dialer. This used
+	// to be a bare http.Client here with no host validation at all, so a
+	// domain resolving to loopback or the cloud metadata endpoint was fetched
+	// and partly echoed back in the response.
+	//
+	// AGORA-330: the third return was the peer's Ed25519 key and is now always
+	// empty, since neither side signs with one. Discarded here rather than
+	// changing the signature, which several callers share.
+	domain, name, _, err := s.fed.FetchInstanceInfo(req.Domain)
+	if err != nil {
+		writeError(w, 422, "could not reach instance. Make sure it is an Agora instance with federation enabled ("+err.Error()+")")
+		return
+	}
 	instanceURL := "https://" + domain
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Get(instanceURL + "/.well-known/agora-instance")
-	if err != nil || resp.StatusCode != 200 {
-		writeError(w, 422, "could not reach instance — make sure it is an Agora instance with federation enabled")
-		return
-	}
-	defer resp.Body.Close()
 
-	var info struct {
-		Name      string `json:"name"`
-		PublicKey string `json:"public_key"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		writeError(w, 422, "invalid response from instance")
-		return
-	}
-
+	// AGORA-321: adding from here is an outbound peering. If they had already
+	// contacted us the row exists as 'inbound', and adding them makes it
+	// mutual rather than overwriting how it started.
+	// AGORA-330: public_key is no longer written. It held the peer's
+	// instance-wide Ed25519 key for the legacy transport, which is gone; the
+	// column stays only so an upgrade does not have to rewrite the table.
 	s.db.Exec(`
-		INSERT INTO federated_instances (domain, name, public_key, instance_url, status)
-		VALUES ($1, $2, $3, $4, 'active')
+		INSERT INTO federated_instances (domain, name, instance_url, status, direction)
+		VALUES ($1, $2, $3, 'active', 'outbound')
 		ON CONFLICT (domain) DO UPDATE
-		  SET name = $2, public_key = $3, instance_url = $4, status = 'active', last_seen_at = NOW()
-	`, domain, info.Name, info.PublicKey, instanceURL)
+		  SET name = $2, instance_url = $3, status = 'active', last_seen_at = NOW(),
+		      direction = CASE WHEN federated_instances.direction = 'inbound' THEN 'mutual'
+		                       ELSE 'outbound' END
+	`, domain, name, instanceURL)
 
 	actorID := auth.UserIDFromCtx(r.Context())
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id, details) VALUES ($1, 'add_instance', 'instance', $2, $3)`,
 		actorID, domain, instanceURL)
 
-	writeJSON(w, 201, map[string]string{"message": "instance added", "domain": domain, "name": info.Name})
+	writeJSON(w, 201, map[string]string{"message": "instance added", "domain": domain, "name": name})
 }
 
 func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, domain, name, instance_url, status, last_seen_at, created_at
+		SELECT id, domain, name, instance_url, status, direction, last_seen_at, created_at,
+		       COALESCE(timeline_exchange, false), COALESCE(carries_our_timeline, false)
 		FROM federated_instances
 		ORDER BY last_seen_at DESC
 	`)
@@ -420,32 +531,157 @@ func (s *Service) ListInstances(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		InstanceURL string `json:"instance_url"`
 		Status      string `json:"status"`
-		LastSeenAt  string `json:"last_seen_at"`
-		CreatedAt   string `json:"created_at"`
+		// AGORA-321: 'outbound' (an admin here added them), 'inbound' (they
+		// contacted us first), 'mutual' (both), or 'unknown' for rows that
+		// predate the column and can't be reconstructed.
+		Direction  string `json:"direction"`
+		LastSeenAt string `json:"last_seen_at"`
+		CreatedAt  string `json:"created_at"`
+		// AGORA-322, two independent directions. TimelineExchange is our
+		// subscription to them; CarriesOurTimeline is theirs to us, which they
+		// decide and we only report.
+		TimelineExchange   bool `json:"timeline_exchange"`
+		CarriesOurTimeline bool `json:"carries_our_timeline"`
 	}
 	var instances []Instance
 	for rows.Next() {
 		var inst Instance
 		rows.Scan(&inst.ID, &inst.Domain, &inst.Name, &inst.InstanceURL,
-			&inst.Status, &inst.LastSeenAt, &inst.CreatedAt)
+			&inst.Status, &inst.Direction, &inst.LastSeenAt, &inst.CreatedAt,
+			&inst.TimelineExchange, &inst.CarriesOurTimeline)
 		instances = append(instances, inst)
 	}
 	if instances == nil { instances = []Instance{} }
 	writeJSON(w, 200, map[string]any{"instances": instances})
 }
 
+// SetInstanceTimelineExchange turns a peer's timeline exchange on or off
+// (AGORA-322). Default off for every peer, including existing ones: turning it
+// on changes what every local user sees in Explore.
+func (s *Service) SetInstanceTimelineExchange(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actorID := auth.UserIDFromCtx(r.Context())
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+
+	var domain, status string
+	if err := s.db.QueryRow(`SELECT domain, status FROM federated_instances WHERE id = $1`, id).
+		Scan(&domain, &status); err != nil {
+		writeError(w, 404, "instance not found")
+		return
+	}
+	if status == "blocked" && req.Enabled {
+		writeError(w, 409, "this instance is blocked. Unblock it first if you want to carry its posts")
+		return
+	}
+	if s.fed == nil {
+		writeError(w, 503, "federation is not available")
+		return
+	}
+	if err := s.fed.SetTimelineExchange(domain, req.Enabled); err != nil {
+		writeError(w, 422, err.Error())
+		return
+	}
+
+	action := "disable_timeline_exchange"
+	if req.Enabled {
+		action = "enable_timeline_exchange"
+	}
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, $2, 'instance', $3)`,
+		actorID, action, domain)
+
+	writeJSON(w, 200, map[string]any{"domain": domain, "timeline_exchange": req.Enabled})
+}
+
 func (s *Service) BlockInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	actorID := auth.UserIDFromCtx(r.Context())
-	s.db.Exec(`UPDATE federated_instances SET status = 'blocked' WHERE id = $1`, id)
+	// AGORA-322: blocking stops the exchange in both directions. A blocked
+	// instance neither receives our timeline nor has its posts ingested, and
+	// leaving the flags set would have made an unblock silently resume both.
+	res, err := s.db.Exec(`
+		UPDATE federated_instances
+		   SET status = 'blocked', timeline_exchange = false, carries_our_timeline = false
+		 WHERE id = $1
+	`, id)
+	if err != nil {
+		writeError(w, 400, "invalid instance id")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "instance not found")
+		return
+	}
 	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'block_instance', 'instance', $2)`, actorID, id)
 	writeJSON(w, 200, map[string]string{"message": "instance blocked"})
 }
 
 func (s *Service) UnblockInstance(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	s.db.Exec(`UPDATE federated_instances SET status = 'active' WHERE id = $1`, id)
+	res, err := s.db.Exec(`UPDATE federated_instances SET status = 'active' WHERE id = $1`, id)
+	if err != nil {
+		writeError(w, 400, "invalid instance id")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, 404, "instance not found")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"message": "instance unblocked"})
+}
+
+// DisconnectInstance forgets a peer (AGORA-320).
+//
+// Distinct from Block, which is a moderation verdict enforced everywhere by
+// isInstanceBlocked. Disconnect means "we are not peered with them", not "we
+// refuse them": the row goes away, nothing is delivered to them any more, and
+// if they later send a validly signed activity they re-register through the
+// normal first-contact path. An admin who wants a standing refusal wants
+// Block, which is why disconnecting a blocked instance is refused outright
+// rather than silently unblocking it.
+//
+// Remote accounts cached from that instance and their posts are deliberately
+// kept: a local user may be friends with them, and deleting would destroy
+// those friendships and their content as a side effect of an admin tidying up
+// a peer list. Re-peering then simply works.
+func (s *Service) DisconnectInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actorID := auth.UserIDFromCtx(r.Context())
+
+	var domain, status string
+	if err := s.db.QueryRow(`SELECT domain, status FROM federated_instances WHERE id = $1`, id).
+		Scan(&domain, &status); err != nil {
+		writeError(w, 404, "instance not found")
+		return
+	}
+	if status == "blocked" {
+		writeError(w, 409, "this instance is blocked. Unblock it first if you also want to stop refusing its traffic, or leave it blocked to keep refusing it")
+		return
+	}
+
+	// AGORA-322: disconnecting stops the exchange too, and the Undo has to go
+	// out before the row is deleted, since the row is where the domain lives.
+	// Best effort: the peering is being removed either way, and a peer that
+	// never hears the Undo simply stops being delivered to.
+	if s.fed != nil {
+		s.fed.SetTimelineExchange(domain, false)
+	}
+
+	if _, err := s.db.Exec(`DELETE FROM federated_instances WHERE id = $1`, id); err != nil {
+		writeError(w, 500, "could not disconnect instance")
+		return
+	}
+
+	s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, target_id) VALUES ($1, 'disconnect_instance', 'instance', $2)`,
+		actorID, domain)
+
+	writeJSON(w, 200, map[string]string{"message": "instance disconnected", "domain": domain})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

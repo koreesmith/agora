@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -25,10 +26,34 @@ func Open(dsn string) (*DB, error) {
 	return &DB{db}, nil
 }
 
+// migrationLockKey names the advisory lock Migrate holds. Any constant works,
+// as long as nothing else in the database uses the same one.
+const migrationLockKey int64 = 0x61676f7261 // "agora"
+
+// Migrate brings the schema up to date.
+//
+// AGORA-399: it holds a Postgres advisory lock while it runs, so concurrent
+// migrators (two backends starting at once, or parallel test packages sharing
+// one database) take turns instead of running the same statement together,
+// which failed with errors like `constraint ... already exists`. The lock is
+// session-level, so the statements run on the one connection that holds it.
+// A migrator that waits finds everything already applied.
 func (db *DB) Migrate() error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		return fmt.Errorf("migrate: lock: %w", err)
+	}
+	defer conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
+
 	log.Println("store: running migrations")
 	for i, m := range schema {
-		if _, err := db.Exec(m); err != nil {
+		if _, err := conn.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i, err)
 		}
 	}
@@ -154,7 +179,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS reactions (
 		user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		post_id         UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit')),
+		reaction_type   VARCHAR(20) NOT NULL CHECK (reaction_type IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike')),
 		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (user_id, post_id)
 	)`,
@@ -220,7 +245,28 @@ var schema = []string{
 		('smtp_from',            'noreply@localhost'),
 		('smtp_enabled',         'false'),
 		('logo_url',             ''),
-		('atproto_enabled',      'false')
+		('atproto_enabled',      'false'),
+		-- AGORA-285: 'manual' or 'auto'. Defaults to manual so the feature
+		-- can't silently start binding handles on an instance that upgrades
+		-- into it — DNS verification already proves the user controls the
+		-- domain, so auto is a perfectly reasonable choice, just not one to
+		-- make on an admin's behalf.
+		('custom_domain_approval', 'manual'),
+		-- AGORA-329: 'anyone' or 'peered_only'. A friend request is the one
+		-- inbound activity that demands a human response, which makes it a spam
+		-- surface an ordinary follow is not. Defaults open, matching the
+		-- position everywhere else in the federation layer; the setting is the
+		-- lever for an admin receiving sprayed requests, so they do not need a
+		-- code change to respond.
+		('friend_requests_from', 'anyone'),
+		-- AGORA-361: 'true' or 'false'. Lets the sole user of a single-user
+		-- instance claim the instance's own domain as their AT Proto handle
+		-- with no DNS setup, since the instance's own web server already
+		-- answers for that domain. Defaults false: it only ever does anything
+		-- when the instance also genuinely has exactly one real user, but an
+		-- admin should still turn it on deliberately rather than have it
+		-- appear automatically on every upgrade.
+		('single_user_domain_handle', 'false')
 	ON CONFLICT (key) DO NOTHING`,
 
 	// ── Federated instances ────────────────────────────────────────────────
@@ -340,18 +386,6 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_rules_position ON instance_rules(position ASC)`,
-
-	// Outbound federation queue — retry table for failed/pending sends
-	`CREATE TABLE IF NOT EXISTS federation_queue (
-		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
-		instance_url  TEXT        NOT NULL,
-		payload       JSONB       NOT NULL,
-		attempts      INT         NOT NULL DEFAULT 0,
-		last_error    TEXT        NOT NULL DEFAULT '',
-		next_attempt  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_fed_queue_next ON federation_queue(next_attempt ASC) WHERE attempts < 10`,
 
 	// Track when remote user profiles were last synced
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_synced_at TIMESTAMPTZ`,
@@ -500,7 +534,13 @@ var schema = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS waitlist_token TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_users_waitlist ON users(waitlist_status, created_at) WHERE waitlist_status = 'pending'`,
 	`ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_reaction_type_check`,
-	`ALTER TABLE reactions ADD CONSTRAINT reactions_reaction_type_check CHECK (reaction_type IN ('like','love','laugh','wow','angry','care','pride','thankful','vomit'))`,
+	// AGORA-305: 'vomit' retired in favour of 'dislike'. Must sit between the
+	// DROP and the ADD above/below, because with either constraint in force the
+	// UPDATE violates it (the old list has no 'dislike', the new one no 'vomit').
+	// Idempotent by nature rather than guarded: once the new constraint is on,
+	// no row can become 'vomit' again, so this can never re-fire on live data.
+	`UPDATE reactions SET reaction_type = 'dislike' WHERE reaction_type = 'vomit'`,
+	`ALTER TABLE reactions ADD CONSTRAINT reactions_reaction_type_check CHECK (reaction_type IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike'))`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_expires_at TIMESTAMPTZ`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_multiple_choice BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS poll_allows_new_options BOOLEAN NOT NULL DEFAULT FALSE`,
@@ -901,6 +941,39 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_at_following_user ON at_following(local_user_id)`,
 
+	// AGORA-313: the inbound counterpart to at_following, and the AT Proto
+	// counterpart to ap_followers. It exists because nothing tells us about a
+	// Bluesky follow: the follow is a record in the *follower's* own repo,
+	// never delivered here (see the AGORA-249 note in internal/atproto/
+	// follow.go), so the only way to notice one is to poll getFollowers and
+	// diff it against what we saw last time. That makes this table the memory
+	// the diff needs, not a cache we could rebuild on demand.
+	`CREATE TABLE IF NOT EXISTS at_followers (
+		id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		local_user_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		follower_did  TEXT        NOT NULL,
+		first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (local_user_id, follower_did)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_at_followers_user ON at_followers(local_user_id)`,
+
+	// AGORA-313: set once the first getFollowers walk for this account has
+	// been persisted. The first walk is a silent fill, since every follower it
+	// finds predates the feature and notifying for those would mean a
+	// notification per existing follower on the first boot after deploy. This
+	// is a per-user flag rather than an "is at_followers empty for them" test
+	// because those differ for an account with no followers at all: the empty
+	// test would swallow that account's genuine first follower forever.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_followers_seeded BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-348: when pollFollowersFor last completed a getFollowers walk for
+	// this account, successful or not — at_followers is only ever as current
+	// as this timestamp, since AT Proto never delivers a follow to us the way
+	// ap_followers gets pushed to. Lets the followers list distinguish "no
+	// followers yet" from "not synced yet" rather than rendering both as an
+	// empty list.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS atproto_followers_synced_at TIMESTAMPTZ`,
+
 	// atproto_account/atproto_all custom-feed filter types (analogous to
 	// fediverse_account/fediverse_all, AGORA-146) were added to the single
 	// authoritative filter_type CHECK constraint above (search
@@ -1064,4 +1137,713 @@ var schema = []string{
 	`ALTER TABLE posts ALTER COLUMN published_at SET DEFAULT NOW()`,
 	`ALTER TABLE posts ALTER COLUMN published_at SET NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published_at DESC)`,
+
+	// AGORA-281: a user's claim on their own domain as a handle alias. The
+	// protocol column is what makes this table shared rather than AT-Proto-
+	// specific: AGORA-278 only ever writes 'atproto' rows, but the fediverse
+	// custom-domain epic (AGORA-279) verifies domain ownership the same way
+	// and differs only in what it does with a verified domain, so it lands as
+	// a second protocol value here rather than a parallel table.
+	//
+	// verification_status and approval_status are deliberately separate axes,
+	// not one lifecycle column: DNS proves the user controls the domain,
+	// approval is the instance's policy decision about whether to honor it
+	// (AGORA-285), and either can change without the other. A handle only
+	// goes live when both say yes — see liveCustomDomain in internal/domains.
+	`CREATE TABLE IF NOT EXISTS custom_domains (
+		id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		domain              TEXT        NOT NULL,
+		protocol            VARCHAR(20) NOT NULL DEFAULT 'atproto'
+		                      CHECK (protocol IN ('atproto','activitypub')),
+		verification_method VARCHAR(20) NOT NULL DEFAULT ''
+		                      CHECK (verification_method IN ('','dns','well-known')),
+		verification_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+		                      CHECK (verification_status IN ('pending','verified','failed')),
+		approval_status     VARCHAR(20) NOT NULL DEFAULT 'pending'
+		                      CHECK (approval_status IN ('pending','approved','rejected')),
+		last_error          TEXT        NOT NULL DEFAULT '',
+		rejection_reason    TEXT        NOT NULL DEFAULT '',
+		reviewed_by         UUID        REFERENCES users(id) ON DELETE SET NULL,
+		verified_at         TIMESTAMPTZ,
+		last_checked_at     TIMESTAMPTZ,
+		reviewed_at         TIMESTAMPTZ,
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	// AGORA-290: one live claimant per domain. Rejected rows are excluded so an
+	// admin's rejection doesn't permanently burn the domain for everybody —
+	// the row sticks around only so the rejected user can still see why.
+	// Claim-jumping an *unverified* row is handled in ClaimDomain (stale
+	// claims are reclaimable), not here; this index is the hard backstop that
+	// keeps two accounts from ever holding the same live handle.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_domains_domain
+		ON custom_domains(domain, protocol) WHERE approval_status <> 'rejected'`,
+	// One row per user per protocol, full stop — an AT Proto DID has exactly
+	// one handle, so a second claim would only raise the question of which of
+	// them is the handle. Claiming a new domain replaces the row rather than
+	// adding to it (see ClaimDomain), which also means a rejected claim can't
+	// accumulate as clutter the user can never clear.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_domains_user
+		ON custom_domains(user_id, protocol)`,
+	// Drives both the admin approval queue (AGORA-286) and the periodic
+	// re-verification sweep (AGORA-289), which scan by status, not by user.
+	`CREATE INDEX IF NOT EXISTS idx_custom_domains_status
+		ON custom_domains(verification_status, approval_status)`,
+
+	// AGORA-303: pinned feeds drive the feed picker. Only pinned feeds get a
+	// pill; the rest live in the picker's overflow menu. position orders the
+	// pinned set and is meaningless for unpinned rows.
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS pinned   BOOLEAN NOT NULL DEFAULT false`,
+	`ALTER TABLE custom_feeds ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0`,
+	`CREATE INDEX IF NOT EXISTS idx_custom_feeds_pinned ON custom_feeds(owner_id, pinned, position)`,
+
+	// One-shot data backfills, which this migration list cannot otherwise
+	// express: it re-runs every statement on every startup, so any backfill
+	// whose WHERE clause can become true again will silently undo the user's
+	// later edits. A named marker row is the guard. Backfills stay as two
+	// statements (do the work, then claim the name) so that a crash between
+	// them just repeats an idempotent update rather than skipping it.
+	`CREATE TABLE IF NOT EXISTS schema_backfills (
+		name       TEXT        PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-303: existing users predate pinning and would otherwise land on a
+	// picker showing only Home with every feed buried in the overflow menu, so
+	// pin their 3 oldest feeds. Oldest-first because the pre-AGORA-303 picker
+	// listed newest-first, which means the feeds a user has lived with longest
+	// are the ones that kept getting pushed rightward off the row.
+	//
+	// Guarded rather than idempotent-by-nature: "user has no pinned feeds" goes
+	// true again the moment someone unpins everything, and re-pinning on the
+	// next restart would read as the picker undoing their choice.
+	`UPDATE custom_feeds cf
+		SET pinned   = true,
+		    position = r.rn - 1
+		FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY owner_id ORDER BY created_at ASC) AS rn
+			  FROM custom_feeds
+		) r
+		WHERE cf.id = r.id
+		  AND r.rn <= 3
+		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_303_pin_oldest_feeds')`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_303_pin_oldest_feeds')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-305: DM reactions predate the shared reaction set and stored the
+	// raw glyph, while post reactions have always stored a type name. Fold DMs
+	// onto the type names so both surfaces read from one source of truth and a
+	// future emoji change applies retroactively here too, instead of leaving
+	// historical DM reactions frozen at whatever glyph was current when they
+	// were sent. The six glyphs the picker ever offered map one-to-one, so
+	// nothing is lost. The heart is matched both with and without its
+	// variation selector, since only the composed form was ever sent but the
+	// bare codepoint is indistinguishable to a reader.
+	`UPDATE message_reactions
+		SET reaction = CASE reaction
+			WHEN '❤️' THEN 'love'
+			WHEN '❤'  THEN 'love'
+			WHEN '😂' THEN 'laugh'
+			WHEN '😮' THEN 'wow'
+			WHEN '😢' THEN 'sad'
+			WHEN '👍' THEN 'like'
+			WHEN '👎' THEN 'dislike'
+		END
+		WHERE reaction IN ('❤️','❤','😂','😮','😢','👍','👎')`,
+
+	// The react endpoint accepted any non-empty string before AGORA-305 added
+	// validation, so a crafted request could have stored a value the picker
+	// never offered. Those rows would block the constraint below and cannot
+	// render as anything meaningful now, so they're dropped rather than left to
+	// fail startup. Real reactions are covered by the remap above.
+	`DELETE FROM message_reactions
+		WHERE reaction NOT IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike')`,
+	`ALTER TABLE message_reactions DROP CONSTRAINT IF EXISTS message_reactions_reaction_check`,
+	`ALTER TABLE message_reactions ADD CONSTRAINT message_reactions_reaction_check
+		CHECK (reaction IN ('like','love','laugh','wow','care','thankful','pride','sad','angry','dislike'))`,
+
+	// AGORA-306: the remote actor's own "manuallyApprovesFollowers" (Mastodon's
+	// "require follow requests" — a locked account). ap_following.accepted
+	// already records the outcome of a follow, but never the cause, so a follow
+	// waiting on a human's approval was indistinguishable from one whose Accept
+	// was merely slow or whose delivery failed outright.
+	//
+	// Defaults false so an actor document that omits the field, and every stub
+	// cached before this column existed, reads as unlocked rather than
+	// spuriously locked; upsertRemoteAPUser corrects each row on its next
+	// actor fetch, which is why there's no backfill statement here.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS manually_approves_followers BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-317: the same defect AGORA-164 fixed for ActivityPub stubs (783),
+	// on the legacy Agora-to-Agora protocol's own stub path. profile_private
+	// defaults to TRUE, getOrCreateRemoteUser never set it, so every account
+	// cached from a federated Agora instance was created private: filtered
+	// out of PublicFeed and 403ing on its own permalink, which meant nothing
+	// ingested over that protocol was ever visible. getOrCreateRemoteUser now
+	// sets it explicitly; this repairs the rows created before that.
+	//
+	// Scoped on remote_user_id rather than remote_instance: all three remote
+	// sources populate remote_instance, but only the legacy path writes
+	// remote_user_id, so this cannot reach an ActivityPub stub (ap_actor_url)
+	// or a Bluesky one (atproto_remote_did), both of which already set
+	// profile_private themselves. Unguarded, like 783: once the insert above
+	// sets the column, no code path turns a remote stub private again, so the
+	// WHERE clause cannot become true a second time and there is nothing for
+	// a schema_backfills marker to protect.
+	`UPDATE users SET profile_private = false
+		WHERE is_remote = true AND profile_private = true
+		  AND remote_user_id != '' AND ap_actor_url = '' AND atproto_remote_did = ''`,
+
+	// AGORA-331: the legacy profile_update broadcast sent avatar_url straight
+	// from the origin's database, where an upload is a relative /uploads/...
+	// path (media.SaveUpload). The receiving instance stored that verbatim and
+	// its frontend then requested it from its own domain, so a federated
+	// friend's avatar broke the moment they next edited their profile. The
+	// broadcast is gone (AGORA-327) and both the inbound handler and the stub
+	// refresh now absolutize, but rows corrupted before that need repairing.
+	//
+	// Rebuilt from remote_instance, which is the domain the path belongs to.
+	// Scoped to legacy stubs (remote_user_id set), the only ones that path
+	// could reach: an ActivityPub or Bluesky stub always stored an absolute URL
+	// and must not be touched.
+	//
+	// Unguarded and idempotent by nature: once a value starts with http it no
+	// longer matches, and nothing writes a relative avatar to a remote stub any
+	// more, so the predicate cannot become true again.
+	//
+	// AGORA-382: except a local copy from the remote media cache (AGORA-380),
+	// which is relative on purpose and lives on this instance, not the remote
+	// one. The remote_user_id scoping above never kept ActivityPub stubs out
+	// either (upsertRemoteAPUser sets it too), so without this exclusion every
+	// restart pointed every cached avatar at the remote server.
+	`UPDATE users SET avatar_url = 'https://' || remote_instance || '/' || LTRIM(avatar_url, '/')
+		WHERE is_remote = true
+		  AND remote_user_id != '' AND remote_instance != ''
+		  AND avatar_url != '' AND avatar_url NOT LIKE 'http%'
+		  AND avatar_url NOT LIKE '/uploads/remote/%'`,
+
+	// AGORA-336: an accepted friendship with a remote Agora user implies a
+	// follow of them (ADR-002), because that is what makes their posts flow.
+	// AGORA-329 sent the Follow activity but never wrote the local
+	// ap_following row, so the remote instance delivered posts that
+	// ingestFollowedPost then dropped for want of an accepted follow. The send
+	// path now records it; friendships accepted before that need repairing, or
+	// they stay permanently silent.
+	//
+	// accepted = true because the friendship itself is the evidence: both sides
+	// agreed, which is a stronger signal than the Accept this row would
+	// otherwise be waiting on and which is never coming a second time.
+	//
+	// The inbox is derived rather than fetched. Agora advertises a single
+	// shared /federation/inbox on every actor document, so for a peer known to
+	// be Agora (ap_actor_url set, which only the AP path writes) it is
+	// deterministic and needs no network round trip during a migration.
+	//
+	// Guarded: "friends but not following" goes true again the moment someone
+	// deliberately unfollows a friend, and re-adding it on the next restart
+	// would read as the instance overriding their choice.
+	`INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		SELECT l.id, r.ap_actor_url, 'https://' || r.remote_instance || '/federation/inbox', true
+		  FROM friendships f
+		  JOIN users l ON l.id = f.requester_id AND l.is_remote = false
+		  JOIN users r ON r.id = f.addressee_id AND r.is_remote = true
+		 WHERE f.status = 'accepted'
+		   AND COALESCE(r.ap_actor_url,'') != '' AND COALESCE(r.remote_instance,'') != ''
+		   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_336_friendship_following')
+		ON CONFLICT (follower_user_id, followed_actor_url) DO NOTHING`,
+	`INSERT INTO ap_following (follower_user_id, followed_actor_url, followed_inbox_url, accepted)
+		SELECT l.id, r.ap_actor_url, 'https://' || r.remote_instance || '/federation/inbox', true
+		  FROM friendships f
+		  JOIN users l ON l.id = f.addressee_id AND l.is_remote = false
+		  JOIN users r ON r.id = f.requester_id AND r.is_remote = true
+		 WHERE f.status = 'accepted'
+		   AND COALESCE(r.ap_actor_url,'') != '' AND COALESCE(r.remote_instance,'') != ''
+		   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_336_friendship_following')
+		ON CONFLICT (follower_user_id, followed_actor_url) DO NOTHING`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_336_friendship_following')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-342: who an inbound limited-audience post was addressed to.
+	//
+	// A friends-only post needs no such record, because the audience is
+	// derivable at both ends from a friendship both ends already hold
+	// (AGORA-337). A friend-list post is not: the list is the author's own
+	// private categorization, and ADR-002 keeps its membership off the wire, so
+	// the receiving instance is told only that it was addressed and to whom on
+	// its own side. That per-recipient fact has nowhere else to live.
+	//
+	// Deliberately not a friend_groups reference. The receiving instance has no
+	// row for somebody else's "Close Friends" and must never invent one; all it
+	// knows, and all it needs, is which of its users may see this post.
+	`CREATE TABLE IF NOT EXISTS post_audience (
+		post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		PRIMARY KEY (post_id, user_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_audience_user ON post_audience(user_id)`,
+
+	// AGORA-321: how a peering started. Two unrelated events wrote
+	// federated_instances rows that were then indistinguishable: an admin
+	// deliberately adding a peer (AddInstance), and an unknown instance being
+	// registered as a side effect of fetching its key to verify an inbound
+	// activity (getRemotePublicKey). An admin had no way to answer "who has
+	// federated with us", which is the question this column exists for.
+	//
+	// 'unknown' rather than a guess for pre-existing rows: direction cannot be
+	// reconstructed after the fact, and the backfill below only claims the
+	// ones the audit log can actually prove.
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS direction VARCHAR(10) NOT NULL DEFAULT 'unknown'`,
+	`ALTER TABLE federated_instances DROP CONSTRAINT IF EXISTS federated_instances_direction_check`,
+	`ALTER TABLE federated_instances ADD CONSTRAINT federated_instances_direction_check
+		CHECK (direction IN ('outbound','inbound','mutual','unknown'))`,
+
+	// AddInstance writes an audit_log row per add (target_type = 'instance',
+	// target_id = the domain), so a row with a matching entry was added from
+	// this side. Everything else stays 'unknown' rather than being assumed
+	// inbound. An audit log that has been trimmed would otherwise turn every
+	// old outbound peering into a false "they connected to you".
+	//
+	// Guarded: an admin may legitimately correct a direction later, and this
+	// list replays on every boot, so an unguarded version would keep
+	// overwriting their edit.
+	`UPDATE federated_instances fi
+		SET direction = 'outbound'
+		WHERE fi.direction = 'unknown'
+		  AND EXISTS (
+		    SELECT 1 FROM audit_log al
+		     WHERE al.action = 'add_instance' AND al.target_id = fi.domain
+		  )
+		  AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_321_instance_direction')`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_321_instance_direction')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// ── AGORA-330: the legacy Agora-to-Agora transport is gone ──────────────
+	//
+	// Nothing signs, verifies, queues or dispatches one of its activities any
+	// more, so the storage it needed goes with it rather than sitting around as
+	// a thing a future reader has to work out the status of.
+	//
+	// The instance-wide Ed25519 keypair goes first and deliberately. A signing
+	// key that nothing signs with is worse than dead weight: it is a credential
+	// with no owner, and AGORA-143 already had to specially exclude it from the
+	// admin settings API to keep it from being read back over HTTP. Deleting it
+	// is the point of this step, not tidying afterwards.
+	//
+	// Note this is instance_settings, not the users/pages columns of the same
+	// name. Those hold the per-actor RSA keys that ActivityPub's HTTP Signatures
+	// sign with, which are load-bearing and stay.
+	`DELETE FROM instance_settings WHERE key IN ('federation_public_key', 'federation_private_key')`,
+
+	// Anything still queued here was undeliverable regardless: the receiving end
+	// of this protocol no longer exists on either instance.
+	`DROP TABLE IF EXISTS federation_queue`,
+
+	// federated_instances.public_key held the peer's key for the same protocol
+	// and is no longer written. The column stays, blanked: dropping a column
+	// from a live table earns nothing here, and an empty value says "not used"
+	// as clearly as a missing column would.
+	`UPDATE federated_instances SET public_key = '' WHERE public_key != ''`,
+
+	// ── AGORA-346: one person, one row ─────────────────────────────────────
+	//
+	// The old protocol cached a remote person keyed on
+	// (remote_user_id, remote_instance) with no ap_actor_url. ActivityPub caches
+	// the same person keyed on ap_actor_url with no remote_user_id. Meet
+	// somebody both ways and there are two rows for one human, with the
+	// friendship on one and the posts on the other.
+	//
+	// AGORA-329 added the bridges that make that survivable and
+	// adoptActorURLForLegacyStub repairs a stub in place, but it declines when a
+	// twin already holds the actor URL, because the partial unique index on
+	// ap_actor_url would refuse it. That decline is where a duplicate becomes
+	// permanent, and merging is the only thing that resolves it.
+	//
+	// The merge lives in the database rather than in Go because it has to
+	// enumerate every foreign key pointing at users(id), and reading that from
+	// information_schema is the only version that cannot fall behind the schema.
+	// A hand-written list would be wrong the first time a table is added, and
+	// wrong in the worst way: posts.author_id is ON DELETE CASCADE, so a missed
+	// table means deleting the loser destroys somebody's posts.
+	`CREATE OR REPLACE FUNCTION agora_merge_duplicate_identity(loser UUID, winner UUID)
+	 RETURNS TEXT LANGUAGE plpgsql AS $fn$
+	 DECLARE
+	   fk       RECORD;
+	   row_ref  RECORD;
+	   leftover BIGINT;
+	   remaining BIGINT := 0;
+	 BEGIN
+	   IF loser IS NULL OR winner IS NULL OR loser = winner THEN
+	     RETURN 'skipped: not a pair';
+	   END IF;
+
+	   -- Repoint every reference, one row at a time. Per-row rather than a bulk
+	   -- UPDATE so a unique collision (both rows are friends with the same local
+	   -- user, both reacted to the same post) can be resolved precisely: the
+	   -- winner already holds the equivalent row, so the loser's copy is the
+	   -- redundant one and only that copy is dropped. A bulk UPDATE would fail
+	   -- the whole table and a bulk fallback would drop rows that never
+	   -- collided.
+	   FOR fk IN
+	     SELECT tc.table_name AS tbl, kcu.column_name AS col
+	       FROM information_schema.table_constraints tc
+	       JOIN information_schema.key_column_usage kcu
+	         ON kcu.constraint_name = tc.constraint_name
+	       JOIN information_schema.constraint_column_usage ccu
+	         ON ccu.constraint_name = tc.constraint_name
+	      WHERE tc.constraint_type = 'FOREIGN KEY'
+	        AND ccu.table_name = 'users' AND ccu.column_name = 'id'
+	        AND tc.table_schema = current_schema()
+	   LOOP
+	     FOR row_ref IN EXECUTE format('SELECT ctid FROM %I WHERE %I = $1', fk.tbl, fk.col) USING loser
+	     LOOP
+	       BEGIN
+	         EXECUTE format('UPDATE %I SET %I = $1 WHERE ctid = $2', fk.tbl, fk.col) USING winner, row_ref.ctid;
+	       EXCEPTION
+	         WHEN unique_violation OR check_violation THEN
+	           EXECUTE format('DELETE FROM %I WHERE ctid = $1', fk.tbl) USING row_ref.ctid;
+	       END;
+	     END LOOP;
+	   END LOOP;
+
+	   -- Carry the legacy key across so the historical identity still resolves,
+	   -- and so remoteUserIDForActor's second lookup keeps working.
+	   UPDATE users w
+	      SET remote_user_id  = COALESCE(NULLIF(w.remote_user_id, ''),  l.remote_user_id),
+	          remote_instance = COALESCE(NULLIF(w.remote_instance, ''), l.remote_instance)
+	     FROM users l
+	    WHERE w.id = winner AND l.id = loser;
+
+	   -- Only delete once the row provably has nothing left. The enumeration
+	   -- above is complete by construction, so this should always hold; it is
+	   -- checked anyway because the cost of being wrong is somebody's posts.
+	   FOR fk IN
+	     SELECT tc.table_name AS tbl, kcu.column_name AS col
+	       FROM information_schema.table_constraints tc
+	       JOIN information_schema.key_column_usage kcu
+	         ON kcu.constraint_name = tc.constraint_name
+	       JOIN information_schema.constraint_column_usage ccu
+	         ON ccu.constraint_name = tc.constraint_name
+	      WHERE tc.constraint_type = 'FOREIGN KEY'
+	        AND ccu.table_name = 'users' AND ccu.column_name = 'id'
+	        AND tc.table_schema = current_schema()
+	   LOOP
+	     EXECUTE format('SELECT COUNT(*) FROM %I WHERE %I = $1', fk.tbl, fk.col) INTO leftover USING loser;
+	     remaining := remaining + leftover;
+	   END LOOP;
+
+	   IF remaining > 0 THEN
+	     -- Neutered rather than deleted: blanking both keys stops it resolving
+	     -- by either identity, so it cannot claim traffic meant for the winner,
+	     -- and whatever is still attached is preserved for a human to look at.
+	     UPDATE users SET ap_actor_url = '', remote_user_id = '' WHERE id = loser;
+	     RETURN 'neutered: ' || remaining || ' reference(s) could not be moved';
+	   END IF;
+
+	   DELETE FROM users WHERE id = loser;
+	   RETURN 'merged';
+	 END;
+	 $fn$`,
+
+	// The one-shot pass over pairs that already exist. A twin is findable
+	// because the derivation is deterministic: a stub for handle h on instance i
+	// is the same person as the actor at https://i/federation/users/h, which is
+	// exactly what remoteAgoraActorURL computes.
+	//
+	// Guarded, and a no-op on an instance that never ran the old protocol, which
+	// is most of them.
+	`DO $do$
+	 DECLARE pair RECORD; n INT := 0;
+	 BEGIN
+	   IF EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'agora_346_identity_merge') THEN
+	     RETURN;
+	   END IF;
+	   FOR pair IN
+	     SELECT l.id AS loser, a.id AS winner
+	       FROM users l
+	       JOIN users a
+	         ON a.ap_actor_url = 'https://' || l.remote_instance || '/federation/users/' || l.remote_user_id
+	      WHERE l.is_remote = true
+	        AND COALESCE(l.remote_user_id, '')  != ''
+	        AND COALESCE(l.remote_instance, '') != ''
+	        AND COALESCE(l.ap_actor_url, '')     = ''
+	        AND a.id != l.id
+	   LOOP
+	     PERFORM agora_merge_duplicate_identity(pair.loser, pair.winner);
+	     n := n + 1;
+	   END LOOP;
+	   IF n > 0 THEN
+	     RAISE NOTICE 'agora-346: merged % duplicate identity row(s)', n;
+	   END IF;
+	 END
+	 $do$`,
+	`INSERT INTO schema_backfills (name) VALUES ('agora_346_identity_merge')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// ── AGORA-323: direct messages across instances ────────────────────────
+	//
+	// A federated message needs an identity of its own. remote_message_id is
+	// the sender's own object id, which is what an edit, a delete or a
+	// redelivery arrives quoting, and the only thing that can tie those back to
+	// the row here. Unique so a redelivered message is dropped rather than
+	// duplicated: peers retry, and a conversation is the worst place to see a
+	// message twice.
+	`ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_message_id TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_remote_id
+		ON messages(remote_message_id) WHERE remote_message_id != ''`,
+
+	// ── AGORA-322: peer timeline exchange ──────────────────────────────────
+	//
+	// Two independent directions, which is why they are two columns rather than
+	// one status. An admin here turning a peer's timeline on says nothing about
+	// whether that peer wants ours, and conflating them would have made one
+	// instance's decision silently change the other's outbound volume.
+	//
+	// On federated_instances rather than a table of their own, so peering stays
+	// in one place: direction (AGORA-321), disconnect (AGORA-320) and blocking
+	// already live here, and disconnecting a peer should stop the exchange
+	// without a second row having to be found and cleaned up.
+	//
+	// Both default false, including for peers that already exist. Turning this
+	// on changes what every local user sees in Explore, so it is not something
+	// an upgrade should decide on an admin's behalf.
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS timeline_exchange BOOLEAN NOT NULL DEFAULT false`,
+	`ALTER TABLE federated_instances ADD COLUMN IF NOT EXISTS carries_our_timeline BOOLEAN NOT NULL DEFAULT false`,
+
+	// ── AGORA-299: the Bluesky thread root, captured at ingest ──────────────
+	//
+	// Every inbound Bluesky post is stored flat, with parent_id NULL, whatever
+	// its real position in a thread. rootPostIDFor then walks parent_id upward
+	// and concludes the post is its own root, so a local reply federates with
+	// reply.root naming the ingested post rather than the true thread root, and
+	// Bluesky clients thread on root. The reply renders as a detached
+	// mini-thread instead of appearing in the conversation, silently: the
+	// record is written and committed, and nothing on this side looks wrong.
+	//
+	// The record already carries what is needed. bsky.FeedPost.Reply.Root is a
+	// strong ref (uri + cid) present on any ingested post that was itself a
+	// reply, so it is captured at ingest rather than derived later, with no
+	// extra AppView call.
+	//
+	// Empty for a genuinely top-level post, which is what tells the delivery
+	// side to fall back to the local walk rather than guess.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_uri TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS bsky_root_cid TEXT NOT NULL DEFAULT ''`,
+
+	// ── AGORA-309: hide a single post from your own timeline ────────────────
+	//
+	// A client-of-one visibility record, shaped after blocks. Sometimes one
+	// specific post is unwanted without the author being unwanted, and until
+	// now the only ways to say so were unfollow, block or report, all three of
+	// which are about the person.
+	//
+	// Server-side rather than local, so it holds across web, mobile and a
+	// re-login. Cascades on both sides: deleting the post or the user leaves
+	// nothing behind.
+	`CREATE TABLE IF NOT EXISTS hidden_posts (
+		user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id    UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_hidden_posts_post ON hidden_posts(post_id)`,
+
+	// AGORA-354: cache a remote actor's HTTP-Signature public key instead of
+	// re-fetching it (a live, signed HTTP GET) on every single inbound
+	// federated request. Keyed by actor URL rather than folded into `users`
+	// because a signer doesn't necessarily have a local stub row yet (e.g. a
+	// Like from an account nobody here follows) — decoupling the cache from
+	// that upsert lifecycle means it works for every signer, not just ones
+	// we've already ingested. fetched_at drives the TTL check in
+	// fetchActorPublicKeySigned; a signature that fails to verify against a
+	// cached key triggers one live re-fetch before failing, so key rotation
+	// on the remote side doesn't get stuck on a stale cache entry.
+	`CREATE TABLE IF NOT EXISTS remote_actor_keys (
+		actor_url      TEXT        PRIMARY KEY,
+		public_key_pem TEXT        NOT NULL,
+		fetched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-353: a row that exhausts maxDeliveryAttempts used to just sit
+	// excluded from the drain query's own `attempts < 10` filter forever —
+	// abandoned but with nothing distinguishing it from "still pending" to
+	// anyone querying the table. dead_at makes that state explicit and
+	// queryable (`WHERE dead_at IS NOT NULL`) instead of implicit in an
+	// attempts count nobody thought to check.
+	`ALTER TABLE ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE page_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+	`ALTER TABLE instance_ap_delivery_queue ADD COLUMN IF NOT EXISTS dead_at TIMESTAMPTZ`,
+
+	// AGORA-355: GetProfile used to synchronously fetch a remote account's
+	// live follower/following/post stats on every single profile view — for
+	// a fediverse actor, four sequential signed HTTP round trips (an actor
+	// doc fetch plus three collection totals), each up to fedHTTPClient's
+	// 10s timeout, with no caching at all. Shared by both the ActivityPub
+	// and AT Proto stats fetchers (actor_key holds either an ap_actor_url or
+	// a Bluesky DID — the two never collide in practice, one is always an
+	// https:// URL and the other always starts with "did:") since both are
+	// keyed by the same kind of opaque remote-identity string and need
+	// identical TTL/staleness handling.
+	`CREATE TABLE IF NOT EXISTS remote_actor_stats (
+		actor_key  TEXT        PRIMARY KEY,
+		followers  INT         NOT NULL DEFAULT 0,
+		following  INT         NOT NULL DEFAULT 0,
+		posts      INT         NOT NULL DEFAULT 0,
+		bio        TEXT        NOT NULL DEFAULT '',
+		locked     BOOLEAN     NOT NULL DEFAULT false,
+		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-360: caches whether a remote domain is confirmed to be running
+	// Agora (via FetchInstanceInfo's existing .well-known/agora-instance
+	// check, previously only used for admin-initiated peering), so
+	// DeliverLike can decide whether to send a reaction's exact type
+	// without a live fetch on every single reaction.
+	`CREATE TABLE IF NOT EXISTS remote_instance_software (
+		domain     TEXT        PRIMARY KEY,
+		is_agora   BOOLEAN     NOT NULL,
+		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+
+	// AGORA-370: per-post network targeting. DEFAULT true keeps every
+	// existing post, and every client that never sends the new
+	// federate_activitypub/federate_atproto request fields, federating
+	// exactly as before.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_ap BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS federate_atproto BOOLEAN NOT NULL DEFAULT true`,
+
+	// AGORA-371: marks a post that was never meant to appear on Agora at all
+	// — only delivered outbound to the Fediverse and/or Bluesky. Stored
+	// alongside visibility = 'private' (see CreatePost) rather than as a new
+	// visibility value, so it inherits every existing feed/profile/search/
+	// hashtag/notification exclusion that already keys off 'private' instead
+	// of needing its own case in each of those switch statements.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS external_only BOOLEAN NOT NULL DEFAULT false`,
+
+	// AGORA-377: a GIF picked on Bluesky arrives as a link card to a Tenor
+	// or KLIPY .gif, and ingest stored it in the link_* columns. Comments
+	// only carry image_url, so a GIF reply showed up empty. Ingest now writes
+	// such a GIF to image_url; this moves the rows ingested before that.
+	// Mirrors atproto.isBlueskyGifURL; image_url = '' leaves alone any row
+	// that already has an image, and makes a rerun a no-op.
+	`UPDATE posts
+	 SET image_url = link_url, link_url = '', link_title = '', link_description = '', link_image = '', link_domain = ''
+	 WHERE is_remote = true AND remote_instance = 'bsky.app' AND image_url = ''
+	   AND (lower(link_url) LIKE 'https://media.tenor.com/%' OR lower(link_url) LIKE 'https://static.klipy.com/ii/%')
+	   AND lower(split_part(link_url, '?', 1)) LIKE '%.gif'`,
+
+	// Following an unlocked fediverse account used to sit at accepted = false
+	// until the remote's Accept arrived and matched, so any follow whose Accept
+	// went missing stayed on "Requested" and had every post dropped.
+	// FollowFediverseAccount now records such a follow as accepted up front;
+	// this repairs the ones already stuck, so nobody has to withdraw and
+	// follow again. The remote auto-accepted on its side long ago, so only our
+	// own flag was ever wrong and nothing needs resending.
+	//
+	// Scoped to accounts whose cached stub says they don't require approval.
+	// Agora actors (/federation/users/) are left alone: older Agora peers
+	// never advertised manuallyApprovesFollowers, so their omission says
+	// nothing, and friend-request follows run through that path too.
+	//
+	// Guarded: a follow left pending by an account that has since unlocked is
+	// fixed by following again, not by a rerun on every restart.
+	`UPDATE ap_following af SET accepted = true
+	 FROM users u
+	 WHERE af.accepted = false
+	   AND u.is_remote = true AND u.ap_actor_url = af.followed_actor_url
+	   AND u.manually_approves_followers = false
+	   AND af.followed_actor_url NOT LIKE '%/federation/users/%'
+	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'unlocked_fediverse_follows_accepted')`,
+	`INSERT INTO schema_backfills (name) VALUES ('unlocked_fediverse_follows_accepted')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-380: local copies of remote media (mediacache). Remote avatars and
+	// covers were hot-linked, so a Mastodon account that changed its avatar
+	// (the old file is deleted) or a Threads account (Instagram CDN links
+	// expire) showed a broken image. source_url is the remote URL a copy was
+	// made from, which is what a profile falls back to if the copy is evicted.
+	// local_url is content-addressed, so several source URLs serving the same
+	// bytes share one file.
+	`CREATE TABLE IF NOT EXISTS remote_media_cache (
+		source_url   TEXT        PRIMARY KEY,
+		local_url    TEXT        NOT NULL,
+		kind         TEXT        NOT NULL,
+		content_type TEXT        NOT NULL,
+		bytes        BIGINT      NOT NULL,
+		fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS remote_media_cache_local_url_idx ON remote_media_cache (local_url)`,
+	`CREATE INDEX IF NOT EXISTS remote_media_cache_fetched_at_idx ON remote_media_cache (fetched_at)`,
+	`INSERT INTO instance_settings (key, value) VALUES
+		('remote_media_cache_enabled',     'true'),
+		('remote_media_cache_max_mb',      '1024'),
+		('remote_media_cache_max_file_mb', '5')
+	 ON CONFLICT (key) DO NOTHING`,
+
+	// AGORA-382: repair the avatars the AGORA-331 statement above broke before
+	// it learned to leave cached copies alone. A broken one is this instance's
+	// own cache path with the remote server's host in front of it. Where the
+	// copy is still in the cache, point back at it; the hourly prune will
+	// have removed it if the row has been broken for a while, in which case
+	// clear the avatar (better a placeholder than a broken image) and put the
+	// account at the front of the refresh queue to fetch it again.
+	//
+	// Unguarded: the pattern is the cache's exact file naming behind a host,
+	// which nothing produces any more, so once repaired a row can't match.
+	//
+	// The cache row is found by extracting the path from the broken URL and
+	// matching it to local_url, which is indexed, rather than by building
+	// 'https://' || remote_instance || local_url for every user and cache row
+	// pair. That first version compared every remote user with every cached
+	// file: 16s at 20k of each, growing with the product, long enough on a
+	// larger instance for startup to outlast the backend's health check.
+	`UPDATE users u SET avatar_url = c.local_url
+		FROM remote_media_cache c
+		WHERE u.is_remote = true
+		  AND u.avatar_url LIKE 'https://%/uploads/remote/%'
+		  AND c.local_url = substring(u.avatar_url from '^https://[^/]+(/uploads/remote/.+)$')
+		  AND u.avatar_url = 'https://' || u.remote_instance || c.local_url`,
+	`UPDATE users SET avatar_url = '', remote_synced_at = NULL
+		WHERE is_remote = true
+		  AND avatar_url ~ '^https://[^/]+/uploads/remote/[0-9a-f]{2}/[0-9a-f]{64}\.(jpg|png|gif|webp|avif)$'`,
+
+	// AGORA-387: the getting started wizard. NULL means the account hasn't
+	// finished or skipped it yet, which is what sends it to /welcome.
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ`,
+
+	// AGORA-393: accounts that predate the wizard see it too, once, as a
+	// re-introduction. AGORA-387 first shipped with a guarded backfill
+	// ('onboarding_existing_accounts') that stamped every account existing at
+	// the time so only new sign-ups would see it. That backfill is gone, and
+	// where it already ran, its stamps are cleared here once. Only stamps at
+	// or before its own marker go: those are the backfill's, while anyone who
+	// has been through the wizard since has a later one and keeps it. Where it
+	// never ran, the subquery is NULL and this matches nothing.
+	//
+	// The earlier of the two markers is when the wizard first shipped on this
+	// instance; /auth/me compares created_at with it (onboarding_returning).
+	`UPDATE users SET onboarding_completed_at = NULL
+	 WHERE onboarding_completed_at <= (SELECT applied_at FROM schema_backfills WHERE name = 'onboarding_existing_accounts')
+	   AND NOT EXISTS (SELECT 1 FROM schema_backfills WHERE name = 'onboarding_reintroduction')`,
+	`INSERT INTO schema_backfills (name) VALUES ('onboarding_reintroduction')
+		ON CONFLICT (name) DO NOTHING`,
+
+	// AGORA-400: image descriptions (alt text). image_alt describes image_url,
+	// which is a single-image post's only image and a multi-photo post's first;
+	// post_photos.alt describes each photo of a multi-photo post.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_alt TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE post_photos ADD COLUMN IF NOT EXISTS alt TEXT NOT NULL DEFAULT ''`,
+
+	// AGORA-407: the proof-of-work signup challenge. 'on' or 'off', seeded on
+	// so an upgrading instance is protected straight away; a signup without a
+	// valid solution goes to the waitlist rather than failing, so old mobile
+	// builds still get through. used_signup_challenges records each solved
+	// challenge's signature until it expires, so one solution can't be replayed
+	// for a batch of accounts.
+	`INSERT INTO instance_settings (key, value) VALUES ('signup_challenge', 'on')
+		ON CONFLICT (key) DO NOTHING`,
+	`CREATE TABLE IF NOT EXISTS used_signup_challenges (
+		signature  TEXT        PRIMARY KEY,
+		expires_at TIMESTAMPTZ NOT NULL
+	)`,
 }

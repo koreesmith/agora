@@ -116,7 +116,17 @@ Creates/deletes a like. Sends `post_like` notification to author on like.
 
 One reaction per user per post. Replaces any existing reaction.
 
-**Body (react):** `{"type": "like|love|laugh|wow|angry|care|pride|thankful|vomit"}`
+**Body (react):** `{"type": "like|love|laugh|wow|care|thankful|pride|sad|angry|dislike"}`
+
+The accept-list is `store.ValidReactions`, shared with the DM react endpoint and
+matching the CHECK constraints on both reaction tables.
+
+Input goes through `store.NormalizeReaction`, which also accepts shapes older
+clients still send and rewrites them to the canonical type: the retired `vomit`
+becomes `dislike`, and raw emoji glyphs (which pre-v4.0.0 mobile builds sent for
+DM reactions) map to their type names. The mobile app has no forced-update
+mechanism, so those builds stay in use indefinitely and rejecting them would
+break reactions outright. Safe to remove once old builds have aged out.
 
 ### `GetReactions(w, r)`
 `GET /api/posts/{id}/reactions`

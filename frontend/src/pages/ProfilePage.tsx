@@ -7,8 +7,11 @@ import { useChatStore } from '../store/chat'
 import PostCard from '../components/feed/PostCard'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { handle } from '../utils/handle'
-import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield } from 'lucide-react'
+import { UserPlus, UserCheck, UserX, Clock, Lock, FileText, Images, Globe, Users, X, Bell, BellOff, PenLine, CheckCircle, XCircle, MessageCircle, ShieldOff, Shield, RefreshCw, Flag } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import ReportModal from '../components/feed/ReportModal'
+import CustomHandle from '../components/common/CustomHandle'
+import LockedBadge from '../components/common/LockedBadge'
 
 const visIcon: Record<string, React.ReactNode> = {
   public:  <Globe size={10} />,
@@ -24,6 +27,7 @@ export default function ProfilePage() {
   const [tab, setTab] = useState<'posts'|'photos'|'wall'>('posts')
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [showWallComposer, setShowWallComposer] = useState(false)
+  const [showReport, setShowReport] = useState(false)
   const [wallContent, setWallContent] = useState('')
   const [wallPosting, setWallPosting] = useState(false)
 
@@ -70,6 +74,13 @@ export default function ProfilePage() {
     qc.invalidateQueries({ queryKey: ['notifications'] })
   }
 
+  // AGORA-381: pull a remote account's profile, avatar and cover again now,
+  // for when they look out of date, instead of waiting for the hourly sync.
+  const refreshRemote = useMutation({
+    mutationFn: () => usersApi.refreshRemoteProfile(username!),
+    onSuccess: inv,
+  })
+
   const sendReq = useMutation({
     mutationFn: () => friendsApi.sendRequest(profile.id),
     onSuccess: () => { inv(); setListModalFriend(profile) },
@@ -89,8 +100,22 @@ export default function ProfilePage() {
 
   // AGORA-167: fediverse accounts have no friending concept — follow/notify
   // (ap_following) is the equivalent, surfaced here instead of Add friend.
+  // AGORA-307: flip the button to "Requested"/"Following" on click instead of
+  // waiting on the round trip (actor resolution + queue drain) to finish, and
+  // roll back if the request actually fails.
   const followFed = useMutation({
     mutationFn: () => federationApi.followFediverseAccount(profile.ap_actor_url),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ['profile', username] })
+      const previous = qc.getQueryData(['profile', username])
+      // Only a locked account leaves the follow waiting on approval; any
+      // other is followed outright, so don't flash "Requested" for it.
+      qc.setQueryData(['profile', username], (old: any) => old && (old.manually_approves_followers
+        ? { ...old, follow_pending: true }
+        : { ...old, following: true, follow_pending: false }))
+      return { previous }
+    },
+    onError: (_err, _vars, ctx) => { if (ctx?.previous) qc.setQueryData(['profile', username], ctx.previous) },
     onSuccess: inv,
   })
   const unfollowFed = useMutation({
@@ -109,6 +134,13 @@ export default function ProfilePage() {
   // the handle as the username), so it doubles as the "actor" to follow.
   const followBsky = useMutation({
     mutationFn: () => atprotoApi.followBlueskyAccount(profile.username),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ['profile', username] })
+      const previous = qc.getQueryData(['profile', username])
+      qc.setQueryData(['profile', username], (old: any) => old && { ...old, following: true })
+      return { previous }
+    },
+    onError: (_err, _vars, ctx) => { if (ctx?.previous) qc.setQueryData(['profile', username], ctx.previous) },
     onSuccess: inv,
   })
   const unfollowBsky = useMutation({
@@ -161,9 +193,29 @@ export default function ProfilePage() {
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
 
   const status = profile.friend_status
-  const isFediverse = !!profile.ap_actor_url
   const isBluesky = profile.remote_instance === 'bsky.app'
+  // AGORA-334: an Agora user on another instance has an ap_actor_url too since
+  // AGORA-329, so that field alone no longer tells a fediverse account apart
+  // from a peer's user. can_friend is the backend's answer to that question,
+  // and it is what decides whether friending is offered at all.
+  const canFriend = !!profile.can_friend
+  // "Fediverse" here means an account that can only be followed, never
+  // friended, which is what the follow-only UI below is for.
+  const isFediverse = !!profile.ap_actor_url && !canFriend
+  // A remote Agora user gets both: friending, matching the same-instance
+  // experience, and following, which is still meaningful on its own.
+  const isRemoteAgora = !!profile.ap_actor_url && canFriend
   const canSeeContent = isSelf || (!profile.hide_timeline && (!profile.profile_private || status === 'accepted'))
+
+  // AGORA-306: the account gates follows behind manual approval and this
+  // viewer isn't through that gate yet. Fediverse only — AT Proto has no
+  // follow-approval mechanism, so a Bluesky account is never locked.
+  // `following` means accepted (not merely requested), and a mutual follow
+  // clears the lock just as an Accept does: either way there's no gate left
+  // standing between the two accounts.
+  const showLock = isFediverse && !isSelf
+    && !!profile.manually_approves_followers
+    && !profile.following && !profile.follows_back
 
   const albums: any[] = albumsData?.albums ?? []
   const posts: any[]  = postsData?.posts ?? []
@@ -176,6 +228,7 @@ export default function ProfilePage() {
         onClose={() => setListModalFriend(null)}
       />
     )}
+    {showReport && <ReportModal userId={profile.id} onClose={() => setShowReport(false)} />}
     <div className="space-y-4">
       {/* Cover + avatar */}
       <div className="card overflow-hidden">
@@ -191,11 +244,17 @@ export default function ProfilePage() {
         </div>
         <div className="px-4 pb-4">
           <div className="flex items-end justify-between -mt-10 mb-3">
-            <div className="w-20 h-20 rounded-full border-4 border-white dark:border-agora-800 bg-agora-200 dark:bg-agora-700 overflow-hidden">
-              {profile.avatar_url
-                ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(profile.avatar_url)} />
-                : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
-              }
+            {/* AGORA-306: the badge is a sibling of the avatar circle, not a
+                child — that circle is overflow-hidden to crop the photo, so
+                anything positioned inside it gets clipped away at the edge. */}
+            <div className="relative flex-shrink-0">
+              <div className="w-20 h-20 rounded-full border-4 border-white dark:border-agora-800 bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                {profile.avatar_url
+                  ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover cursor-zoom-in" onClick={() => setLightbox(profile.avatar_url)} />
+                  : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
+                }
+              </div>
+              <LockedBadge size="md" locked={showLock} pending={profile.follow_pending} />
             </div>
             <div className="flex gap-2 mt-10">
               {!me && !isSelf && (
@@ -205,12 +264,28 @@ export default function ProfilePage() {
               )}
               {me && !isSelf && isFediverse && (
                 <div className="flex gap-2">
+                  {/* AGORA-306: three states, not two. A follow of a locked
+                      account sits un-Accepted for as long as its owner takes
+                      to approve it, and collapsing that into "not following"
+                      made the button spring back to "Follow" on click, as
+                      though nothing had been sent. Clicking through here
+                      withdraws the request, which is the same unfollow call. */}
                   <button
-                    onClick={() => { if (profile.following) { if (confirm(`Unfollow ${profile.display_name}?`)) unfollowFed.mutate() } else followFed.mutate() }}
+                    onClick={() => {
+                      if (profile.following || profile.follow_pending) {
+                        const q = profile.follow_pending
+                          ? `Withdraw your follow request to ${profile.display_name}?`
+                          : `Unfollow ${profile.display_name}?`
+                        if (confirm(q)) unfollowFed.mutate()
+                      } else followFed.mutate()
+                    }}
                     disabled={followFed.isPending || unfollowFed.isPending}
-                    className={profile.following ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
+                    title={profile.follow_pending ? 'Waiting for this account to approve your follow request' : undefined}
+                    className={profile.following || profile.follow_pending ? 'btn-secondary text-sm flex items-center gap-1' : 'btn-primary text-sm flex items-center gap-1'}
                   >
-                    {profile.following ? <><UserCheck size={16}/> Following</> : <><UserPlus size={16}/> Follow</>}
+                    {profile.following  ? <><UserCheck size={16}/> Following</>
+                      : profile.follow_pending ? <><Clock size={16}/> Requested</>
+                      : <><UserPlus size={16}/> Follow</>}
                   </button>
                   {profile.following && (
                     <button
@@ -263,7 +338,42 @@ export default function ProfilePage() {
                   </button>
                 </div>
               )}
-              {me && !isSelf && !isFediverse && !isBluesky && !status && (
+              {/* AGORA-334: a remote Agora user gets the same Add friend
+                  affordance as somebody on this instance, plus Follow, which
+                  is still a meaningful thing to do on its own. Before this the
+                  ap_actor_url check swallowed them into the follow-only UI and
+                  there was no way to friend across instances from a profile at
+                  all. */}
+              {me && !isSelf && isRemoteAgora && !status && (
+                <div className="flex gap-2">
+                  <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
+                    <UserPlus size={16}/> Add friend
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (profile.following || profile.follow_pending) {
+                        if (confirm(`Unfollow ${profile.display_name}?`)) unfollowFed.mutate()
+                      } else followFed.mutate()
+                    }}
+                    disabled={followFed.isPending || unfollowFed.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1"
+                  >
+                    {profile.following ? <><UserCheck size={16}/> Following</>
+                      : profile.follow_pending ? <><Clock size={16}/> Requested</>
+                      : <><UserPlus size={16}/> Follow</>}
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(profile.is_blocked ? `Unblock ${profile.display_name}?` : `Block ${profile.display_name}? They won't be able to see your profile or contact you.`)) toggleBlock.mutate() }}
+                    disabled={toggleBlock.isPending}
+                    className="btn-secondary text-sm flex items-center gap-1 text-agora-400"
+                    title={profile.is_blocked ? 'Unblock' : 'Block'}
+                  >
+                    {profile.is_blocked ? <ShieldOff size={15}/> : <Shield size={15}/>}
+                    {profile.is_blocked ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
+              )}
+              {me && !isSelf && !isFediverse && !isRemoteAgora && !isBluesky && !status && (
                 <div className="flex gap-2">
                   <button onClick={() => sendReq.mutate()} className="btn-primary text-sm flex items-center gap-1">
                     <UserPlus size={16}/> Add friend
@@ -339,14 +449,44 @@ export default function ProfilePage() {
               <span className="text-agora-400 dark:text-agora-500 text-base font-normal ml-2">({profile.pronouns})</span>
             )}
           </h1>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+            {me && !isSelf && profile.is_remote && !isBluesky && (
+              <button
+                onClick={() => refreshRemote.mutate()}
+                disabled={refreshRemote.isPending}
+                title="Refresh this profile from its server"
+                aria-label="Refresh this profile from its server"
+                className="text-agora-400 hover:text-agora-600 dark:hover:text-agora-300 disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={refreshRemote.isPending ? 'animate-spin' : ''} />
+              </button>
+            )}
+            {refreshRemote.isError && (
+              <span className="text-xs text-red-500">Couldn't reach their server</span>
+            )}
+            {/* AGORA-288: the profile is where identity lives, so a verified
+                custom domain gets full size here rather than the compact
+                treatment it gets in feeds and search results. */}
+            <CustomHandle domain={profile.custom_domain} size="md" />
             {/* AGORA-249: fediverse/Bluesky mutual-follow indicator — meaningful
                 regardless of whether the viewer follows them back. */}
             {(isFediverse || isBluesky) && profile.follows_back && (
               <span title="Follows you" className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 bg-agora-100 dark:bg-agora-700 rounded-full px-2 py-0.5">
                 <UserCheck size={11} /> Follows you
               </span>
+            )}
+            {/* AGORA-398: reporting the account itself, not one of its posts.
+                Here rather than beside Block because each relationship state
+                above draws its own set of buttons, and some have no Block. */}
+            {me && !isSelf && (
+              <button
+                onClick={() => setShowReport(true)}
+                title="Report this account"
+                className="ml-auto flex items-center gap-1 text-xs text-agora-400 hover:text-red-500 transition-colors"
+              >
+                <Flag size={12} /> Report
+              </button>
             )}
           </div>
           {profile.bio && <p className="text-sm mt-2 text-agora-700 dark:text-agora-300 whitespace-pre-wrap break-words">{renderContent(profile.bio, undefined, profile.emojis)}</p>}

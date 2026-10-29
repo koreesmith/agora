@@ -19,6 +19,13 @@ export interface User {
   fediverse_notifications_enabled: boolean
   atproto_enabled: boolean
   atproto_notifications_enabled: boolean
+  dm_privacy?: 'everyone' | 'friends' | 'nobody'
+  // AGORA-387: false sends the account to the getting started wizard.
+  // Undefined for a session stored before the field existed, which never
+  // redirects.
+  onboarding_completed?: boolean
+  // AGORA-405: set while an account deletion is pending
+  deletion_scheduled_at?: string | null
 }
 
 interface AuthState {

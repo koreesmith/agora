@@ -25,6 +25,20 @@ func NewService(db *store.DB, email *EmailService) *Service
 | `comment_reply` | Someone replied to your comment |
 | `new_report` | Content was reported (admins only) |
 | `post_update` | A user you follow via post-notify published a post |
+| `fediverse_follow` | A fediverse account followed you (in-app and push only, never emailed) |
+| `atproto_follow` | A Bluesky account followed you (in-app and push only, never emailed) |
+
+The two follow types are not emailed. A remote follow is unilateral and
+unbounded, and unlike `friend_request` there is nothing to accept, so
+`notifEmailContent` has no case for either and `maybeEmailNotif` drops them on
+its empty-subject check.
+
+`atproto_follow` is produced by polling, not by delivery: nothing tells this
+instance about a Bluesky follow, so `StartBlueskyFollowerPolling`
+(`internal/atproto/followers.go`) walks `app.bsky.graph.getFollowers` per local
+account every 15 minutes and diffs it against `at_followers`. An account's
+first walk fills that table silently and sets `users.atproto_followers_seeded`,
+so followers who predate the feature do not each produce a notification.
 
 ## Internal Functions (called by other services)
 

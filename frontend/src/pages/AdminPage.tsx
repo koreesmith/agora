@@ -1,13 +1,21 @@
 import { useState, useEffect } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '../api'
-import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, Radio } from 'lucide-react'
+import RemoteMediaCacheCard from '../components/common/RemoteMediaCacheCard'
+import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign, ScrollText } from 'lucide-react'
 
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'federation'|'relays'|'invites'|'rules'|'waitlist'|'pages'|'media'>(
-    (searchParams.get('tab') as any) || 'overview'
+  const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'invites'|'rules'|'audit'|'waitlist'|'pages'|'media'>(
+    // AGORA-302: relays moved from a tab of their own into the Fediverse tab,
+    // so ?tab=relays is aliased rather than dropped — it's a live entry point
+    // in existing links and bookmarks, and would otherwise land on a tab that
+    // no longer exists.
+    (() => {
+      const t = searchParams.get('tab')
+      return (t === 'relays' ? 'fediverse' : t as any) || 'overview'
+    })()
   )
   const [settingsForm, setSettingsForm] = useState<Record<string,string>>({})
   const [msg, setMsg] = useState('')
@@ -29,7 +37,11 @@ export default function AdminPage() {
   const { data: instBansData } = useQuery({ queryKey:['instance-bans'], queryFn: ()=>moderationApi.listInstanceBans().then(r=>r.data), enabled: tab==='fediverse' || tab==='bluesky' })
   const { data: blockedDidsData } = useQuery({ queryKey:['blocked-dids'], queryFn: ()=>moderationApi.listBlockedDIDs().then(r=>r.data), enabled: tab==='bluesky' })
   const { data: fedData }  = useQuery({ queryKey:['admin-fed'],      queryFn: ()=>adminApi.listInstances().then(r=>r.data), enabled: tab==='federation' })
-  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='relays' })
+  const { data: relaysData } = useQuery({ queryKey:['admin-relays'], queryFn: ()=>adminApi.listRelays().then(r=>r.data), enabled: tab==='fediverse' })
+  // AGORA-286: the queue defaults to what needs a decision; ?status=all is
+  // how an admin sees claims that are rejected or not yet verified too.
+  const [domainFilter, setDomainFilter] = useState<'pending'|'all'>('pending')
+  const { data: domainsData } = useQuery({ queryKey:['admin-custom-domains', domainFilter], queryFn: ()=>adminApi.listCustomDomains(domainFilter).then(r=>r.data), enabled: tab==='domains' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
@@ -55,6 +67,11 @@ export default function AdminPage() {
   const unblockDid   = useMutation({ mutationFn: (id:string)=>moderationApi.unblockDID(id), onSuccess:()=>qc.invalidateQueries({queryKey:['blocked-dids']}) })
   const blockInst    = useMutation({ mutationFn: (id:string)=>adminApi.blockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
   const unblockInst  = useMutation({ mutationFn: (id:string)=>adminApi.unblockInstance(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-fed']}) })
+  const disconnectInst = useMutation({
+    mutationFn: (id:string)=>adminApi.disconnectInstance(id),
+    onSuccess: ()=>{ ok('Instance disconnected'); qc.invalidateQueries({queryKey:['admin-fed']}) },
+    onError:   (e:any)=>ok(e.response?.data?.error || 'Could not disconnect instance'),
+  })
   const createInvite = useMutation({ mutationFn: ()=>adminApi.createInvite(), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const revokeInvite   = useMutation({ mutationFn: (id:string)=>adminApi.revokeInvite(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-invites']}) })
   const resendVerif    = useMutation({ mutationFn: (id:string)=>adminApi.resendVerification(id) })
@@ -76,10 +93,11 @@ export default function AdminPage() {
     { id:'moderation',  label:'Moderation',  icon: ShieldAlert },
     { id:'fediverse',   label:'Fediverse',   icon: Globe },
     { id:'bluesky',     label:'Bluesky',     icon: Cloud },
+    { id:'domains',     label:'Domains',     icon: AtSign },
     { id:'federation',  label:'Federation',  icon: Link2 },
-    { id:'relays',      label:'Relays',      icon: Radio },
     { id:'invites',     label:'Invites',     icon: Ticket },
     { id:'rules',       label:'Rules',       icon: List },
+    { id:'audit',       label:'Audit log',   icon: ScrollText },
     { id:'pages',       label:'Pages',       icon: Star },
     { id:'media',       label:'Storage',     icon: HardDrive },
   ]
@@ -158,6 +176,18 @@ export default function AdminPage() {
               <option value="invite">Invite only</option>
               <option value="closed">Closed</option>
             </select></div>
+          <div className="flex items-center justify-between gap-4 py-2">
+            <div><p className="font-medium text-sm">Signup bot check</p>
+              <p className="text-xs text-agora-400">The signup page quietly solves a small puzzle in the background. On open registration, signups that don't (bots, older mobile app versions) go to the waitlist for approval instead.</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,signup_challenge:f.signup_challenge==='off'?'on':'off'}))}
+              className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${settingsForm.signup_challenge!=='off'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.signup_challenge!=='off'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
+          <div><label className="label">Blocked email domains</label>
+            <textarea className="input" rows={3} autoComplete="off" value={settingsForm.blocked_email_domains||''}
+              onChange={e=>setSettingsForm(f=>({...f,blocked_email_domains:e.target.value}))} placeholder="spammy.example, another.example" />
+            <p className="text-xs text-agora-400 mt-1">Signups from these domains are refused, one per line or comma separated. Known throwaway providers are already blocked; popular ones like Gmail, Yahoo and Proton never are unless you list them here.</p></div>
           <div><label className="label">Deletion grace period (days)</label>
             <input type="number" className="input" autoComplete="off" value={settingsForm.deletion_grace_days||'30'} onChange={sf('deletion_grace_days')} /></div>
           <div className="flex items-center justify-between py-2">
@@ -169,7 +199,7 @@ export default function AdminPage() {
             </button>
           </div>
           <p className="text-xs text-agora-400 -mt-2">
-            Mastodon/fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
+            Mastodon/Fediverse (ActivityPub) support and instance blocking moved to the dedicated <button onClick={()=>setTab('fediverse')} className="underline hover:text-agora-600">Fediverse tab</button>.
           </p>
           <div className="flex items-center justify-between py-2">
             <div><p className="font-medium text-sm">Allow users to invite friends</p>
@@ -412,7 +442,7 @@ export default function AdminPage() {
           <div className="card p-4">
             <div className="flex items-center justify-between py-2">
               <div><p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-                <p className="text-xs text-agora-400">Let Mastodon and other fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
+                <p className="text-xs text-agora-400">Let Mastodon and other Fediverse apps discover, follow, and interact with users on this instance. Separate from Agora-to-Agora federation (Settings tab); users can also opt out individually in their own Settings.</p></div>
               <button onClick={()=>setSettingsForm(f=>({...f,activitypub_enabled:f.activitypub_enabled==='false'?'true':'false'}))}
                 className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${settingsForm.activitypub_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
                 <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.activitypub_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
@@ -421,9 +451,23 @@ export default function AdminPage() {
             <button onClick={()=>saveSettings.mutate()} disabled={saveSettings.isPending} className="btn-primary mt-2">{saveSettings.isPending?'Saving…':'Save'}</button>
           </div>
 
+          {/* AGORA-302: relays are ActivityPub-only — the instance actor's
+              Follow handshake, Announces to relay inboxes, an inbox URL as
+              the identifier. A top-level tab beside Federation read as
+              though they were protocol-neutral, so they live here with the
+              rest of the fediverse controls instead. */}
+          <div>
+            <h3 className="font-semibold mb-3">Relays</h3>
+            <p className="text-sm text-agora-500 mb-3">Subscribe this instance to a Fediverse relay to exchange public posts in bulk with every other server subscribed to it — the usual way a small or new instance gets a populated federated timeline without its users having to find and follow remote accounts one at a time.</p>
+            <RelaysPanel
+              relays={relaysData?.relays||[]}
+              onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
+            />
+          </div>
+
           <div>
             <h3 className="font-semibold mb-3">Instance Bans</h3>
-            <p className="text-sm text-agora-500 mb-3">Block a whole fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
+            <p className="text-sm text-agora-500 mb-3">Block a whole Fediverse instance in one step — enforced against inbound follows, replies, likes/boosts, mentions, and outbound follows, regardless of whether it's ever interacted with this instance before.</p>
             <div className="card p-4 space-y-3 mb-3">
               <p className="text-sm font-medium">Ban an instance</p>
               <div className="flex gap-2 flex-wrap">
@@ -543,19 +587,28 @@ export default function AdminPage() {
         </div>
       )}
 
+      {/* AGORA-286: custom domain handles. Its own tab rather than a section
+          of the Bluesky one — the review queue is recurring work an admin
+          comes here specifically to do, not a setting they set once. */}
+      {tab==='domains' && (
+        <CustomDomainsPanel
+          domains={domainsData?.domains||[]}
+          approvalMode={domainsData?.approval_mode||'manual'}
+          singleUserDomainHandle={domainsData?.single_user_domain_handle||false}
+          instanceDomain={domainsData?.instance_domain||''}
+          filter={domainFilter}
+          onFilter={setDomainFilter}
+          onChanged={()=>qc.invalidateQueries({queryKey:['admin-custom-domains']})}
+        />
+      )}
+
       {tab==='federation' && (
         <FederationPanel
           instances={fedData?.instances||[]}
           onAdd={()=>qc.invalidateQueries({queryKey:['admin-fed']})}
           onBlock={(id)=>blockInst.mutate(id)}
           onUnblock={(id)=>unblockInst.mutate(id)}
-        />
-      )}
-
-      {tab==='relays' && (
-        <RelaysPanel
-          relays={relaysData?.relays||[]}
-          onChanged={()=>qc.invalidateQueries({queryKey:['admin-relays']})}
+          onDisconnect={(id)=>disconnectInst.mutate(id)}
         />
       )}
 
@@ -578,6 +631,8 @@ export default function AdminPage() {
       {tab==='rules' && (
         <RulesPanel rules={rulesData?.rules ?? []} onChanged={()=>qc.invalidateQueries({queryKey:['admin-rules']})} />
       )}
+
+      {tab==='audit' && <AuditLogPanel />}
 
       {tab==='waitlist' && (
         <div className="space-y-4">
@@ -689,6 +744,8 @@ export default function AdminPage() {
               </div>
             )}
           </div>
+
+          <RemoteMediaCacheCard ok={ok} />
         </div>
       )}
 
@@ -745,6 +802,74 @@ export default function AdminPage() {
               </div>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Audit Log Panel ───────────────────────────────────────────────────────────
+
+// AGORA-397: web had the API call but no tab, so only mobile admins could see
+// who changed what. Newest first, one page at a time.
+function AuditLogPanel() {
+  const [page, setPage] = useState(0)
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['admin-audit', page],
+    queryFn: () => adminApi.getAuditLog(page).then(r => r.data),
+  })
+  const entries: any[] = data?.entries ?? []
+  const hasMore: boolean = data?.has_more ?? false
+
+  const target = (e: any) => {
+    if (e.target_username) return `@${e.target_username}`
+    if (e.target_type === 'user') return 'a deleted account'
+    return e.target_id || ''
+  }
+
+  return (
+    <div className="card p-4 space-y-3">
+      <div>
+        <h3 className="font-semibold">Audit log</h3>
+        <p className="text-sm text-agora-500">Changes made by admins and moderators, newest first.</p>
+      </div>
+
+      {isLoading && <p className="text-sm text-agora-400">Loading…</p>}
+      {isError && <p className="text-sm text-red-500">Couldn't load the audit log.</p>}
+      {!isLoading && !isError && entries.length === 0 && (
+        <p className="text-sm text-agora-400 italic">{page === 0 ? 'Nothing has been logged yet.' : 'No more entries.'}</p>
+      )}
+
+      {entries.length > 0 && (
+        <ul className="divide-y divide-agora-100 dark:divide-agora-700">
+          {entries.map(e => (
+            <li key={e.id} className="py-2 flex items-start gap-3 text-sm">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-agora-900 dark:text-agora-100">
+                  {e.action.replace(/_/g, ' ')}
+                  {target(e) && <span className="font-normal text-agora-500"> · {target(e)}</span>}
+                </p>
+                <p className="text-xs text-agora-400">
+                  {e.actor_username ? `by @${e.actor_username}` : 'by a deleted account'}
+                  {e.details && <> · {e.details}</>}
+                </p>
+              </div>
+              <time className="text-xs text-agora-400 flex-shrink-0" dateTime={e.created_at}>
+                {new Date(e.created_at).toLocaleString()}
+              </time>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {(page > 0 || hasMore) && (
+        <div className="flex gap-2">
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="btn-secondary text-sm flex-1">
+            ← Newer
+          </button>
+          <button onClick={() => setPage(p => p + 1)} disabled={!hasMore} className="btn-secondary text-sm flex-1">
+            Older →
+          </button>
         </div>
       )}
     </div>
@@ -853,13 +978,32 @@ function RulesPanel({ rules, onChanged }: { rules: any[], onChanged: () => void 
 
 // ── Federation Panel ──────────────────────────────────────────────────────────
 
-function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
+// AGORA-321: how a peering started. 'unknown' is for rows that predate the
+// column: direction can't be reconstructed after the fact, so it says so
+// rather than guessing.
+const DIRECTION_LABEL: Record<string, string> = {
+  outbound: 'You added this',
+  inbound:  'They connected to you',
+  mutual:   'Connected both ways',
+  unknown:  'Origin unknown',
+}
+
+function FederationPanel({ instances, onAdd, onBlock, onUnblock, onDisconnect }: {
   instances: any[], onAdd: () => void,
-  onBlock: (id: string) => void, onUnblock: (id: string) => void
+  onBlock: (id: string) => void, onUnblock: (id: string) => void,
+  onDisconnect: (id: string) => void
 }) {
   const [domain, setDomain] = useState('')
   const [addMsg, setAddMsg] = useState('')
   const [addErr, setAddErr] = useState('')
+  // Disconnect removes a peer outright, and the button alone doesn't convey
+  // that it isn't the same thing as Block, so it confirms inline.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
+
+  // Grouped rather than filtered: an admin reviewing servers that arrived on
+  // their own wants them together, not interleaved with the ones they added.
+  const inbound  = instances.filter((i:any) => i.direction === 'inbound')
+  const others   = instances.filter((i:any) => i.direction !== 'inbound')
 
   const add = useMutation({
     mutationFn: () => adminApi.addInstance(domain.trim()),
@@ -880,8 +1024,16 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         <h3 className="font-semibold">Add Federated Instance</h3>
         <p className="text-sm text-agora-500">
           Enter the domain of another Agora instance to federate with. Both instances must have federation enabled.
-          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard fediverse
+          This is specifically for the Agora-to-Agora protocol — to block a Mastodon or other standard Fediverse
           instance, use the Fediverse tab's Instance Bans instead.
+        </p>
+        {/* AGORA-322: peering can now carry a timeline, but only when an admin
+            turns it on for that peer. Connecting alone still does not, and
+            saying so is what keeps the toggle meaningful. */}
+        <p className="text-xs text-agora-400">
+          Connecting lets your users find and friend accounts on that instance, and posts flow between accounts
+          once a friend request is accepted. It does not by itself pull in that instance's public timeline; each
+          peer has its own toggle for that, off by default.
         </p>
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
@@ -909,29 +1061,136 @@ function FederationPanel({ instances, onAdd, onBlock, onUnblock }: {
         {instances.length === 0 && (
           <div className="card p-8 text-center text-agora-400 space-y-1">
             <p className="font-medium">No federated instances yet</p>
-            <p className="text-sm">Add an instance above to start federating.</p>
+            <p className="text-sm">Add an instance above, or wait for another instance to connect to you.</p>
           </div>
         )}
-        {instances.map((inst: any) => (
-          <div key={inst.id} className={`card p-3 flex items-center gap-3 ${inst.status === 'blocked' ? 'opacity-60' : ''}`}>
-            <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 text-sm font-bold text-agora-500">
-              {(inst.name || inst.domain)[0].toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-sm truncate">{inst.name || inst.domain}</p>
-              <p className="text-xs text-agora-400">
-                {inst.domain}
-                <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${inst.status === 'active' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-100 dark:bg-red-900/30 text-red-600'}`}>
-                  {inst.status}
-                </span>
-              </p>
-            </div>
-            {inst.status === 'active'
-              ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Block</button>
-              : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline flex-shrink-0">Unblock</button>}
-          </div>
-        ))}
+
+        {inbound.length > 0 && (
+          <>
+            <h4 className="text-sm font-semibold pt-2">Connected to you</h4>
+            <p className="text-xs text-agora-400 -mt-1">
+              These servers started federating with this instance on their own. Federation is open by
+              design. Disconnect one to forget it, or block it to refuse its traffic outright.
+            </p>
+            {inbound.map((inst: any) => (
+              <InstanceRow key={inst.id} inst={inst}
+                confirmingId={confirmingId} setConfirmingId={setConfirmingId}
+                onBlock={onBlock} onUnblock={onUnblock} onDisconnect={onDisconnect} />
+            ))}
+          </>
+        )}
+
+        {others.length > 0 && (
+          <>
+            {inbound.length > 0 && <h4 className="text-sm font-semibold pt-4">Instances you added</h4>}
+            {others.map((inst: any) => (
+              <InstanceRow key={inst.id} inst={inst}
+                confirmingId={confirmingId} setConfirmingId={setConfirmingId}
+                onBlock={onBlock} onUnblock={onUnblock} onDisconnect={onDisconnect} />
+            ))}
+          </>
+        )}
       </div>
+    </div>
+  )
+}
+
+function InstanceRow({ inst, confirmingId, setConfirmingId, onBlock, onUnblock, onDisconnect }: {
+  inst: any,
+  confirmingId: string | null, setConfirmingId: (id: string | null) => void,
+  onBlock: (id: string) => void, onUnblock: (id: string) => void, onDisconnect: (id: string) => void
+}) {
+  const blocked   = inst.status === 'blocked'
+  const confirming = confirmingId === inst.id
+  const qc = useQueryClient()
+
+  const setTimeline = useMutation({
+    mutationFn: (enabled: boolean) => adminApi.setInstanceTimeline(inst.id, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-fed'] }),
+  })
+
+  return (
+    <div className={`card p-3 ${blocked ? 'opacity-60' : ''}`}>
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 flex items-center justify-center flex-shrink-0 text-sm font-bold text-agora-500">
+          {(inst.name || inst.domain)[0].toUpperCase()}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-sm truncate">{inst.name || inst.domain}</p>
+          <p className="text-xs text-agora-400">
+            {inst.domain}
+            <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${!blocked ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-100 dark:bg-red-900/30 text-red-600'}`}>
+              {inst.status}
+            </span>
+            {inst.direction && (
+              <span className="ml-2 px-1.5 py-0.5 rounded text-xs bg-agora-100 dark:bg-agora-700/50 text-agora-500">
+                {DIRECTION_LABEL[inst.direction] || inst.direction}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          {/* AGORA-322: our subscription to them. Their subscription to us is
+              theirs to decide and is only reported, below. */}
+          {!blocked && (
+            <button
+              onClick={() => setTimeline.mutate(!inst.timeline_exchange)}
+              disabled={setTimeline.isPending}
+              title={inst.timeline_exchange
+                ? "Stop bringing this instance's public posts into Explore"
+                : "Bring this instance's public posts into Explore"}
+              className={`text-xs hover:underline ${inst.timeline_exchange ? 'text-agora-700 dark:text-agora-200 font-medium' : 'text-agora-500'}`}
+            >
+              {inst.timeline_exchange ? 'Carrying timeline' : 'Carry timeline'}
+            </button>
+          )}
+          {!blocked
+            ? <button onClick={() => onBlock(inst.id)} className="text-xs text-red-500 hover:underline">Block</button>
+            : <button onClick={() => onUnblock(inst.id)} className="text-xs text-green-600 hover:underline">Unblock</button>}
+          {/* Blocked instances can't be disconnected in one step, since that would
+              silently stop refusing traffic the admin deliberately refused. */}
+          {!blocked && (
+            <button onClick={() => setConfirmingId(confirming ? null : inst.id)} className="text-xs text-agora-500 hover:underline">
+              Disconnect
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Said once, under the row, rather than as two more badges beside the
+          status: these are the only two lines here that describe an ongoing
+          flow of content rather than a state. */}
+      {!blocked && (inst.timeline_exchange || inst.carries_our_timeline) && (
+        <div className="mt-2 pt-2 border-t border-agora-100 dark:border-agora-700/50 space-y-0.5 text-xs text-agora-400">
+          {inst.timeline_exchange && (
+            <p>Public posts from {inst.domain} appear in your Explore tab. They never enter anyone's home feed.</p>
+          )}
+          {inst.carries_our_timeline && (
+            <p>{inst.domain} carries this instance's public posts. They asked for this, and can stop at any time.</p>
+          )}
+        </div>
+      )}
+
+      {confirming && (
+        <div className="mt-3 pt-3 border-t border-agora-200 dark:border-agora-700 space-y-2">
+          <p className="text-xs text-agora-500">
+            Disconnect <span className="font-medium">{inst.domain}</span>? This removes it from your peer list and
+            stops delivering to it. Accounts and posts already received from it are kept, so any friendships your
+            users have there keep working. It isn't blocked, so if it contacts this instance again it will reappear.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { onDisconnect(inst.id); setConfirmingId(null) }}
+              className="text-xs px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600"
+            >
+              Disconnect
+            </button>
+            <button onClick={() => setConfirmingId(null)} className="text-xs px-2 py-1 rounded bg-agora-200 dark:bg-agora-700">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -980,12 +1239,9 @@ function RelaysPanel({ relays, onChanged }: {
       {/* Add relay */}
       <div className="card p-4 space-y-3">
         <h3 className="font-semibold">Add new relay</h3>
-        <p className="text-sm text-agora-500">
-          A federation relay is an intermediary server that exchanges large volumes of public posts between
-          servers that subscribe and publish to it. It can help small and medium servers discover content from
-          the fediverse, which would otherwise require local users manually following other people on remote
-          servers.
-        </p>
+        {/* AGORA-302: what a relay is now lives in the section explainer
+            above this panel, alongside every other Fediverse-tab section —
+            repeating it here would put the same paragraph on screen twice. */}
         {addMsg && <p className="text-sm text-green-600">{addMsg}</p>}
         {addErr && <p className="text-sm text-red-500">{addErr}</p>}
         <div className="flex gap-2">
@@ -1012,7 +1268,7 @@ function RelaysPanel({ relays, onChanged }: {
         {relays.length === 0 && (
           <div className="card p-8 text-center text-agora-400 space-y-1">
             <p className="font-medium">No relays yet</p>
-            <p className="text-sm">Add a relay above to start discovering content from across the fediverse.</p>
+            <p className="text-sm">Add a relay above to start discovering content from across the Fediverse.</p>
           </div>
         )}
         {relays.map((relay: any) => (
@@ -1037,6 +1293,202 @@ function RelaysPanel({ relays, onChanged }: {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// ── Custom Domains Panel (AGORA-286) ──────────────────────────────────────────
+//
+// The review queue for "bring your own domain" claims. What an admin is
+// actually deciding here is narrow: DNS has already proven the claimant
+// controls the domain, so this is a policy call about whether the instance
+// wants to publish that handle — not a second ownership check. The panel
+// leads with the verification proof so that distinction is visible rather
+// than implied.
+//
+// The auto/manual setting (AGORA-285) lives here rather than on the generic
+// Settings tab because it's the switch that decides whether this queue is
+// used at all.
+
+function CustomDomainsPanel({ domains, approvalMode, singleUserDomainHandle, instanceDomain, filter, onFilter, onChanged }: {
+  domains: any[]
+  approvalMode: string
+  singleUserDomainHandle: boolean
+  instanceDomain: string
+  filter: 'pending'|'all'
+  onFilter: (f: 'pending'|'all') => void
+  onChanged: () => void
+}) {
+  const qc = useQueryClient()
+  const [reasons, setReasons] = useState<Record<string,string>>({})
+  const [err, setErr] = useState('')
+
+  const fail = (e: any) => setErr(e.response?.data?.error || 'Something went wrong')
+
+  const setMode = useMutation({
+    mutationFn: (mode: string) => adminApi.updateSettings({ custom_domain_approval: mode }),
+    onSuccess: () => { setErr(''); qc.invalidateQueries({queryKey:['admin-settings']}); onChanged() },
+    onError: fail,
+  })
+  // AGORA-361: separate switch from the approval-mode one above. This
+  // decides whether the shortcut exists at all, not how a third-party
+  // domain's own request is reviewed.
+  const setSingleUserDomainHandle = useMutation({
+    mutationFn: (enabled: boolean) => adminApi.updateSettings({ single_user_domain_handle: enabled ? 'true' : 'false' }),
+    onSuccess: () => { setErr(''); qc.invalidateQueries({queryKey:['admin-settings']}); onChanged() },
+    onError: fail,
+  })
+  const approve = useMutation({
+    mutationFn: (id: string) => adminApi.approveCustomDomain(id),
+    onSuccess: () => { setErr(''); onChanged() },
+    onError: fail,
+  })
+  const reject = useMutation({
+    mutationFn: ({ id, reason }: { id: string, reason: string }) => adminApi.rejectCustomDomain(id, reason),
+    onSuccess: () => { setErr(''); onChanged() },
+    onError: fail,
+  })
+
+  const statusPill = (d: any) => {
+    if (d.live) return ['✓ Live', 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400']
+    if (d.approval_status === 'rejected') return ['Rejected', 'bg-red-100 dark:bg-red-900/30 text-red-600']
+    if (d.verification_status === 'verified') return ['⏳ Awaiting review', 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400']
+    if (d.verification_status === 'failed') return ['Not verifying', 'bg-red-100 dark:bg-red-900/30 text-red-600']
+    return ['Unverified', 'bg-agora-100 dark:bg-agora-700 text-agora-500']
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-4 space-y-3">
+        <h3 className="font-semibold">Custom domain handles</h3>
+        <p className="text-sm text-agora-500">
+          Users can point a domain they own at their account so it becomes their handle on Bluesky and the wider
+          AT Protocol network. Ownership is proven by a DNS record or a file on the domain before a request reaches
+          this queue — approving is a decision about whether this instance wants to publish that handle, not a
+          second ownership check.
+        </p>
+        <div className="flex items-center justify-between py-2 border-t border-agora-100 dark:border-agora-700">
+          <div>
+            <p className="font-medium text-sm">Approve verified domains automatically</p>
+            <p className="text-xs text-agora-400">
+              On, a domain goes live as soon as it verifies and this queue stays empty. Off, every verified domain
+              waits here for a decision.
+            </p>
+          </div>
+          <button
+            onClick={()=>setMode.mutate(approvalMode === 'auto' ? 'manual' : 'auto')}
+            disabled={setMode.isPending}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${approvalMode === 'auto' ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}
+          >
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${approvalMode === 'auto' ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between py-2 border-t border-agora-100 dark:border-agora-700">
+          <div>
+            <p className="font-medium text-sm">Let a single-user instance claim its own domain</p>
+            <p className="text-xs text-agora-400">
+              Only takes effect when this instance has exactly one real user account. On, that user gets a
+              one-click option in their settings to use {instanceDomain || 'this instance’s domain'} as
+              their handle instead of {instanceDomain ? `username.${instanceDomain}` : 'their instance handle'},
+              with no DNS setup and no wait for review.
+            </p>
+          </div>
+          <button
+            onClick={()=>setSingleUserDomainHandle.mutate(!singleUserDomainHandle)}
+            disabled={setSingleUserDomainHandle.isPending}
+            className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${singleUserDomainHandle ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}
+          >
+            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${singleUserDomainHandle ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+      </div>
+
+      {err && <div className="card p-3 text-sm text-red-600">{err}</div>}
+
+      <div className="flex gap-2">
+        {(['pending','all'] as const).map(f => (
+          <button key={f} onClick={()=>onFilter(f)}
+            className={`px-3 py-1 rounded-lg text-sm font-medium ${filter===f?'bg-agora-700 text-white':'btn-secondary'}`}>
+            {f === 'pending' ? 'Awaiting review' : 'All requests'}
+          </button>
+        ))}
+      </div>
+
+      {domains.length === 0 && (
+        <div className="card p-4 text-center text-agora-400 text-sm">
+          {filter === 'pending' ? 'Nothing waiting for review.' : 'No custom domain requests yet.'}
+        </div>
+      )}
+
+      {domains.map((d: any) => {
+        const [label, cls] = statusPill(d)
+        return (
+          <div key={d.id} className="card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <p className="font-medium">{d.domain}</p>
+                <p className="text-sm text-agora-500">
+                  Requested by <Link to={`/profile/${d.username}`} className="hover:underline">{d.display_name || d.username}</Link>
+                  {' '}<span className="text-agora-400">@{d.username}</span>
+                </p>
+              </div>
+              <span className={`px-1.5 py-0.5 rounded text-xs flex-shrink-0 ${cls}`}>{label}</span>
+            </div>
+
+            {/* The proof, stated plainly: which challenge passed, when, and
+                against which DID — the three things that make "verified" mean
+                something an admin can act on rather than a status word. */}
+            <div className="rounded-lg bg-agora-50 dark:bg-agora-800/50 p-3 space-y-1 text-xs">
+              <p>
+                <span className="text-agora-400">Proof: </span>
+                {d.verification_status === 'verified'
+                  ? <>{d.verification_method === 'dns'
+                        ? <>DNS TXT record at <code>_atproto.{d.domain}</code></>
+                        : <>file at <code>https://{d.domain}/.well-known/atproto-did</code></>}
+                      {d.verified_at && <> · verified {new Date(d.verified_at).toLocaleString()}</>}</>
+                  : <>not currently verifying{d.last_error && <> — {d.last_error}</>}</>}
+              </p>
+              <p className="font-mono text-agora-400 truncate">{d.did}</p>
+              {d.last_checked_at && (
+                <p className="text-agora-400">Last checked {new Date(d.last_checked_at).toLocaleString()}</p>
+              )}
+              {d.rejection_reason && <p className="text-red-500">Rejected: {d.rejection_reason}</p>}
+            </div>
+
+            <div className="flex gap-2 flex-wrap items-center">
+              {d.approval_status !== 'approved' && (
+                <button
+                  onClick={()=>approve.mutate(d.id)}
+                  disabled={approve.isPending || d.verification_status !== 'verified'}
+                  title={d.verification_status !== 'verified' ? 'This claim is not currently verifying' : ''}
+                  className="btn-primary text-sm"
+                >
+                  Approve
+                </button>
+              )}
+              <input
+                className="input text-sm flex-1 min-w-40"
+                autoComplete="off"
+                placeholder="Reason (shown to the user)"
+                value={reasons[d.id] || ''}
+                onChange={e=>setReasons(r=>({...r,[d.id]:e.target.value}))}
+              />
+              <button
+                onClick={()=>{
+                  const what = d.approval_status === 'approved'
+                    ? `Revoke ${d.domain}? Their handle goes back to the one this instance issued.`
+                    : `Decline ${d.domain}?`
+                  if (confirm(what)) reject.mutate({ id: d.id, reason: reasons[d.id] || '' })
+                }}
+                disabled={reject.isPending || d.approval_status === 'rejected'}
+                className="btn-danger text-sm"
+              >
+                {d.approval_status === 'approved' ? 'Revoke' : 'Decline'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

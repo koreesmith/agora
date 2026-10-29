@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agora-social/agora/internal/auth"
+	"github.com/agora-social/agora/internal/mediacache"
 )
 
 type orphanedFile struct {
@@ -31,10 +32,19 @@ func (s *Service) ScanOrphans(w http.ResponseWriter, r *http.Request) {
 	var totalBytes int64
 
 	filepath.Walk(s.media.UploadDir(), func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(s.media.UploadDir(), path)
+		if info.IsDir() {
+			// AGORA-380: the remote media cache keeps its own index and prunes
+			// itself; deleting its files from here would leave that index
+			// pointing at files that are gone.
+			if isRemoteMediaCacheDir(rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		url := "/uploads/" + filepath.ToSlash(rel)
 		if !referenced[url] {
 			orphans = append(orphans, orphanedFile{
@@ -74,10 +84,19 @@ func (s *Service) DeleteOrphans(w http.ResponseWriter, r *http.Request) {
 	var totalBytes int64
 
 	filepath.Walk(s.media.UploadDir(), func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(s.media.UploadDir(), path)
+		if info.IsDir() {
+			// AGORA-380: the remote media cache keeps its own index and prunes
+			// itself; deleting its files from here would leave that index
+			// pointing at files that are gone.
+			if isRemoteMediaCacheDir(rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		url := "/uploads/" + filepath.ToSlash(rel)
 		if !referenced[url] {
 			totalBytes += info.Size()
@@ -107,6 +126,10 @@ func (s *Service) DeleteOrphans(w http.ResponseWriter, r *http.Request) {
 		"total_bytes": totalBytes,
 		"failed":      failed,
 	})
+}
+
+func isRemoteMediaCacheDir(rel string) bool {
+	return "/uploads/"+filepath.ToSlash(rel)+"/" == mediacache.URLPrefix
 }
 
 // collectReferencedURLs queries every table that stores upload paths and returns

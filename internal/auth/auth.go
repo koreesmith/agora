@@ -158,11 +158,12 @@ var (
 func RegisterPublicRoutes(r chi.Router, s *Service) {
 	r.Get("/setup",                  s.SetupStatus)
 	r.Post("/setup",                 s.RunSetup)
-	r.Post("/auth/register",         s.Register)
+	r.With(registerRateLimit).Post("/auth/register", s.Register)
 	r.With(loginRateLimit).Post("/auth/login", s.Login)
 	r.Get("/auth/verify-email",      s.VerifyEmail)
 	r.With(forgotPasswordRateLimit).Post("/auth/forgot-password", s.ForgotPassword)
 	r.With(resetPasswordRateLimit).Post("/auth/reset-password", s.ResetPassword)
+	r.With(signupChallengeRateLimit).Get("/auth/signup-challenge", s.SignupChallenge)
 	r.Get("/auth/me",                s.Me)
 	r.Get("/auth/waitlist/accept",   s.WaitlistAccept)
 }
@@ -248,6 +249,13 @@ func (s *Service) RunSetup(w http.ResponseWriter, r *http.Request) {
 
 // ── Register ──────────────────────────────────────────────────────────────────
 
+// The two success replies, shared with the honeypot branch so a caught bot
+// sees a byte-identical response.
+const (
+	registerCreatedMessage = "account created — check your email to verify"
+	registerWaitlistDetail = "You've been added to the waitlist. Check your email — you'll receive an invite once approved."
+)
+
 func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username    string `json:"username"`
@@ -255,9 +263,27 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
 		InviteCode  string `json:"invite_code"`
+		// AGORA-406: a field the web form hides from people. Bots that fill
+		// in every input fill this too; clients that never send it pass.
+		Website     string `json:"website"`
+		// AGORA-407: the solved proof-of-work challenge, if the client did it.
+		SignupChallenge *signupSolution `json:"signup_challenge"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json"); return
+	}
+	if req.Website != "" {
+		// Answer exactly like a real signup so the bot gets no signal
+		// that it was caught, and create nothing.
+		if s.getSetting("registration_mode") == "waitlist" {
+			writeJSON(w, 201, map[string]string{
+				"message": "waitlist",
+				"detail":  registerWaitlistDetail,
+			})
+			return
+		}
+		writeJSON(w, 201, map[string]string{"message": registerCreatedMessage})
+		return
 	}
 	if len(req.Username) < 3 || len(req.Username) > 50 {
 		writeError(w, 400, "username must be 3–50 characters"); return
@@ -279,6 +305,9 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Email == "" || !isValidEmail(req.Email) {
 		writeError(w, 400, "valid email required"); return
+	}
+	if emailDomainBlocked(req.Email, s.getSetting("blocked_email_domains")) {
+		writeError(w, 400, "this email provider isn't accepted here, please use a different address"); return
 	}
 
 	// Block if no admin yet
@@ -322,6 +351,14 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	if regMode == "waitlist" {
 		waitlistStatus = "pending"
 	}
+	// AGORA-407: on an open instance, a signup that didn't solve the
+	// challenge (an old mobile build, or a bot) goes to the waitlist for an
+	// admin to approve instead of being refused. Invite signups are already
+	// vouched for, and waitlist ones are reviewed anyway.
+	if regMode == "open" && s.signupChallengeEnabled() &&
+		!(s.verifySignupSolution(req.SignupChallenge) && s.consumeSignupSolution(req.SignupChallenge)) {
+		waitlistStatus = "pending"
+	}
 
 	var userID string
 	err = s.db.QueryRow(`
@@ -352,19 +389,19 @@ func (s *Service) Register(w http.ResponseWriter, r *http.Request) {
 	// Always send email verification
 	go s.notifSvc.SendEmailVerification(userID, req.Email, displayName, verifyToken)
 
-	if regMode == "waitlist" {
+	if waitlistStatus == "pending" {
 		// Also send waitlist confirmation email
 		go s.notifSvc.SendWaitlistConfirmation(userID, req.Email, displayName)
 		// Notify all admins that a new user joined the waitlist
 		go s.notifyAdminsWaitlistJoin(userID)
 		writeJSON(w, 201, map[string]string{
 			"message": "waitlist",
-			"detail":  "You've been added to the waitlist. Check your email — you'll receive an invite once approved.",
+			"detail":  registerWaitlistDetail,
 		})
 		return
 	}
 
-	writeJSON(w, 201, map[string]string{"message": "account created — check your email to verify"})
+	writeJSON(w, 201, map[string]string{"message": registerCreatedMessage})
 }
 
 // ── Login ─────────────────────────────────────────────────────────────────────
@@ -390,17 +427,19 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		SuspensionReason string
 		EmailVerified  bool
 		ProfilePrivate bool
+		OnboardingCompleted bool
 	}
 
 	login := strings.ToLower(strings.TrimSpace(req.UsernameOrEmail))
 	err := s.db.QueryRow(`
 		SELECT id, username, email, password_hash, display_name, avatar_url,
-		       role, is_suspended, suspension_reason, email_verified, profile_private
+		       role, is_suspended, suspension_reason, email_verified, profile_private,
+		       onboarding_completed_at IS NOT NULL
 		FROM users
 		WHERE (LOWER(username) = $1 OR LOWER(email) = $1) AND is_remote = false
 	`, login).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName,
 		&u.AvatarURL, &u.Role, &u.IsSuspended, &u.SuspensionReason,
-		&u.EmailVerified, &u.ProfilePrivate)
+		&u.EmailVerified, &u.ProfilePrivate, &u.OnboardingCompleted)
 	if err != nil {
 		// No such account — still run a bcrypt compare against a fixed dummy
 		// hash so this branch takes about as long as a real wrong-password
@@ -447,6 +486,8 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		"avatar_url":      u.AvatarURL,
 		"role":            u.Role,
 		"profile_private": u.ProfilePrivate,
+		// AGORA-387: false sends a new account to the getting started wizard.
+		"onboarding_completed": u.OnboardingCompleted,
 	})
 }
 
@@ -482,15 +523,27 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		FediverseNotificationsEnabled bool
 		AtprotoEnabled       bool
 		AtprotoNotificationsEnabled bool
+		DmPrivacy            string
+		OnboardingCompleted  bool
+		OnboardingReturning  bool
+		DeletionScheduledAt  *time.Time
 	}
+	// AGORA-393: onboarding_returning is whether the account predates the
+	// wizard on this instance, i.e. was created before the earlier of its two
+	// rollout markers (see the AGORA-393 migration).
 	err = s.db.QueryRow(`
 		SELECT id, username, email, display_name, pronouns, bio, avatar_url, cover_url,
 		       cover_position, location, website, role, profile_private, hide_timeline, wall_approval_required,
-		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled
+		       activitypub_enabled, fediverse_notifications_enabled, atproto_enabled, atproto_notifications_enabled,
+		       dm_privacy, onboarding_completed_at IS NOT NULL,
+		       COALESCE(created_at < (SELECT MIN(applied_at) FROM schema_backfills
+		                              WHERE name IN ('onboarding_existing_accounts', 'onboarding_reintroduction')), false),
+		       deletion_scheduled_at
 		FROM users WHERE id = $1
 	`, claims.UserID).Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Pronouns, &u.Bio,
 		&u.AvatarURL, &u.CoverURL, &u.CoverPosition, &u.Location, &u.Website, &u.Role, &u.ProfilePrivate, &u.HideTimeline, &u.WallApprovalRequired,
-		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled)
+		&u.ActivityPubEnabled, &u.FediverseNotificationsEnabled, &u.AtprotoEnabled, &u.AtprotoNotificationsEnabled,
+		&u.DmPrivacy, &u.OnboardingCompleted, &u.OnboardingReturning, &u.DeletionScheduledAt)
 	if err != nil {
 		writeError(w, 401, "user not found"); return
 	}
@@ -507,6 +560,15 @@ func (s *Service) Me(w http.ResponseWriter, r *http.Request) {
 		"fediverse_notifications_enabled": u.FediverseNotificationsEnabled,
 		"atproto_enabled": u.AtprotoEnabled,
 		"atproto_notifications_enabled": u.AtprotoNotificationsEnabled,
+		// AGORA-387: dm_privacy was only ever in the client's local copy after
+		// a change made this session, so a fresh sign-in always showed
+		// "Everyone" whatever was saved. The wizard's recap needs the real one.
+		"dm_privacy":           u.DmPrivacy,
+		"onboarding_completed": u.OnboardingCompleted,
+		"onboarding_returning": u.OnboardingReturning,
+		// AGORA-405: null unless a deletion is pending, so the settings
+		// screens can offer to cancel it.
+		"deletion_scheduled_at": u.DeletionScheduledAt,
 	})
 }
 
@@ -747,6 +809,16 @@ func (s *Service) getSetting(key string) string {
 	return val
 }
 
+// domainFromURL strips the scheme from an instance URL, leaving the bare
+// domain. Duplicated from internal/atproto and internal/federation for the
+// same reason they duplicate it from each other: a three-line pure function
+// isn't worth a cross-package dependency.
+func domainFromURL(u string) string {
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	return strings.Split(u, "/")[0]
+}
+
 func isValidUsername(u string) bool {
 	for _, c := range u {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -784,10 +856,18 @@ func RegisterInstanceRoute(r chi.Router, s *Service) {
 
 func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	keys := []string{"instance_name", "instance_description", "registration_mode", "logo_url", "user_invites_enabled"}
-	info := map[string]string{}
+	info := map[string]any{}
 	for _, k := range keys {
 		info[k] = s.getSetting(k)
 	}
+	// AGORA-387: the getting started wizard leaves out the step for a network
+	// the admin has turned off, and builds handles from the bare domain. The
+	// two switches default differently, so these mirror the checks the
+	// federation and atproto packages actually enforce: ActivityPub is on
+	// unless set to "false", AT Proto is off unless set to "true".
+	info["activitypub_enabled"] = s.getSetting("activitypub_enabled") != "false"
+	info["atproto_enabled"] = s.getSetting("atproto_enabled") == "true"
+	info["domain"] = domainFromURL(s.cfg.InstanceDomain)
 	writeJSON(w, 200, info)
 }
 
@@ -812,10 +892,15 @@ func (s *Service) InstanceRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"rules": rules})
 }
 
+// AGORA-356: both counts below used to have no is_remote filter at all,
+// unlike every other user/post count in the codebase (admin's GetStats,
+// federation's instance-info endpoints) — so this instance's public landing
+// page reported every cached federated/Bluesky user stub and every ingested
+// remote post as if they were accounts and posts of this instance.
 func (s *Service) PublicStats(w http.ResponseWriter, r *http.Request) {
 	var userCount, postCount int
-	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE deletion_scheduled_at IS NULL`).Scan(&userCount)
-	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL AND parent_id IS NULL`).Scan(&postCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE deletion_scheduled_at IS NULL AND is_remote = false`).Scan(&userCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL AND parent_id IS NULL AND is_remote = false`).Scan(&postCount)
 	writeJSON(w, 200, map[string]any{
 		"user_count": userCount,
 		"post_count": postCount,

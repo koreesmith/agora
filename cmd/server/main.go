@@ -19,15 +19,18 @@ import (
 	"github.com/agora-social/agora/internal/atproto"
 	"github.com/agora-social/agora/internal/auth"
 	"github.com/agora-social/agora/internal/blocks"
+	"github.com/agora-social/agora/internal/hidden"
 	"github.com/agora-social/agora/internal/config"
 	"github.com/agora-social/agora/internal/customfeeds"
 	"github.com/agora-social/agora/internal/dm"
+	"github.com/agora-social/agora/internal/domains"
 	"github.com/agora-social/agora/internal/feed"
 	"github.com/agora-social/agora/internal/federation"
 	"github.com/agora-social/agora/internal/friends"
 	"github.com/agora-social/agora/internal/groups"
 	"github.com/agora-social/agora/internal/media"
 	"github.com/agora-social/agora/internal/interactions"
+	"github.com/agora-social/agora/internal/linkpreview"
 	"github.com/agora-social/agora/internal/moderation"
 	"github.com/agora-social/agora/internal/notifications"
 	"github.com/agora-social/agora/internal/pages"
@@ -68,18 +71,32 @@ func main() {
 	fedSvc    := federation.NewService(db, cfg, notifSvc)
 	dmSvc          := dm.New(db, cfg.AllowedOrigins)
 	blocksSvc      := blocks.New(db)
+	hiddenSvc      := hidden.New(db)   // AGORA-309
 	customFeedsSvc  := customfeeds.NewService(db)
 	pagesSvc        := pages.NewService(db, notifSvc)
 	interactionsSvc := interactions.NewService(db)
 	atprotoSvc      := atproto.NewService(db, cfg, notifSvc)
+	domainsSvc      := domains.NewService(db, cfg, notifSvc)
 
 	// Wire federation into services that need to broadcast activities
 	friendSvc.SetFed(fedSvc)
 	feedSvc.SetFed(fedSvc)
 	userSvc.SetFed(fedSvc)
 	pagesSvc.SetFed(fedSvc)
+	// AGORA-324: the admin Add Instance flow resolves a remote instance through
+	// federation's SSRF-safe client rather than reaching out on its own.
+	adminSvc.SetFed(fedSvc)
+	// AGORA-323: the DM service was the one federating service that never had a
+	// fedSender, which is why messages stopped at the instance boundary.
+	dmSvc.SetFed(fedSvc)
+	fedSvc.SetDM(dmSvc)
 	userSvc.SetAtproto(atprotoSvc)
 	feedSvc.SetAtproto(atprotoSvc)
+	// AGORA-278: internal/domains owns the claim/verify/approve workflow and
+	// internal/atproto owns what a verified domain means for identity. Wired
+	// rather than imported — internal/atproto reads custom_domains directly,
+	// so a direct import back would be a cycle.
+	domainsSvc.SetAtproto(atprotoSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -171,6 +188,7 @@ func main() {
 			albums.RegisterRoutes(r, albumsSvc)
 			dm.RegisterRoutes(r, dmSvc)
 			blocks.RegisterRoutes(r, blocksSvc)
+			hidden.RegisterRoutes(r, hiddenSvc)
 			customfeeds.RegisterRoutes(r, customFeedsSvc)
 			pages.RegisterRoutes(r, pagesSvc)
 			interactions.RegisterRoutes(r, interactionsSvc)
@@ -180,6 +198,10 @@ func main() {
 			// fediverse servers dereferencing our public actor/WebFinger URLs.
 			federation.RegisterAuthedRoutes(r, fedSvc)
 			atproto.RegisterAuthedRoutes(r, atprotoSvc)
+			// AGORA-284: claiming/verifying your own domain as a handle. Its
+			// own rate limits are applied inside RegisterRoutes, keyed by
+			// account rather than IP (AGORA-290).
+			domains.RegisterRoutes(r, domainsSvc)
 		})
 
 		// WebSocket upgrade — browsers can't set an Authorization header on
@@ -209,6 +231,8 @@ func main() {
 			// AGORA-270 follow-up: published_at backfill needs the AppView
 			// client, which only exists in the atproto package.
 			atproto.RegisterAdminRoutes(r, atprotoSvc)
+			// AGORA-286: the custom domain approval queue.
+			domains.RegisterAdminRoutes(r, domainsSvc)
 		})
 	})
 
@@ -222,6 +246,11 @@ func main() {
 	// Proto clients/relays rather than through /api.
 	atproto.RegisterRoutes(r, atprotoSvc)
 
+	// AGORA-412: post and profile pages with their link preview tags filled
+	// in. nginx routes /post/ and /profile/ page loads here and falls back to
+	// the frontend if this answers with an error.
+	linkpreview.RegisterRoutes(r, linkpreview.NewService(db, cfg))
+
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -234,6 +263,12 @@ func main() {
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
 	go atprotoSvc.StartBlueskyIngestion(context.Background())
+	// AGORA-313: a Bluesky follow is never delivered to us, so noticing one
+	// means asking the AppView who follows each local account.
+	go atprotoSvc.StartBlueskyFollowerPolling(context.Background())
+	// AGORA-289: re-checks verified custom domains so a removed DNS record or
+	// a lapsed registration takes the handle out of service on its own.
+	go domainsSvc.StartReverification(context.Background())
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────
 	srv := &http.Server{

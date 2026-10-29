@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { searchApi, friendsApi, federationApi, pagesApi, atprotoApi } from '../api'
@@ -8,29 +8,34 @@ import { formatDistanceToNow } from 'date-fns'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2, BookOpen, ExternalLink } from 'lucide-react'
 import { useMutation as useSubscribeMutation } from '@tanstack/react-query'
+import CustomHandle from '../components/common/CustomHandle'
 
 export default function SearchPage() {
-  // AGORA-217: a hashtag link elsewhere in the app (renderContent) navigates
-  // here as /search?tab=posts&q=%23tag — pre-fill from the URL once on mount
-  // rather than two-way-binding every keystroke back into it.
-  const [params] = useSearchParams()
-  const [input, setInput] = useState(() => params.get('q') || '')
-  const [q, setQ] = useState(() => params.get('q') || '')
-  const [tab, setTab] = useState<'users'|'posts'|'pages'>(() => {
-    const t = params.get('tab')
-    return t === 'posts' || t === 'pages' ? t : 'users'
-  })
-  const debounceTimer = useRef<ReturnType<typeof setTimeout>>()
+  // AGORA-304: the page no longer owns an input. The global top bar
+  // (components/layout/SearchBar) is the only place you type a query, and it
+  // publishes what you typed to ?q=, debounce already applied. Reading straight
+  // off the URL rather than mirroring it into state is what keeps the two in
+  // step, and it means a hashtag link (AGORA-217, /search?tab=posts&q=%23tag)
+  // needs no special handling: it is just another way the URL got set.
+  const [params, setParams] = useSearchParams()
+  const q = (params.get('q') || '').trim()
+  const tabParam = params.get('tab')
+  const tab: 'users'|'posts'|'pages' = tabParam === 'posts' || tabParam === 'pages' ? tabParam : 'users'
   const { user } = useAuthStore()
   const qc = useQueryClient()
 
-  useEffect(() => {
-    clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setQ(input), 350)
-    return () => clearTimeout(debounceTimer.current)
-  }, [input])
+  // Tab lives in the URL for the same reason: it makes a tab linkable, and it
+  // survives the bar rewriting ?q= as you type. replace so flipping tabs
+  // doesn't fill the back button with the same search.
+  const setTab = (next: 'users'|'posts'|'pages') => {
+    const p = new URLSearchParams(params)
+    p.set('tab', next)
+    setParams(p, { replace: true })
+  }
 
-  const isHandleLookup = /^[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q.trim())
+  // AGORA-362: a fediverse handle is conventionally typed with a leading @
+  // (@user@instance.com), so the match has to accept one without requiring it.
+  const isHandleLookup = /^@?[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q)
 
   const enabled = q.length >= 2
 
@@ -114,21 +119,13 @@ export default function SearchPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold">Search</h1>
-
-      {/* Search input */}
-      <div className="relative">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-agora-400" />
-        <input
-          className="input pl-9"
-          placeholder="Search people and posts…"
-          autoComplete="off"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          autoFocus
-        />
-        {isFetching && q.length >= 2 && (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-agora-400 animate-pulse">searching…</span>
+      {/* The query itself is echoed here rather than sitting in an input: the
+          top bar holds the text, this is the page saying what it searched for. */}
+      <div className="flex items-baseline gap-2">
+        <h1 className="text-xl font-bold">Search</h1>
+        {q && <span className="text-sm text-agora-400 truncate">for "{q}"</span>}
+        {isFetching && enabled && (
+          <span className="ml-auto text-xs text-agora-400 animate-pulse flex-shrink-0">searching…</span>
         )}
       </div>
 
@@ -149,8 +146,8 @@ export default function SearchPage() {
             <UserResult
               user={{ ...lookupData.user, friendship_status: '' }}
               currentUserId={user?.id}
-              onAdd={() => {}}
-              addPending={false}
+              onAdd={() => send.mutate(lookupData.user.id)}
+              addPending={send.isPending}
             />
           )}
         </div>
@@ -176,7 +173,7 @@ export default function SearchPage() {
           {!enabled && (
             <div className="card p-8 text-center text-agora-400 text-sm">
               <Search size={28} className="mx-auto mb-2 opacity-40" />
-              Type at least 2 characters to search, or enter <span className="font-mono">user@instance.com</span> to find someone on another instance.
+              Type at least 2 characters in the search bar above, or enter <span className="font-mono">user@instance.com</span> to find someone on another instance.
             </div>
           )}
 
@@ -290,8 +287,9 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
         <Link to={`/profile/${u.username}`} className="font-medium text-sm hover:underline block truncate">
           {u.display_name ? renderName(u.display_name, u.emojis) : u.username}
         </Link>
-        <p className="text-xs text-agora-400 truncate">
-          {handle(u.username, u.is_remote, u.remote_instance)}
+        <p className="text-xs text-agora-400 truncate flex items-center gap-1.5">
+          <span className="truncate">{handle(u.username, u.is_remote, u.remote_instance)}</span>
+          <CustomHandle domain={u.custom_domain} />
         </p>
         {u.bio && <p className="text-xs text-agora-500 truncate mt-0.5">{u.bio}</p>}
       </div>

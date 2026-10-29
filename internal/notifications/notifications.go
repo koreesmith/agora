@@ -325,7 +325,7 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	if actorID != "" { aID = &actorID }
 	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
 		userID, aID, notifType, pID, data)
-	go s.maybeEmailNotif(userID, actorID, notifType, postID)
+	go s.maybeEmailNotif(userID, actorID, notifType, postID, data)
 	go s.maybePushNotif(userID, actorID, notifType, postID, data)
 }
 
@@ -343,7 +343,7 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData s
 		actorUsername = username
 	}
 
-	title, body := pushNotifContent(notifType, actorName)
+	title, body := pushNotifContent(notifType, actorName, extraData)
 	if title == "" { return }
 
 	data := map[string]string{
@@ -371,7 +371,9 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData s
 	defer resp.Body.Close()
 }
 
-func pushNotifContent(t, actorName string) (title, body string) {
+// data is the notification's type-specific payload — the domain name, for the
+// custom-handle types (AGORA-287), which have no actor to name instead.
+func pushNotifContent(t, actorName, data string) (title, body string) {
 	switch t {
 	case "friend_request":
 		return "New friend request", actorName + " sent you a friend request"
@@ -396,7 +398,16 @@ func pushNotifContent(t, actorName string) (title, body string) {
 	case "user_post":
 		return "New post", actorName + " just posted something new"
 	case "fediverse_post":
-		return "New post from the fediverse", actorName + " posted something new"
+		return "New post from the Fediverse", actorName + " posted something new"
+	// AGORA-313: two types rather than one so the wording can name the network
+	// the follower came from, the same split fediverse_post/atproto_post make.
+	// Neither is emailed: a remote follow is unilateral and unbounded, and
+	// unlike friend_request there is nothing to accept, so notifEmailContent
+	// deliberately has no case for either.
+	case "fediverse_follow":
+		return "New follower", actorName + " followed you from the Fediverse"
+	case "atproto_follow":
+		return "New follower", actorName + " followed you on Bluesky"
 	case "group_join_request":
 		return "Join request", actorName + " wants to join your group"
 	case "group_join_approved":
@@ -405,11 +416,28 @@ func pushNotifContent(t, actorName string) (title, body string) {
 		return "⚠️ New Report", "A new report has been submitted — tap to review"
 	case "waitlist_join":
 		return "👤 New Waitlist Signup", "A new user has joined the waitlist — tap to review"
+	// AGORA-314: admin-only, and there is no actor: data carries the domain.
+	case "federation_request":
+		return "🌐 New federation request", data + " has started federating with this instance"
+	case "custom_domain_live":
+		return "Your custom handle is live", data + " is now your handle on Bluesky"
+	case "custom_domain_verified":
+		return "Domain verified", data + " is verified and waiting for an administrator to approve it"
+	case "custom_domain_failed":
+		return "Domain verification failed", "We couldn't verify " + data + " — tap to see why"
+	case "custom_domain_lost":
+		return "Your custom handle stopped working", data + " no longer verifies, so your handle has reverted"
+	case "custom_domain_rejected":
+		return "Custom domain declined", "Your request to use " + data + " was declined"
 	}
 	return "", ""
 }
 
-func (s *Service) maybeEmailNotif(userID, actorID, notifType, postID string) {
+// data carries the notification's type-specific payload (AGORA-287 uses it for
+// the domain name a custom-handle notification is about) — the email templates
+// that need it would otherwise have to re-query for something the caller
+// already had in hand.
+func (s *Service) maybeEmailNotif(userID, actorID, notifType, postID, data string) {
 	if !s.email.enabled() { return }
 
 	var toEmail, displayName, unsubToken string
@@ -440,13 +468,13 @@ func (s *Service) maybeEmailNotif(userID, actorID, notifType, postID string) {
 	domain := s.email.instanceDomain()
 	baseURL := s.email.instanceBaseURL()
 
-	subject, body := notifEmailContent(notifType, actorName, actorUsername, postID, instanceName, baseURL)
+	subject, body := notifEmailContent(notifType, actorName, actorUsername, postID, instanceName, baseURL, data)
 	if subject == "" { return }
 
 	s.email.SendHTML(toEmail, subject, buildBody(displayName, instanceName, domain, baseURL, body), "", unsubToken)
 }
 
-func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseURL string) (subject, body string) {
+func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseURL, data string) (subject, body string) {
 	postURL := baseURL
 	if postID != "" {
 		postURL = fmt.Sprintf("%s/post/%s", baseURL, postID)
@@ -476,8 +504,8 @@ func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseUR
 		return fmt.Sprintf("%s replied to your comment", actorName),
 			fmt.Sprintf("%s replied to your comment on %s.\n\nSee the reply: %s", actorName, instanceName, postURL)
 	case "post_repost":
-		return fmt.Sprintf("%s shared your post on %s", actorName, instanceName),
-			fmt.Sprintf("%s shared one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
+		return fmt.Sprintf("%s reposted your post on %s", actorName, instanceName),
+			fmt.Sprintf("%s reposted one of your posts on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
 	case "post_mention":
 		return fmt.Sprintf("%s mentioned you in a post", actorName),
 			fmt.Sprintf("%s mentioned you in a post on %s.\n\nSee the post: %s", actorName, instanceName, postURL)
@@ -496,6 +524,28 @@ func notifEmailContent(t, actorName, actorUsername, postID, instanceName, baseUR
 	case "new_report":
 		return fmt.Sprintf("⚠️ New report on %s", instanceName),
 			fmt.Sprintf("A new report has been submitted on %s and needs your review.\n\nReview it: %s/admin", instanceName, baseURL)
+
+	// AGORA-314: emailed, unlike a follow, for the same reason new_report is:
+	// a low-frequency admin-relevant event where an admin who isn't logged in
+	// is exactly the person who should hear about it. data carries the domain.
+	case "federation_request":
+		return fmt.Sprintf("New federation request on %s", instanceName),
+			fmt.Sprintf("%s has started federating with %s.\n\nReview it: %s/admin?tab=federation", data, instanceName, baseURL)
+
+	// AGORA-287: custom domain handles (data carries the domain). Only the
+	// three state changes a user has to know about are emailed — a handle
+	// going live, a live handle lapsing, and a request being turned down.
+	// "Verified, awaiting review" and a failed check on a handle that was
+	// never live stay in-app, so a flaky DNS provider can't fill an inbox.
+	case "custom_domain_live":
+		return fmt.Sprintf("%s is now your Bluesky handle", data),
+			fmt.Sprintf("Your custom domain %s is verified and live — it's now your handle on Bluesky and the wider AT Protocol network.\n\nManage it: %s/settings?tab=bluesky", data, baseURL)
+	case "custom_domain_lost":
+		return fmt.Sprintf("Your custom handle %s has stopped working", data),
+			fmt.Sprintf("We could no longer verify %s, so your handle has reverted to the one %s issued you. This usually means the DNS record was removed or the domain's registration lapsed.\n\nYour account and posts are unaffected. To restore it, put the record back and re-check: %s/settings?tab=bluesky", data, instanceName, baseURL)
+	case "custom_domain_rejected":
+		return fmt.Sprintf("Your custom domain request for %s was declined", data),
+			fmt.Sprintf("An administrator declined your request to use %s as your handle on %s.\n\nSee the details: %s/settings?tab=bluesky", data, instanceName, baseURL)
 	}
 	return "", ""
 }

@@ -72,3 +72,16 @@
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
+
+/* feed-pills-fade (AGORA-303): softens the right edge of the feed pill row so
+   a row that scrolls looks like it scrolls. Hiding the scrollbar above left
+   overflow with no affordance at all.
+
+   The element must fill its flex line (flex-1) for this to behave: the mask is
+   anchored to the box, not the content, so on a shrink-to-fit box it would
+   fade the last pill even with nothing to scroll to. Filling the line puts the
+   fade over empty space until the content actually overflows. */
+.feed-pills-fade {
+  mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+}

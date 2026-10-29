@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
-import { usersApi, authApi, notificationsApi, blocksApi } from '../api'
+import { usersApi, authApi, notificationsApi, blocksApi, hiddenPostsApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
+import CustomDomainPanel from '../components/common/CustomDomainPanel'
 
 export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
@@ -150,9 +151,29 @@ export default function SettingsPage() {
     const a = document.createElement('a'); a.href = url; a.download = 'agora-export.zip'; a.click()
   }
 
+  // AGORA-405: /auth/me reports a pending deletion, so the Data tab can show
+  // its date and offer to cancel it.
+  const deletionScheduledAt: string | null =
+    (freshProfile ? freshProfile.deletion_scheduled_at : user?.deletion_scheduled_at) ?? null
+  const setDeletionScheduledAt = (at: string | null) => {
+    qc.setQueryData(['my-profile'], (old: any) => old && { ...old, deletion_scheduled_at: at })
+    updateUser({ deletion_scheduled_at: at })
+  }
+  const formatDate = (at: string) => new Date(at).toLocaleDateString(undefined, { dateStyle: 'long' })
+
   const requestDelete = useMutation({
     mutationFn: () => usersApi.requestDeletion(),
-    onSuccess: () => ok('Deletion scheduled. You have 30 days to cancel.'),
+    onSuccess: (res) => {
+      const at = res.data.deletion_scheduled_at ?? res.data.scheduled_at
+      setDeletionScheduledAt(at)
+      ok(`Deletion scheduled for ${formatDate(at)}. You can cancel it until then.`)
+    },
+    onError: fail,
+  })
+
+  const cancelDelete = useMutation({
+    mutationFn: () => usersApi.cancelDeletion(),
+    onSuccess: () => { setDeletionScheduledAt(null); ok('Account deletion cancelled') },
     onError: fail,
   })
 
@@ -178,6 +199,19 @@ export default function SettingsPage() {
       ok(enabled ? 'Email notifications enabled' : 'Email notifications disabled')
     },
     onError: fail,
+  })
+
+  // AGORA-309: hidden posts live in the same tab as blocked users. Both are
+  // "things I have chosen not to see", and a tab of its own for a list most
+  // people will never open would cost more than it returns.
+  const { data: hiddenData, refetch: refetchHidden } = useQuery({
+    queryKey: ['hidden-posts'],
+    queryFn: () => hiddenPostsApi.list().then(r => r.data),
+    enabled: tab === 'blocked',
+  })
+  const unhide = useMutation({
+    mutationFn: (postId: string) => hiddenPostsApi.unhide(postId),
+    onSuccess: () => refetchHidden(),
   })
 
   const { data: blockedData, refetch: refetchBlocked } = useQuery({
@@ -351,14 +385,26 @@ export default function SettingsPage() {
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Fediverse (ActivityPub)</h3>
           <p className="text-sm text-agora-500">
-            Agora can talk to Mastodon and the rest of the fediverse over ActivityPub — the same open protocol those
-            apps use amongst themselves. Turning this on lets people out there find, follow, and see your public
-            posts, and reply to them. Private and friends-only posts are never federated either way.
+            Agora can talk to Mastodon and the rest of the Fediverse over ActivityPub — the same open protocol those
+            apps use amongst themselves. Turning this on lets people out there follow and see your public posts, and
+            reply to them. Private and friends-only posts are never federated either way.
           </p>
+          {/* AGORA-365: this used to also gate whether anyone could find and
+              friend this account from a directly peered Agora instance, since
+              that discovery runs over the same anonymous WebFinger request a
+              Mastodon server would use, with no way to tell the two apart.
+              Being findable by an instance your own admin chose to peer with
+              is a narrower, admin-curated trust decision than "the whole
+              fediverse can see me," so it no longer depends on this toggle;
+              only your profile's own privacy setting does. */}
           <div className="flex items-center justify-between py-2 border-b border-agora-100 dark:border-agora-700">
             <div>
               <p className="font-medium text-sm">Fediverse (ActivityPub)</p>
-              <p className="text-xs text-agora-400">Let people on Mastodon and other fediverse apps find, follow, and see your public posts.</p>
+              <p className="text-xs text-agora-400">
+                Let people on Mastodon and other Fediverse apps follow and see your public posts. Doesn't affect
+                being found or friended from an instance federated with this one, only your profile's own privacy
+                setting does that.
+              </p>
             </div>
             <button onClick={() => toggleActivityPub.mutate()}
               className={`relative inline-flex h-6 w-11 rounded-full transition-colors flex-shrink-0 ml-4 ${user?.activitypub_enabled ? 'bg-agora-700' : 'bg-agora-200 dark:bg-agora-700'}`}>
@@ -368,7 +414,7 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="font-medium text-sm">Fediverse post notifications</p>
-              <p className="text-xs text-agora-400">Get notified when a fediverse account you follow posts something new. Doesn't affect any other notification type.</p>
+              <p className="text-xs text-agora-400">Get notified when a Fediverse account you follow posts something new. Doesn't affect any other notification type.</p>
             </div>
             <button
               onClick={() => toggleFediverseNotifications.mutate()}
@@ -378,7 +424,7 @@ export default function SettingsPage() {
             </button>
           </div>
           <p className="text-sm text-agora-500 pt-2 border-t border-agora-100 dark:border-agora-700">
-            Following a fediverse handle and managing who you already follow moved to{' '}
+            Following a Fediverse handle and managing who you already follow moved to{' '}
             <Link to="/connections?tab=fediverse" className="underline hover:text-agora-700">Connections → Fediverse</Link>.
           </p>
         </div>
@@ -389,10 +435,11 @@ export default function SettingsPage() {
           ActivityPub. Follow management lands here once AGORA-195 exists;
           for now this is just the opt-out toggle. */}
       {tab === 'bluesky' && (
+        <div className="space-y-4">
         <div className="card p-4 space-y-4">
           <h3 className="font-semibold">Bluesky (AT Protocol)</h3>
           <p className="text-sm text-agora-500">
-            Agora can also talk to Bluesky over AT Protocol, a separate network from the fediverse with its own
+            Agora can also talk to Bluesky over AT Protocol, a separate network from the Fediverse with its own
             identity and moderation model. Turning this on lets people on Bluesky find, follow, and see your public
             posts. Private and friends-only posts are never federated either way.
           </p>
@@ -423,6 +470,12 @@ export default function SettingsPage() {
             <Link to="/connections?tab=bluesky" className="underline hover:text-agora-700">Connections → Bluesky</Link>.
           </p>
         </div>
+        {/* AGORA-284: a custom handle is an AT Proto identity feature, so it
+            lives with the rest of the Bluesky settings rather than in a tab
+            of its own — but as a separate card, since it's a setup flow with
+            its own state, not another toggle. */}
+        <CustomDomainPanel />
+        </div>
       )}
 
       {tab === 'data' && (
@@ -434,10 +487,24 @@ export default function SettingsPage() {
           </div>
           <div className="card p-4 space-y-3 border-red-200 dark:border-red-800">
             <h3 className="font-semibold text-red-600">Delete account</h3>
-            <p className="text-sm text-agora-500">Your account will be scheduled for deletion. You have 30 days to cancel before all data is permanently removed.</p>
-            <button onClick={() => { if(confirm('Schedule account deletion? You will have 30 days to cancel.')) requestDelete.mutate() }} className="btn-danger">
-              Schedule deletion
-            </button>
+            {deletionScheduledAt ? (
+              <>
+                <p className="text-sm text-agora-500">
+                  Your account is scheduled for deletion on <strong>{formatDate(deletionScheduledAt)}</strong>.
+                  {' '}After that, all of your data is permanently removed. You can cancel until then.
+                </p>
+                <button onClick={() => cancelDelete.mutate()} disabled={cancelDelete.isPending} className="btn-secondary">
+                  Cancel deletion
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-agora-500">Your account will be scheduled for deletion. You have a grace period (30 days unless your instance sets another) to cancel before all data is permanently removed.</p>
+                <button onClick={() => { if(confirm('Schedule account deletion? You can cancel it during the grace period.')) requestDelete.mutate() }} disabled={requestDelete.isPending} className="btn-danger">
+                  Schedule deletion
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -467,6 +534,45 @@ export default function SettingsPage() {
                     className="btn-secondary text-xs py-1 px-3"
                   >
                     Unblock
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'blocked' && (
+        <div className="card p-4 space-y-3 mt-4">
+          <h3 className="font-semibold">Hidden posts</h3>
+          <p className="text-sm text-agora-500">
+            Posts you've hidden from your own timeline. Hiding is private: the author isn't told, and the post is
+            unaffected for everyone else.
+          </p>
+          {(hiddenData?.posts || []).length === 0 ? (
+            <p className="text-sm text-agora-400 py-4 text-center">You haven't hidden any posts.</p>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {(hiddenData?.posts || []).map((p: any) => (
+                <div key={p.id} className="flex items-start gap-3 py-2 border-b border-agora-100 dark:border-agora-700 last:border-0">
+                  <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    {p.avatar_url
+                      ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-sm">{(p.display_name || p.username)[0].toUpperCase()}</span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Link to={`/profile/${p.username}`} className="text-sm font-medium hover:underline">{p.display_name || p.username}</Link>
+                    {/* Enough to recognise which post this was, not a second
+                        feed. line-clamp keeps a long post from turning the
+                        management list into a wall of text. */}
+                    <p className="text-xs text-agora-500 line-clamp-2 mt-0.5">{p.content || (p.image_url ? '(image)' : '(no text)')}</p>
+                  </div>
+                  <button
+                    onClick={() => unhide.mutate(p.id)}
+                    disabled={unhide.isPending}
+                    className="btn-secondary text-xs py-1 px-3 flex-shrink-0"
+                  >
+                    Unhide
                   </button>
                 </div>
               ))}

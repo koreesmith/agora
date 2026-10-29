@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { friendsApi, federationApi, atprotoApi } from '../api'
+import { friendsApi, federationApi, atprotoApi, instanceApi } from '../api'
 import { handle } from '../utils/handle'
-import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud } from 'lucide-react'
+import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud, Compass, Mail } from 'lucide-react'
 import FriendListModal from '../components/common/FriendListModal'
+import LockedBadge from '../components/common/LockedBadge'
 import { renderName } from '../components/feed/CommentsSection'
 
 // AGORA-196: a fediverse actor federated through Bridgy Fed's bsky.brid.gy
@@ -18,6 +19,18 @@ export default function ConnectionsPage() {
   const [tab, setTab] = useState<'friends'|'requests'|'lists'|'fediverse'|'bluesky'>(
     (searchParams.get('tab') as any) || 'friends'
   )
+  // AGORA-349: which segment of the Fediverse/Bluesky tab is showing —
+  // separate per platform since a user can leave one on Followers and switch
+  // platforms without losing that. ?sub= only ever seeds whichever platform
+  // ?tab= itself points at, so a new-follower notification can deep-link
+  // straight to e.g. /connections?tab=bluesky&sub=followers.
+  const initialSub = searchParams.get('sub') === 'followers' ? 'followers' : 'following'
+  const [fediSubTab, setFediSubTab] = useState<'following'|'followers'>(
+    (searchParams.get('tab') as any) === 'fediverse' ? initialSub : 'following'
+  )
+  const [bskySubTab, setBskySubTab] = useState<'following'|'followers'>(
+    (searchParams.get('tab') as any) === 'bluesky' ? initialSub : 'following'
+  )
   const [newListName, setNewListName] = useState('')
   const [expandedList, setExpandedList] = useState<string | null>(null)
   const [listModalFriend, setListModalFriend] = useState<any | null>(null)
@@ -28,6 +41,15 @@ export default function ConnectionsPage() {
   const { data: reqData }     = useQuery({ queryKey: ['requests'],      queryFn: () => friendsApi.listRequests().then(r => r.data) })
   const { data: listsData }   = useQuery({ queryKey: ['friend-groups'], queryFn: () => friendsApi.listFriendLists().then(r => r.data) })
 
+  // AGORA-335: the Invite action moved here from the sidebar, so this page now
+  // needs the same instance flag the sidebar used to gate it on.
+  const { data: instanceData } = useQuery({
+    queryKey: ['instance-info'],
+    queryFn: () => instanceApi.getInfo().then(r => r.data),
+    staleTime: 5 * 60_000,
+  })
+  const invitesEnabled = instanceData?.user_invites_enabled === 'true'
+
   // ── Fediverse follows (moved from the standalone Fediverse page) ──────────
   const [fediHandle, setFediHandle] = useState('')
   const [fediPreview, setFediPreview] = useState<any>(null)
@@ -37,8 +59,26 @@ export default function ConnectionsPage() {
     queryKey: ['fediverse-following'],
     queryFn: () => federationApi.listFollowing().then(r => r.data),
     enabled: tab === 'fediverse' || tab === 'lists',
+    // AGORA-307: while any follow is still awaiting an Accept from the remote
+    // instance, poll for it instead of leaving "Requested" stuck until the
+    // user refocuses the tab or navigates away and back.
+    refetchInterval: (query) => {
+      const rows: any[] = query.state.data?.following ?? []
+      return rows.some(f => !f.accepted) ? 10_000 : false
+    },
   })
   const following: any[] = followingData?.following ?? []
+
+  // AGORA-348/349: the caller's own inbound followers. Fetched whenever the
+  // Fediverse tab is open (not gated on fediSubTab === 'followers') so the
+  // Followers segment's count is live from the moment the tab renders and
+  // switching segments never shows a loading flash.
+  const { data: followersData } = useQuery({
+    queryKey: ['fediverse-followers'],
+    queryFn: () => federationApi.listFollowers().then(r => r.data),
+    enabled: tab === 'fediverse',
+  })
+  const followers: any[] = followersData?.followers ?? []
 
   const resolveFediHandle = useMutation({
     mutationFn: (h: string) => federationApi.resolveFediverseHandle(h).then(r => r.data),
@@ -51,6 +91,9 @@ export default function ConnectionsPage() {
       setFediPreview(null)
       setFediHandle('')
       qc.invalidateQueries({ queryKey: ['fediverse-following'] })
+      // A Follow Back from the Followers segment needs this list's
+      // following_back flags to settle too, not just the Following list.
+      qc.invalidateQueries({ queryKey: ['fediverse-followers'] })
     },
   })
   const unfollowFedi = useMutation({
@@ -107,6 +150,18 @@ export default function ConnectionsPage() {
   })
   const bskyFollowing: any[] = bskyFollowingData?.following ?? []
 
+  // AGORA-348/349: same shape as the fediverse followers query above —
+  // fetched whenever the Bluesky tab is open, not gated on bskySubTab, so the
+  // Followers segment's count and sync-freshness note are live immediately.
+  const { data: bskyFollowersData } = useQuery({
+    queryKey: ['bluesky-followers'],
+    queryFn: () => atprotoApi.listBlueskyFollowers().then(r => r.data),
+    enabled: tab === 'bluesky',
+  })
+  const bskyFollowers: any[] = bskyFollowersData?.followers ?? []
+  const bskyFollowersSeeded: boolean = bskyFollowersData?.seeded ?? false
+  const bskyFollowersSyncedAt: string | undefined = bskyFollowersData?.synced_at
+
   const resolveBskyHandle = useMutation({
     mutationFn: (h: string) => atprotoApi.resolveBlueskyHandle(h).then(r => r.data),
     onSuccess: (data) => { setBskyPreview(data); setBskySearchError('') },
@@ -118,6 +173,7 @@ export default function ConnectionsPage() {
       setBskyPreview(null)
       setBskyHandle('')
       qc.invalidateQueries({ queryKey: ['bluesky-following'] })
+      qc.invalidateQueries({ queryKey: ['bluesky-followers'] })
     },
     onError: (e: any) => setBskySearchError(e.response?.data?.error || 'Could not follow that account.'),
   })
@@ -151,6 +207,9 @@ export default function ConnectionsPage() {
     },
   })
   const decline  = useMutation({ mutationFn: (id: string) => friendsApi.declineRequest(id), onSuccess: () => inv('requests') })
+  // AGORA-333: withdraw a request you sent. Until now a sent request could only
+  // be waited on, so a request to a wrong or unresponsive account was permanent.
+  const cancel   = useMutation({ mutationFn: (id: string) => friendsApi.cancelRequest(id), onSuccess: () => inv('requests') })
   const unfriend = useMutation({ mutationFn: (id: string) => friendsApi.unfriend(id),       onSuccess: () => inv('friends') })
   const createList = useMutation({
     mutationFn: (name: string) => friendsApi.createFriendList(name),
@@ -207,7 +266,23 @@ export default function ConnectionsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Connections</h1>
+      {/* AGORA-335: Find friends and Invite a friend used to be their own
+          sidebar entries. They are actions you take from here, not places, so
+          they sit beside the heading rather than competing with Feed and
+          Messages for a top-level slot. Both routes are unchanged. */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h1 className="text-xl font-bold text-agora-900 dark:text-agora-100">Connections</h1>
+        <div className="flex items-center gap-2">
+          <Link to="/discover" className="btn-secondary text-sm flex items-center gap-1.5">
+            <Compass size={15} /> Find friends
+          </Link>
+          {invitesEnabled && (
+            <Link to="/invite-friend" className="btn-secondary text-sm flex items-center gap-1.5">
+              <Mail size={15} /> Invite
+            </Link>
+          )}
+        </div>
+      </div>
 
       {listModalFriend && (
         <FriendListModal
@@ -274,6 +349,13 @@ export default function ConnectionsPage() {
                   <Link to={`/profile/${f.username}`} className="font-medium text-sm hover:underline">{f.display_name || f.username}</Link>
                 </div>
                 <span className="text-xs text-agora-400">Pending</span>
+                <button
+                  onClick={() => cancel.mutate(f.id)}
+                  disabled={cancel.isPending}
+                  className="btn-secondary text-xs py-1 px-2"
+                >
+                  <UserX size={13} /> Cancel
+                </button>
               </div>
             ))}
           </>}
@@ -322,12 +404,28 @@ export default function ConnectionsPage() {
       {/* ── Fediverse tab (moved from the standalone Fediverse page) ── */}
       {tab === 'fediverse' && (
         <div className="space-y-4">
+          {/* AGORA-349: Following vs Followers — kept as a segment inside this
+              tab rather than a sixth top-level tab, since the two carry very
+              different meaning (a follow you made vs. one made of you) but
+              share this tab's follow-by-handle machinery and platform framing. */}
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            <button onClick={() => setFediSubTab('following')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${fediSubTab === 'following' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Following ({following.length})
+            </button>
+            <button onClick={() => setFediSubTab('followers')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${fediSubTab === 'followers' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Followers ({followers.length})
+            </button>
+          </div>
+
+          {fediSubTab === 'following' && (
           <div className="card p-5 space-y-4">
             <div>
-              <h2 className="font-semibold text-sm">Follow a fediverse account</h2>
+              <h2 className="font-semibold text-sm">Follow a Fediverse account</h2>
               <p className="text-xs text-agora-400 mt-1">
                 Enter a full handle (e.g. <code>user@mastodon.social</code>) or a profile URL. There's no way to
-                search the fediverse by name — like Mastodon's own remote search, you need the exact handle.
+                search the Fediverse by name — like Mastodon's own remote search, you need the exact handle.
               </p>
             </div>
             <form onSubmit={handleFediSearch} className="flex gap-2">
@@ -351,7 +449,7 @@ export default function ConnectionsPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-amber-700 dark:text-amber-400">This is a Bluesky account</p>
                   <p className="text-xs text-agora-500 mt-1">
-                    @{fediPreview.preferred_username} is a Bluesky account bridged into the fediverse — follow it natively from the Bluesky tab instead.
+                    @{fediPreview.preferred_username} is a Bluesky account bridged into the Fediverse — follow it natively from the Bluesky tab instead.
                   </p>
                 </div>
                 <button
@@ -384,7 +482,9 @@ export default function ConnectionsPage() {
               </div>
             )}
           </div>
+          )}
 
+          {fediSubTab === 'following' && (
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
             {following.length > 0 && (
@@ -394,27 +494,38 @@ export default function ConnectionsPage() {
             )}
             {following.length === 0 && (
               <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
-                You're not following anyone on the fediverse yet.
+                You're not following anyone on the Fediverse yet.
               </p>
             )}
             <div className="space-y-2">
               {following.map(f => (
                 <div key={f.id} className="flex items-center gap-3 py-2">
-                  {f.username
-                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                        {f.avatar_url
-                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
-                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
-                              {(f.display_name || f.username || '?')[0]}
-                            </span>}
-                      </Link>
-                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
-                        {f.avatar_url
-                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
-                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
-                              {(f.display_name || f.username || '?')[0]}
-                            </span>}
-                      </div>}
+                  {/* AGORA-306: the lock sits outside the avatar's clipping
+                      circle (see LockedBadge), so both branches get a relative
+                      wrapper rather than positioning it inside. Locked and
+                      already-accepted is not a state worth marking, which is
+                      what the !f.accepted guard says. */}
+                  <div className="relative flex-shrink-0">
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="block w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                          {f.avatar_url
+                            ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                            : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                                {(f.display_name || f.username || '?')[0]}
+                              </span>}
+                        </Link>
+                      : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+                          {f.avatar_url
+                            ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                            : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                                {(f.display_name || f.username || '?')[0]}
+                              </span>}
+                        </div>}
+                    <LockedBadge
+                      locked={f.manually_approves_followers && !f.accepted && !f.follows_back}
+                      pending
+                    />
+                  </div>
                   <div className="flex-1 min-w-0">
                     {f.username
                       ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
@@ -436,7 +547,7 @@ export default function ConnectionsPage() {
                       <button
                         onClick={() => migrateBridged.mutate(f.id)}
                         disabled={migrateBridged.isPending}
-                        title="This is a Bluesky account followed via the fediverse bridge — switch to following it natively"
+                        title="This is a Bluesky account followed via the Fediverse bridge — switch to following it natively"
                         className="btn-secondary text-xs flex items-center gap-1">
                         <Cloud size={13} /> {migrateBridged.isPending ? 'Migrating…' : 'Migrate to Bluesky'}
                       </button>
@@ -479,9 +590,59 @@ export default function ConnectionsPage() {
               ))}
             </div>
           </div>
+          )}
+
+          {/* ── Followers segment (AGORA-349) ── */}
+          {fediSubTab === 'followers' && (
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your followers</h2>
+            {followers.length === 0 && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                No one on the Fediverse follows you yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {followers.map((f: any) => (
+                <div key={f.actor_url} className="flex items-center gap-3 py-2">
+                  {f.username
+                    ? <Link to={`/profile/${f.username}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.username || '?')[0]}
+                            </span>}
+                      </Link>
+                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.username || '?')[0]}
+                            </span>}
+                      </div>}
+                  <div className="flex-1 min-w-0">
+                    {f.username
+                      ? <Link to={`/profile/${f.username}`} className="font-medium text-sm truncate hover:underline block">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name ? renderName(f.display_name, f.emojis) : f.actor_url}</p>}
+                    {f.username && <p className="text-xs text-agora-400 truncate">@{f.username}</p>}
+                  </div>
+                  {f.following_back
+                    ? <span className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                        <UserCheck size={12} /> Following
+                      </span>
+                    : <button
+                        onClick={() => followFedi.mutate(f.actor_url)}
+                        disabled={followFedi.isPending}
+                        className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                        <UserPlus size={13} /> Follow back
+                      </button>}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
 
           <p className="text-xs text-agora-400 text-center">
-            Want to opt out of the fediverse entirely? That toggle lives in{' '}
+            Want to opt out of the Fediverse entirely? That toggle lives in{' '}
             <Link to="/settings?tab=fediverse" className="underline hover:text-agora-600">Settings → Fediverse</Link>.
           </p>
         </div>
@@ -490,6 +651,19 @@ export default function ConnectionsPage() {
       {/* ── Bluesky tab (AGORA-195) ── */}
       {tab === 'bluesky' && (
         <div className="space-y-4">
+          {/* AGORA-349: see the matching comment on the Fediverse tab above. */}
+          <div className="flex gap-1 bg-agora-100 dark:bg-agora-800 rounded-lg p-1">
+            <button onClick={() => setBskySubTab('following')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${bskySubTab === 'following' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Following ({bskyFollowing.length})
+            </button>
+            <button onClick={() => setBskySubTab('followers')}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-colors ${bskySubTab === 'followers' ? 'bg-white dark:bg-agora-700 text-agora-900 dark:text-agora-100 shadow-sm' : 'text-agora-500 hover:text-agora-700'}`}>
+              Followers ({bskyFollowers.length})
+            </button>
+          </div>
+
+          {bskySubTab === 'following' && (
           <div className="card p-5 space-y-4">
             <div>
               <h2 className="font-semibold text-sm">Follow a Bluesky account</h2>
@@ -533,7 +707,9 @@ export default function ConnectionsPage() {
               </div>
             )}
           </div>
+          )}
 
+          {bskySubTab === 'following' && (
           <div className="card p-5 space-y-3">
             <h2 className="font-semibold text-sm">Your follows</h2>
             {bskyFollowing.length > 0 && (
@@ -610,6 +786,72 @@ export default function ConnectionsPage() {
               ))}
             </div>
           </div>
+          )}
+
+          {/* ── Followers segment (AGORA-349) ── */}
+          {bskySubTab === 'followers' && (
+          <div className="card p-5 space-y-3">
+            <h2 className="font-semibold text-sm">Your followers</h2>
+            {/* AGORA-348: at_followers is only ever as current as the last
+                poll (AT Proto never delivers a follow to us), so an empty
+                list needs to say whether that's "no followers" or "not
+                synced yet" rather than reading as fact either way. */}
+            <p className="text-xs text-agora-400">
+              {bskyFollowersSeeded
+                ? (bskyFollowersSyncedAt
+                    ? `Last synced ${new Date(bskyFollowersSyncedAt).toLocaleString()}`
+                    : 'Synced')
+                : 'Not synced yet — this can take a little while after enabling Bluesky.'}
+            </p>
+            {bskyFollowers.length === 0 && bskyFollowersSeeded && (
+              <p className="text-sm text-agora-400 italic py-3 text-center border border-dashed border-agora-200 dark:border-agora-700 rounded-lg">
+                No one on Bluesky follows you yet.
+              </p>
+            )}
+            <div className="space-y-2">
+              {bskyFollowers.map((f: any) => (
+                <div key={f.did} className="flex items-center gap-3 py-2">
+                  {/* AGORA-348 always resolves a follower to a cached stub
+                      before returning it, whose username equals its Bluesky
+                      handle (see getOrCreateRemoteATUser) — so f.handle, not
+                      a separate f.username the response never sends, is the
+                      right value for /profile/:username here. */}
+                  {f.handle
+                    ? <Link to={`/profile/${f.handle}`} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </Link>
+                    : <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                        {f.avatar_url
+                          ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-500">
+                              {(f.display_name || f.handle || '?')[0]}
+                            </span>}
+                      </div>}
+                  <div className="flex-1 min-w-0">
+                    {f.handle
+                      ? <Link to={`/profile/${f.handle}`} className="font-medium text-sm truncate hover:underline block">{f.display_name || f.handle}</Link>
+                      : <p className="font-medium text-sm truncate">{f.display_name || f.handle}</p>}
+                    <p className="text-xs text-agora-400 truncate">@{f.handle}</p>
+                  </div>
+                  {f.following_back
+                    ? <span className="flex items-center gap-1 text-xs text-agora-600 dark:text-agora-300 flex-shrink-0">
+                        <UserCheck size={12} /> Following
+                      </span>
+                    : <button
+                        onClick={() => followBsky.mutate(f.did)}
+                        disabled={followBsky.isPending}
+                        className="btn-secondary text-xs flex items-center gap-1 flex-shrink-0">
+                        <UserPlus size={13} /> Follow back
+                      </button>}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
 
           <p className="text-xs text-agora-400 text-center">
             Want to opt out of Bluesky entirely? That toggle lives in{' '}
@@ -710,7 +952,7 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
           )}
 
           {members.length === 0 && nonMembers.length === 0 && (
-            <p className="text-sm text-agora-400 text-center py-2">Add friends or fediverse follows first, then organize them into lists.</p>
+            <p className="text-sm text-agora-400 text-center py-2">Add friends or Fediverse follows first, then organize them into lists.</p>
           )}
         </div>
       )}

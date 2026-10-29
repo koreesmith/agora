@@ -31,6 +31,7 @@ export default api
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const authApi = {
   register:       (data: any)   => api.post('/auth/register', data),
+  signupChallenge: ()           => api.get('/auth/signup-challenge'),
   login:          (data: any)   => api.post('/auth/login', data),
   me:             ()            => api.get('/auth/me'),
   changePassword:      (data: any)   => api.post('/auth/change-password', data),
@@ -48,7 +49,8 @@ export const feedApi = {
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
-  editPost:      (id: string, data: { content?: string, image_url?: string, visibility?: string, friend_list_id?: string, content_warning?: string }) => api.patch(`/posts/${id}`, data),
+  // image_alts alone re-describes the post's existing images (AGORA-400).
+  editPost:      (id: string, data: { content?: string, image_url?: string, image_alts?: string[], visibility?: string, friend_list_id?: string, content_warning?: string }) => api.patch(`/posts/${id}`, data),
   likePost:      (id: string)              => api.post(`/posts/${id}/like`),
   unlikePost:    (id: string)              => api.delete(`/posts/${id}/like`),
   reactPost:     (id: string, type: string) => api.post(`/posts/${id}/react`, { type }),
@@ -83,6 +85,8 @@ export const feedApi = {
 // ── Users ─────────────────────────────────────────────────────────────────────
 export const usersApi = {
   getProfile:       (username: string) => api.get(`/users/${username}`),
+  // AGORA-381: re-fetch a remote account's profile from its own server now.
+  refreshRemoteProfile: (username: string) => api.post(`/users/${username}/refresh`),
   updateProfile:    (data: any)        => api.patch('/users/me', data),
   uploadAvatar:     (file: File)       => {
     const form = new FormData(); form.append('file', file)
@@ -102,6 +106,12 @@ export const usersApi = {
   disablePostNotify:(username: string) => api.delete(`/users/${username}/notify`),
 }
 
+// ── Getting started wizard (AGORA-387) ────────────────────────────────────────
+export const onboardingApi = {
+  complete:    () => api.post('/onboarding/complete'),
+  suggestions: () => api.get('/onboarding/suggestions'),
+}
+
 // ── Friends ───────────────────────────────────────────────────────────────────
 export const friendsApi = {
   listFriends:      ()                           => api.get('/friends'),
@@ -109,6 +119,9 @@ export const friendsApi = {
   sendRequest:      (userID: string)             => api.post(`/friends/request/${userID}`),
   acceptRequest:    (userID: string)             => api.post(`/friends/accept/${userID}`),
   declineRequest:   (userID: string)             => api.post(`/friends/decline/${userID}`),
+  // AGORA-333: withdraw a request you sent. Distinct from declining one you
+  // received: cancelling deletes the row so it can be sent again.
+  cancelRequest:    (userID: string)             => api.delete(`/friends/request/${userID}`),
   unfriend:         (userID: string)             => api.delete(`/friends/${userID}`),
   listFriendLists:    ()                           => api.get('/friend-groups'),
   createFriendList:   (name: string)               => api.post('/friend-groups', { name }),
@@ -116,6 +129,10 @@ export const friendsApi = {
   listFriendListMembers: (listID: string)          => api.get(`/friend-groups/${listID}/members`),
   addToFriendList:    (listID: string, friendID: string) => api.post(`/friend-groups/${listID}/members/${friendID}`),
   removeFromFriendList: (listID: string, friendID: string) => api.delete(`/friend-groups/${listID}/members/${friendID}`),
+  // AGORA-395: one account's lists in one request, and an all-or-nothing change
+  // to them. Both answer { group_ids }.
+  getFriendListMemberships: (friendID: string)    => api.get(`/friend-groups/memberships/${friendID}`),
+  setFriendListMemberships: (friendID: string, changes: { add: string[], remove: string[] }) => api.put(`/friend-groups/memberships/${friendID}`, changes),
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -144,7 +161,7 @@ export const groupsApi = {
   addMember:      (slug: string, username: string)           => api.post(`/groups/${slug}/members/add`, { username }),
   memberSearch:   (slug: string, q: string)                  => api.get(`/groups/${slug}/member-search`, { params: { q } }),
   getFeed:        (slug: string, page = 0)                   => api.get(`/groups/${slug}/feed`, { params: { page } }),
-  createPost:     (slug: string, data: { content: string, image_url?: string, poll_options?: string[] }) => api.post(`/groups/${slug}/posts`, data),
+  createPost:     (slug: string, data: { content: string, image_url?: string, image_alt?: string, poll_options?: string[] }) => api.post(`/groups/${slug}/posts`, data),
   // Invite links
   listInvites:    (slug: string)                             => api.get(`/groups/${slug}/invites`),
   createInvite:   (slug: string, maxUses = 0)                => api.post(`/groups/${slug}/invites`, { max_uses: maxUses }),
@@ -186,7 +203,7 @@ export const pagesApi = {
   subscribe:   (slug: string)                            => api.post(`/pages/${slug}/subscribe`),
   unsubscribe: (slug: string)                            => api.delete(`/pages/${slug}/subscribe`),
   getFeed:     (slug: string, page = 0)                  => api.get(`/pages/${slug}/feed`, { params: { page } }),
-  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[] }) => api.post(`/pages/${slug}/posts`, data),
+  createPost:  (slug: string, data: { content: string, image_url?: string, image_urls?: string[], image_alts?: string[] }) => api.post(`/pages/${slug}/posts`, data),
   analytics:   (slug: string)                            => api.get(`/pages/${slug}/analytics`),
 }
 
@@ -233,11 +250,16 @@ export const adminApi = {
   listInvites:     ()                          => api.get('/admin/invites'),
   createInvite:    ()                          => api.post('/admin/invites'),
   revokeInvite:    (id: string)                => api.delete(`/admin/invites/${id}`),
-  getAuditLog:     ()                          => api.get('/admin/audit-log'),
+  getAuditLog:     (page = 0)                  => api.get('/admin/audit-log', { params: { page } }),
   listInstances:   ()                          => api.get('/admin/federation/instances'),
   addInstance:     (domain: string)            => api.post('/admin/federation/instances', { domain }),
   blockInstance:   (id: string)                => api.post(`/admin/federation/instances/${id}/block`),
   unblockInstance: (id: string)                => api.post(`/admin/federation/instances/${id}/unblock`),
+  // AGORA-320: forget a peer, as distinct from blocking it. See the backend
+  // handler for what is kept and what is removed.
+  disconnectInstance: (id: string)             => api.delete(`/admin/federation/instances/${id}`),
+  // AGORA-322: per-peer timeline exchange, off by default.
+  setInstanceTimeline: (id: string, enabled: boolean) => api.put(`/admin/federation/instances/${id}/timeline`, { enabled }),
   resendVerification:     (id: string)          => api.post(`/admin/users/${id}/resend-verification`),
   // Instance rules
   listRules:   ()                               => api.get('/admin/rules'),
@@ -252,6 +274,16 @@ export const adminApi = {
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
+  // Remote media cache (AGORA-380)
+  getRemoteMediaCache:    ()          => api.get('/admin/media/remote-cache'),
+  updateRemoteMediaCache: (data: any) => api.put('/admin/media/remote-cache', data),
+  pruneRemoteMediaCache:  ()          => api.post('/admin/media/remote-cache/prune'),
+  clearRemoteMediaCache:  ()          => api.delete('/admin/media/remote-cache'),
+  refreshRemoteProfiles:  ()          => api.post('/admin/federation/refresh-profiles'),
+  // Custom domain approval queue (AGORA-286)
+  listCustomDomains:   (status?: string)            => api.get('/admin/custom-domains', { params: { status } }),
+  approveCustomDomain: (id: string)                 => api.post(`/admin/custom-domains/${id}/approve`),
+  rejectCustomDomain:  (id: string, reason: string) => api.post(`/admin/custom-domains/${id}/reject`, { reason }),
   // Fediverse relays (AGORA-223)
   listRelays:   ()               => api.get('/admin/relays'),
   addRelay:     (inboxUrl: string) => api.post('/admin/relays', { inbox_url: inboxUrl }),
@@ -275,6 +307,8 @@ export const federationApi = {
   followFediverseAccount:   (actorUrl: string) => api.post('/federation/follow', { actor_url: actorUrl }),
   unfollowFediverseAccount: (id: string)       => api.delete(`/federation/follow/${id}`),
   listFollowing:            ()                 => api.get('/federation/following'),
+  // AGORA-348: the caller's own inbound followers, self-scoped only.
+  listFollowers:            ()                 => api.get('/federation/followers'),
   toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
   toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
 }
@@ -288,6 +322,8 @@ export const atprotoApi = {
   followBlueskyAccount:   (actor: string)  => api.post('/atproto/follow', { actor }),
   unfollowBlueskyAccount: (id: string)     => api.delete(`/atproto/follow/${id}`),
   listBlueskyFollowing:   ()               => api.get('/atproto/following'),
+  // AGORA-348: the caller's own inbound followers, self-scoped only.
+  listBlueskyFollowers:   ()               => api.get('/atproto/followers'),
   // AGORA-198: per-follow notification opt-in, mirroring toggleFollowNotify.
   toggleFollowNotify:     (id: string, notify: boolean) => api.put(`/atproto/follow/${id}/notify`, { notify }),
   // AGORA-236: per-follow main-feed opt-in, mirroring federationApi's own toggleShowInFeed.
@@ -299,6 +335,19 @@ export const atprotoApi = {
   // handle/DID resolve, and from searchApi's own Agora+cached-remote search.
   searchBlueskyActors: (q: string) => api.get('/atproto/search/actors', { params: { q } }),
   searchBlueskyPosts:  (q: string) => api.get('/atproto/search/posts', { params: { q } }),
+}
+
+// ── Custom domain handles (AGORA-278) ────────────────────────────────────────
+// One claim per account: the endpoints are singular and take no id, since an
+// AT Proto DID has exactly one handle and a second claim would only raise the
+// question of which one it is.
+export const customDomainApi = {
+  get:     ()               => api.get('/custom-domain'),
+  claim:   (domain: string) => api.post('/custom-domain', { domain }),
+  verify:  ()               => api.post('/custom-domain/verify'),
+  release: ()               => api.delete('/custom-domain'),
+  // AGORA-361: claim + verify + approve the instance's own domain in one call.
+  useInstanceDomain: () => api.post('/custom-domain/use-instance-domain'),
 }
 
 // ── Albums ────────────────────────────────────────────────────────────────────
@@ -340,6 +389,14 @@ export const blocksApi = {
   block:    (username: string) => api.post(`/blocks/${username}`),
   unblock:  (username: string) => api.delete(`/blocks/${username}`),
 }
+// AGORA-309: per-user, per-post timeline hiding. A client of one: it changes
+// nothing for anybody else and notifies no one.
+export const hiddenPostsApi = {
+  list:   ()               => api.get('/hidden-posts'),
+  hide:   (postId: string) => api.post(`/posts/${postId}/hide`),
+  unhide: (postId: string) => api.delete(`/posts/${postId}/hide`),
+}
+
 export const dmApi = {
   listConversations:  ()                                     => api.get('/conversations'),
   startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),
@@ -367,4 +424,6 @@ export const customFeedsApi = {
   create: (data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] })      => api.post('/feeds', data),
   update: (id: string, data: { name: string, smart_ranking?: boolean, filters: { filter_type: string, value: string }[] }) => api.put(`/feeds/${id}`, data),
   delete: (id: string)                                                                                               => api.delete(`/feeds/${id}`),
+  setPinned: (id: string, pinned: boolean)                                                                           => api.put(`/feeds/${id}/pin`, { pinned }),
+  reorderPins: (feed_ids: string[])                                                                                  => api.put('/feeds/pins/order', { feed_ids }),
 }

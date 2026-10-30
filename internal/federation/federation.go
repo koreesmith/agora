@@ -148,7 +148,7 @@ func (s *Service) NodeInfoDiscovery(w http.ResponseWriter, r *http.Request) {
 
 // softwareVersion is the Agora release NodeInfo advertises. Bump it with each
 // release line.
-const softwareVersion = "4.0.0"
+const softwareVersion = "4.0.1"
 
 // nodeInfoOpenRegistrations maps the registration_mode instance setting onto
 // NodeInfo's openRegistrations. Only "open" (or unset, which the register

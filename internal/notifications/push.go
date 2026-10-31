@@ -69,7 +69,7 @@ func (s *Service) pushTokens(userID string) []string {
 
 func (s *Service) unreadCount(userID string) int {
 	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false`, userID).Scan(&count)
+	s.db.QueryRow(`SELECT COUNT(*) FROM notifications n WHERE n.user_id = $1 AND n.read = false AND `+notBlockedActor, userID).Scan(&count)
 	return count
 }
 

@@ -76,6 +76,14 @@ type NotificationItem struct {
 	FriendStatus     string          `json:"friend_status,omitempty"`
 }
 
+// notBlockedActor leaves out notifications whose actor is on either side of a
+// block with the recipient (AGORA-426). Create stops new ones, but anything
+// that arrived before the block (the follow that prompted it, usually) was
+// still listed and counted. Expects the notifications table aliased as n.
+const notBlockedActor = `NOT EXISTS (SELECT 1 FROM blocks b
+	WHERE (b.blocker_id = n.user_id AND b.blocked_id = n.actor_id)
+	   OR (b.blocker_id = n.actor_id AND b.blocked_id = n.user_id))`
+
 // groupableTypes are notification types collapsed by (type, post_id).
 var groupableTypes = map[string]bool{
 	"post_like": true, "comment_like": true,
@@ -112,7 +120,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 		       n.post_id, n.data, n.read, n.created_at
 		FROM notifications n
 		LEFT JOIN users u ON u.id = n.actor_id
-		WHERE n.user_id = $1
+		WHERE n.user_id = $1 AND `+notBlockedActor+`
 		ORDER BY n.created_at DESC
 		LIMIT $2
 	`, userID, rawLimit)
@@ -249,9 +257,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	userID := ctxkeys.GetUserID(r.Context())
-	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false`, userID).Scan(&count)
-	writeJSON(w, 200, map[string]int{"count": count})
+	writeJSON(w, 200, map[string]int{"count": s.unreadCount(userID)})
 }
 
 func (s *Service) MarkAllRead(w http.ResponseWriter, r *http.Request) {
@@ -322,6 +328,14 @@ func (s *Service) UpdateEmailPrefs(w http.ResponseWriter, r *http.Request) {
 // ── Create (called by other packages) ────────────────────────────────────────
 
 func (s *Service) Create(userID, actorID, notifType, postID, data string) {
+	// AGORA-426: nothing from an account on either side of a block: no row, no
+	// email, no push.
+	if actorID != "" && actorID != userID {
+		var blocked bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+			userID, actorID).Scan(&blocked)
+		if blocked { return }
+	}
 	var pID *string
 	if postID != "" { pID = &postID }
 	var aID *string

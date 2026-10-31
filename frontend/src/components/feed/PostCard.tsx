@@ -13,6 +13,7 @@ import CustomHandle from '../common/CustomHandle'
 import AltBadge from '../common/AltBadge'
 import AltTextModal from '../common/AltTextModal'
 import ShareMenu, { isShareable } from './ShareMenu'
+import MentionTextarea from './MentionTextarea'
 
 // ── Reaction config ───────────────────────────────────────────────────────────
 
@@ -781,14 +782,13 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
           {/* Inline editor */}
           {editing ? (
             <div className="mt-2 space-y-2">
-              <textarea
+              <MentionTextarea
                 className="input w-full resize-none text-sm"
                 rows={3}
-                autoComplete="off"
                 value={editContent}
-                onChange={e => setEditContent(e.target.value)}
+                onChange={setEditContent}
                 autoFocus
-/>
+              />
               {/* Trigger warning toggle in edit mode */}
               <div className="flex items-center gap-2">
                 <button
@@ -1323,12 +1323,12 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
             </div>
             <div className="p-4 space-y-3">
               {/* Author's comment */}
-              <textarea
+              <MentionTextarea
                 className="input w-full resize-none text-sm"
                 rows={3}
                 placeholder="Say something about this… (optional)"
                 value={shareContent}
-                onChange={e => setShareContent(e.target.value)}
+                onChange={setShareContent}
                 autoFocus
               />
 

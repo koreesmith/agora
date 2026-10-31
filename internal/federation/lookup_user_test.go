@@ -82,6 +82,10 @@ func TestLookupUserStripsLeadingAt(t *testing.T) {
 // (someone typed "@@instance.com" or just "@instance.com" with no username),
 // so the fix above doesn't quietly turn into "any leading @ characters are
 // stripped" and start accepting garbage.
+//
+// AGORA-416: "@instance.example" is no longer one of them. With the @ stripped
+// it is a bare domain, which is exactly how a Bluesky handle is typed
+// (@koree.net), so it goes to the Bluesky resolver instead of being refused.
 func TestLookupUserRejectsBareAt(t *testing.T) {
 	db, err := store.Open("postgres://agora:agora@localhost:15433/agora_test?sslmode=disable")
 	if err != nil {
@@ -91,7 +95,7 @@ func TestLookupUserRejectsBareAt(t *testing.T) {
 
 	s := &Service{db: db, cfg: &config.Config{InstanceDomain: "https://agora362.example"}}
 
-	for _, handle := range []string{"@instance.example", "@@instance.example", "@"} {
+	for _, handle := range []string{"@@instance.example", "@", "@@"} {
 		req := httptest.NewRequest(http.MethodGet, "/federation/lookup?handle="+handle, nil)
 		w := httptest.NewRecorder()
 		s.LookupUser(w, req)

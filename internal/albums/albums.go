@@ -161,6 +161,20 @@ func (s *Service) ListUserAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isSelf := ownerID == viewerID
+
+	// AGORA-426: a profile is now shown to the person who blocked it (so they
+	// can unblock), which made this list reachable across a block. Same gate as
+	// the user's posts: nothing either way.
+	if !isSelf && viewerID != "" {
+		var blocked bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+			viewerID, ownerID).Scan(&blocked)
+		if blocked {
+			writeJSON(w, 200, map[string]any{"albums": []any{}})
+			return
+		}
+	}
+
 	var isFriend bool
 	if !isSelf {
 		s.db.QueryRow(`

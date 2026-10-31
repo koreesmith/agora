@@ -173,6 +173,9 @@ export default function ProfilePage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['profile', username] })
       qc.invalidateQueries({ queryKey: ['friends'] })
+      // AGORA-426: their notifications drop out of the list and the count.
+      qc.invalidateQueries({ queryKey: ['notifications'] })
+      qc.invalidateQueries({ queryKey: ['unread-count'] })
     },
   })
 
@@ -191,6 +194,32 @@ export default function ProfilePage() {
 
   if (isLoading) return <div className="text-center py-12 text-agora-400">Loading…</div>
   if (!profile)  return <div className="text-center py-12 text-agora-400">User not found.</div>
+
+  // AGORA-426: an account the viewer blocked. The server used to answer "not
+  // found" for it, which left no way to unblock from here; now it says so, and
+  // this is all the profile shows.
+  if (me && !isSelf && profile.is_blocked) return (
+    <div className="card p-6 text-center space-y-3">
+      <div className="w-20 h-20 mx-auto rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden">
+        {profile.avatar_url
+          ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
+          : <span className="w-full h-full flex items-center justify-center text-2xl font-bold text-agora-600">{profile.display_name?.[0]?.toUpperCase()}</span>
+        }
+      </div>
+      <div>
+        <h1 className="text-xl font-bold">{renderName(profile.display_name, profile.emojis)}</h1>
+        <p className="text-agora-500 text-sm">{handle(profile.username, profile.is_remote, profile.remote_instance)}</p>
+      </div>
+      <p className="text-agora-500 dark:text-agora-400 text-sm">You blocked this account. You won't see its posts or notifications, and it can't see your profile or contact you here.</p>
+      <button
+        onClick={() => { if (confirm(`Unblock ${profile.display_name}?`)) toggleBlock.mutate() }}
+        disabled={toggleBlock.isPending}
+        className="btn-secondary text-sm inline-flex items-center gap-1"
+      >
+        <ShieldOff size={15}/> Unblock
+      </button>
+    </div>
+  )
 
   const status = profile.friend_status
   const isBluesky = profile.remote_instance === 'bsky.app'

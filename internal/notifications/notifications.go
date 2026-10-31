@@ -76,6 +76,14 @@ type NotificationItem struct {
 	FriendStatus     string          `json:"friend_status,omitempty"`
 }
 
+// notBlockedActor leaves out notifications whose actor is on either side of a
+// block with the recipient (AGORA-426). Create stops new ones, but anything
+// that arrived before the block (the follow that prompted it, usually) was
+// still listed and counted. Expects the notifications table aliased as n.
+const notBlockedActor = `NOT EXISTS (SELECT 1 FROM blocks b
+	WHERE (b.blocker_id = n.user_id AND b.blocked_id = n.actor_id)
+	   OR (b.blocker_id = n.actor_id AND b.blocked_id = n.user_id))`
+
 // groupableTypes are notification types collapsed by (type, post_id).
 var groupableTypes = map[string]bool{
 	"post_like": true, "comment_like": true,
@@ -112,7 +120,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 		       n.post_id, n.data, n.read, n.created_at
 		FROM notifications n
 		LEFT JOIN users u ON u.id = n.actor_id
-		WHERE n.user_id = $1
+		WHERE n.user_id = $1 AND `+notBlockedActor+`
 		ORDER BY n.created_at DESC
 		LIMIT $2
 	`, userID, rawLimit)
@@ -249,14 +257,13 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	userID := ctxkeys.GetUserID(r.Context())
-	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false`, userID).Scan(&count)
-	writeJSON(w, 200, map[string]int{"count": count})
+	writeJSON(w, 200, map[string]int{"count": s.unreadCount(userID)})
 }
 
 func (s *Service) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	userID := ctxkeys.GetUserID(r.Context())
 	s.db.Exec(`UPDATE notifications SET read = true WHERE user_id = $1`, userID)
+	go s.syncBadge(userID) // AGORA-420
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
@@ -264,6 +271,7 @@ func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
 	userID := ctxkeys.GetUserID(r.Context())
 	id := chi.URLParam(r, "id")
 	s.db.Exec(`UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2`, id, userID)
+	go s.syncBadge(userID) // AGORA-420
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
@@ -287,6 +295,7 @@ func (s *Service) MarkManyRead(w http.ResponseWriter, r *http.Request) {
 		strings.Join(placeholders, ","),
 	)
 	s.db.Exec(query, args...)
+	go s.syncBadge(userID) // AGORA-420
 	writeJSON(w, 200, map[string]string{"message": "ok"})
 }
 
@@ -319,6 +328,14 @@ func (s *Service) UpdateEmailPrefs(w http.ResponseWriter, r *http.Request) {
 // ── Create (called by other packages) ────────────────────────────────────────
 
 func (s *Service) Create(userID, actorID, notifType, postID, data string) {
+	// AGORA-426: nothing from an account on either side of a block: no row, no
+	// email, no push.
+	if actorID != "" && actorID != userID {
+		var blocked bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+			userID, actorID).Scan(&blocked)
+		if blocked { return }
+	}
 	var pID *string
 	if postID != "" { pID = &postID }
 	var aID *string
@@ -330,9 +347,8 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 }
 
 func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData string) {
-	var pushToken string
-	s.db.QueryRow(`SELECT COALESCE(expo_push_token,'') FROM users WHERE id = $1`, userID).Scan(&pushToken)
-	if pushToken == "" { return }
+	tokens := s.pushTokens(userID)
+	if len(tokens) == 0 { return }
 
 	actorName := "Someone"
 	actorUsername := ""
@@ -346,29 +362,25 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData s
 	title, body := pushNotifContent(notifType, actorName, extraData)
 	if title == "" { return }
 
+	// AGORA-420: a comment's id opens nothing on the phone (the app's post
+	// screen wants the post), so a push names the post the comment is on, the
+	// same resolution List already does for the notifications page.
 	data := map[string]string{
 		"type":           notifType,
-		"post_id":        postID,
+		"post_id":        s.rootPostID(postID),
 		"actor_username": actorUsername,
 		"data":           extraData,
 	}
 
-	payload := map[string]any{
-		"to":    pushToken,
-		"title": title,
-		"body":  body,
-		"sound": "default",
-		"data":  data,
+	badge := s.badgeCount(userID)
+	messages := make([]expoMessage, len(tokens))
+	for i, t := range tokens {
+		messages[i] = expoMessage{
+			To: t, Title: title, Body: body, Sound: "default", Data: data,
+			Badge: &badge, Priority: "high",
+		}
 	}
-	jsonBytes, _ := json.Marshal([]any{payload})
-	req, err := http.NewRequest("POST", "https://exp.host/--/api/v2/push/send", strings.NewReader(string(jsonBytes)))
-	if err != nil { return }
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil { log.Printf("push notif error: %v", err); return }
-	defer resp.Body.Close()
+	s.sendPush(messages)
 }
 
 // data is the notification's type-specific payload — the domain name, for the
@@ -383,6 +395,13 @@ func pushNotifContent(t, actorName, data string) (title, body string) {
 		return "New like", actorName + " liked your post"
 	case "post_reaction":
 		return "New reaction", actorName + " reacted to your post"
+	// AGORA-420: every type below that has no comment of its own here was
+	// created, listed in the app, and never pushed, which read as banners that
+	// only sometimes arrived. Worded as the notifications page words them.
+	case "comment_like":
+		return "New like", actorName + " liked your comment"
+	case "comment_reaction":
+		return "New reaction", actorName + " reacted to your comment"
 	case "post_comment":
 		return "New comment", actorName + " commented on your post"
 	case "comment_reply":
@@ -395,10 +414,20 @@ func pushNotifContent(t, actorName, data string) (title, body string) {
 		return "New wall post", actorName + " posted on your wall"
 	case "wall_post_pending":
 		return "Wall post request", actorName + " wants to post on your wall"
+	case "wall_post_approved":
+		return "Wall post approved", actorName + " approved your wall post"
 	case "user_post":
 		return "New post", actorName + " just posted something new"
 	case "fediverse_post":
 		return "New post from the Fediverse", actorName + " posted something new"
+	case "atproto_post":
+		return "New post from Bluesky", actorName + " posted something new"
+	case "page_post":
+		return "New page post", actorName + " published a new post on a page you follow"
+	case "page_member_invite":
+		return "Page invitation", actorName + " invited you to join a page as a team member"
+	case "group_tag":
+		return "Your group was tagged", actorName + " tagged your group in a post"
 	// AGORA-313: two types rather than one so the wording can name the network
 	// the follower came from, the same split fediverse_post/atproto_post make.
 	// Neither is emailed: a remote follow is unilateral and unbounded, and
@@ -412,6 +441,10 @@ func pushNotifContent(t, actorName, data string) (title, body string) {
 		return "Join request", actorName + " wants to join your group"
 	case "group_join_approved":
 		return "Request approved", "Your group join request was approved"
+	case "group_join_rejected":
+		return "Request declined", "Your request to join a group was declined"
+	case "group_invite_accepted":
+		return "Added to a group", actorName + " added you to a group"
 	case "new_report":
 		return "⚠️ New Report", "A new report has been submitted — tap to review"
 	case "waitlist_join":

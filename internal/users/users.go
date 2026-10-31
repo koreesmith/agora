@@ -91,6 +91,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/me/request-deletion", s.RequestDeletion)
 	r.Delete("/users/me/request-deletion", s.CancelDeletion)
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
+	r.Delete("/users/me/push-token",      s.RemovePushToken) // AGORA-420
 	r.Get("/users/discover",              s.Discover)
 	r.Get("/users/mention-search",        s.MentionSearch)
 	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
@@ -247,17 +248,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Block check — make it appear as if the user doesn't exist
+	// Block check: to someone this user has blocked, they don't exist.
+	//
+	// AGORA-426: only that direction. This used to answer 404 for a block either
+	// way, so the viewer's own block hid the profile from them too: is_blocked
+	// below could never be true, and the Unblock button that reads it never
+	// showed. The profile of someone the viewer blocked comes back with
+	// is_blocked set, and the clients show Unblock in place of the profile's
+	// content (the posts endpoint already returns nothing either way).
 	if viewerID != "" && viewerID != u.ID {
-		var isBlocked bool
-		s.db.QueryRow(`
-			SELECT EXISTS(
-				SELECT 1 FROM blocks
-				WHERE (blocker_id = $1 AND blocked_id = $2)
-				   OR (blocker_id = $2 AND blocked_id = $1)
-			)
-		`, viewerID, u.ID).Scan(&isBlocked)
-		if isBlocked {
+		var blockedViewer bool
+		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2)`,
+			u.ID, viewerID).Scan(&blockedViewer)
+		if blockedViewer {
 			writeError(w, 404, "user not found")
 			return
 		}
@@ -362,6 +365,8 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 			"profile_private": true,
 			"friend_status": u.FriendStatus,
 			"emojis":       u.Emojis,
+			// AGORA-426: so a private account the viewer blocked can be unblocked.
+			"is_blocked":   u.IsBlocked,
 		})
 		return
 	}
@@ -451,6 +456,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, "update failed")
 		return
+	}
+	if req.ExpoPushToken != nil {
+		savePushToken(s.db, userID, *req.ExpoPushToken)
 	}
 
 	// AGORA-242: a signed Update(Person) is what actually reaches followers.

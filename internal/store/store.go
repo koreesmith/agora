@@ -1860,4 +1860,22 @@ var schema = []string{
 	// Nullable on purpose: NULL means not known yet, '' means not a reply.
 	// Existing rows stay NULL and learn theirs the first time they're opened.
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS ap_in_reply_to TEXT`,
+
+	// AGORA-420: one row per device a user gets pushes on, replacing the single
+	// users.expo_push_token that only ever reached the last device registered.
+	// The token is the key because it names a device, and a device belongs to
+	// whichever account it last registered. Seeded from the old column, which
+	// is still written alongside (internal/users/push_tokens.go).
+	`CREATE TABLE IF NOT EXISTS push_tokens (
+		token        TEXT        PRIMARY KEY,
+		user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS push_tokens_user_id_idx ON push_tokens (user_id)`,
+	`INSERT INTO push_tokens (token, user_id)
+		SELECT DISTINCT ON (expo_push_token) expo_push_token, id FROM users
+		WHERE expo_push_token != ''
+		ORDER BY expo_push_token, updated_at DESC
+		ON CONFLICT (token) DO NOTHING`,
 }

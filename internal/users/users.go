@@ -91,6 +91,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/me/request-deletion", s.RequestDeletion)
 	r.Delete("/users/me/request-deletion", s.CancelDeletion)
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
+	r.Delete("/users/me/push-token",      s.RemovePushToken) // AGORA-420
 	r.Get("/users/discover",              s.Discover)
 	r.Get("/users/mention-search",        s.MentionSearch)
 	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
@@ -451,6 +452,9 @@ func (s *Service) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, "update failed")
 		return
+	}
+	if req.ExpoPushToken != nil {
+		savePushToken(s.db, userID, *req.ExpoPushToken)
 	}
 
 	// AGORA-242: a signed Update(Person) is what actually reaches followers.

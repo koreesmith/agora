@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Search, X, BookOpen, FileText, Users } from 'lucide-react'
-import { searchApi } from '../../api'
-import { handle, profilePath } from '../../utils/handle'
+import { searchApi, federationApi } from '../../api'
+import { handle, isFullHandle, profilePath } from '../../utils/handle'
 import { renderName } from '../feed/CommentsSection'
 import CustomHandle from '../common/CustomHandle'
 
@@ -16,6 +16,11 @@ import CustomHandle from '../common/CustomHandle'
 // you deliberately navigated to and much too expensive on every keystroke from
 // a bar that now sits on every screen. Anything wider than the local instance
 // is the full page's job.
+//
+// AGORA-416: the one exception is a full handle. Someone who types
+// @user@instance.com or foo.bsky.social has named exactly one account, so a
+// single lookup (debounced like the rest) is worth making, and is the only way
+// to find an account this instance hasn't cached yet.
 const MAX_PER_GROUP = 3
 
 interface Props {
@@ -109,10 +114,24 @@ export default function SearchBar({ menuOpen }: Props) {
     enabled: dropdownEnabled,
   })
 
-  const users = (usersData?.users || []).slice(0, MAX_PER_GROUP)
+  const fullHandle = isFullHandle(q)
+  const { data: lookupData, isFetching: lookupFetching } = useQuery({
+    queryKey: ['federation-lookup', q],
+    queryFn: () => federationApi.lookupUser(q).then(r => r.data),
+    enabled: dropdownEnabled && fullHandle,
+    retry: false,
+  })
+
+  // The looked-up account goes first: it's the one the handle named, whether
+  // or not the substring search also happened to find it.
+  const lookedUp = fullHandle ? lookupData?.user : undefined
+  const users = [
+    ...(lookedUp ? [lookedUp] : []),
+    ...(usersData?.users || []).filter((u: any) => u.id !== lookedUp?.id),
+  ].slice(0, MAX_PER_GROUP)
   const posts = (postsData?.posts || []).slice(0, MAX_PER_GROUP)
   const pages = (pagesData?.pages || []).slice(0, MAX_PER_GROUP)
-  const isFetching = usersFetching || postsFetching || pagesFetching
+  const isFetching = usersFetching || postsFetching || pagesFetching || (fullHandle && lookupFetching)
 
   // One flat list behind the three visible groups, so arrow keys walk the
   // dropdown the way it reads rather than per-group.
@@ -212,7 +231,7 @@ export default function SearchBar({ menuOpen }: Props) {
         <div className="absolute left-0 right-0 top-full mt-1.5 card p-1.5 max-h-[70vh] overflow-y-auto shadow-lg">
           {!hasResults && (
             <p className="px-3 py-4 text-sm text-center text-agora-400">
-              {isFetching ? 'Searching…' : `No matches for "${q}" on this instance.`}
+              {isFetching ? 'Searching…' : fullHandle ? `No account found for "${q}".` : `No matches for "${q}" on this instance.`}
             </p>
           )}
 

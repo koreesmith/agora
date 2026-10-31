@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { searchApi, friendsApi, federationApi, pagesApi, atprotoApi } from '../api'
 import { useAuthStore } from '../store/auth'
-import { handle } from '../utils/handle'
+import { handle, isDomainHandle, isFullHandle } from '../utils/handle'
 import { formatDistanceToNow } from 'date-fns'
 import { renderContent, renderName } from '../components/feed/CommentsSection'
 import { Search, Users, FileText, Heart, MessageCircle, Clock, UserPlus, Check, Link2, BookOpen, ExternalLink } from 'lucide-react'
@@ -35,7 +35,16 @@ export default function SearchPage() {
 
   // AGORA-362: a fediverse handle is conventionally typed with a leading @
   // (@user@instance.com), so the match has to accept one without requiring it.
-  const isHandleLookup = /^@?[a-zA-Z0-9_-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(q)
+  // AGORA-416: the username half can hold dots too, which covers both
+  // first.last@instance.com and the foo.bsky.social@bsky.app form this app
+  // shows for a Bluesky account.
+  //
+  // A bare Bluesky handle (foo.bsky.social) is looked up as well, but doesn't
+  // take over the page the way an @ handle does: "example.com" is just as
+  // likely a phrase to find in posts, so the account it names is shown as an
+  // exact match above the People results instead.
+  const bareHandle = isDomainHandle(q)
+  const isHandleLookup = isFullHandle(q) && !bareHandle
 
   const enabled = q.length >= 2
 
@@ -84,7 +93,7 @@ export default function SearchPage() {
   const { data: lookupData, isFetching: lookupFetching, error: lookupError } = useQuery({
     queryKey: ['federation-lookup', q],
     queryFn: () => federationApi.lookupUser(q.trim()).then(r => r.data),
-    enabled: isHandleLookup,
+    enabled: isHandleLookup || (bareHandle && tab === 'users'),
     retry: false,
   })
 
@@ -103,9 +112,14 @@ export default function SearchPage() {
   // (see internal/atproto/ingest.go), never used by fediverse ingestion, so
   // it cleanly separates "on the fediverse" from "on Bluesky" within the same
   // already-cached result set.
-  const agoraUsers = users.filter((u: any) => !u.is_remote)
-  const fediverseUsers = users.filter((u: any) => u.is_remote && u.remote_instance !== 'bsky.app')
-  const bskyActors = bskyActorsData?.disabled ? [] : (bskyActorsData?.actors || [])
+  // AGORA-416: the account a bare Bluesky handle named, linked to its profile
+  // here rather than out to bsky.app. Left out of the groups below so it isn't
+  // listed twice.
+  const exactMatch = bareHandle ? lookupData?.user : undefined
+  const agoraUsers = users.filter((u: any) => !u.is_remote && u.id !== exactMatch?.id)
+  const fediverseUsers = users.filter((u: any) => u.is_remote && u.remote_instance !== 'bsky.app' && u.id !== exactMatch?.id)
+  const bskyActors = (bskyActorsData?.disabled ? [] : (bskyActorsData?.actors || []))
+    .filter((a: any) => !exactMatch || a.handle.toLowerCase() !== exactMatch.username.toLowerCase())
 
   const agoraPosts = posts.filter((p: any) => !p.is_remote)
   const fediversePosts = posts.filter((p: any) => p.is_remote && p.remote_instance !== 'bsky.app')
@@ -113,7 +127,7 @@ export default function SearchPage() {
   const liveBskyPosts = bskyPostsData?.disabled ? [] : (bskyPostsData?.posts || [])
 
   const isFetching = isHandleLookup ? lookupFetching
-    : tab === 'users' ? (usersFetching || bskyActorsFetching)
+    : tab === 'users' ? (usersFetching || bskyActorsFetching || (bareHandle && lookupFetching))
     : tab === 'posts' ? (postsFetching || bskyPostsFetching)
     : pagesFetching
 
@@ -183,9 +197,15 @@ export default function SearchPage() {
               search (AGORA-215/216/217). */}
           {tab === 'users' && enabled && (
             <div className="space-y-4">
-              {agoraUsers.length === 0 && fediverseUsers.length === 0 && bskyActors.length === 0 && !isFetching && (
+              {!exactMatch && agoraUsers.length === 0 && fediverseUsers.length === 0 && bskyActors.length === 0 && !isFetching && (
                 <div className="card p-8 text-center text-agora-400">No people found for "{q}".</div>
               )}
+              <ResultGroup title="Exact match" count={exactMatch ? 1 : 0}>
+                {exactMatch && (
+                  <UserResult user={{ ...exactMatch, friendship_status: '' }} currentUserId={user?.id}
+                    onAdd={() => send.mutate(exactMatch.id)} addPending={send.isPending} />
+                )}
+              </ResultGroup>
               <ResultGroup title="On Agora" count={agoraUsers.length}>
                 {agoraUsers.map((u: any) => (
                   <UserResult key={u.id} user={u} currentUserId={user?.id}
@@ -293,7 +313,9 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
         </p>
         {u.bio && <p className="text-xs text-agora-500 truncate mt-0.5">{u.bio}</p>}
       </div>
-      {!isSelf && (
+      {/* AGORA-416: a Bluesky account can be followed from its profile but
+          never friended, so there's no Add to offer here. */}
+      {!isSelf && u.remote_instance !== 'bsky.app' && (
         <div className="flex-shrink-0">
           {u.friendship_status === 'accepted' && (
             <span className="text-xs text-agora-400 flex items-center gap-1"><Check size={12} /> Friends</span>

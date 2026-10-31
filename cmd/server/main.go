@@ -90,6 +90,8 @@ func main() {
 	// fedSender, which is why messages stopped at the instance boundary.
 	dmSvc.SetFed(fedSvc)
 	fedSvc.SetDM(dmSvc)
+	// AGORA-416: a Bluesky handle typed into search resolves to a profile too.
+	fedSvc.SetBluesky(atprotoSvc)
 	userSvc.SetAtproto(atprotoSvc)
 	feedSvc.SetAtproto(atprotoSvc)
 	// AGORA-278: internal/domains owns the claim/verify/approve workflow and

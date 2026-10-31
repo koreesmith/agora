@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -162,6 +163,26 @@ func (s *Service) ResolveBlueskyHandle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, preview)
+}
+
+// LookupBlueskyUser resolves a Bluesky handle to a local profile (AGORA-416),
+// for federation's LookupUser: the exact-handle search that already gave a
+// fediverse account a /profile page now does the same for a Bluesky one.
+// Creates the remote stub row if this instance hasn't seen the account yet,
+// exactly as the fediverse lookup does, since a profile page needs a row to
+// load. Same instance gate and block list as following them.
+func (s *Service) LookupBlueskyUser(ctx context.Context, handle string) (string, error) {
+	if !s.atprotoEnabled() {
+		return "", errors.New("AT Proto not enabled")
+	}
+	profile, err := s.resolveBlueskyActor(ctx, handle)
+	if err != nil {
+		return "", err
+	}
+	if s.isBlueskyActorBlocked(profile.DID, profile.Handle) {
+		return "", errors.New("blocked")
+	}
+	return s.getOrCreateRemoteATUser(profile.DID, profile.Handle, profile.DisplayName, profile.AvatarURL, profile.CoverURL)
 }
 
 // FollowBlueskyAccount writes an app.bsky.graph.follow record into the

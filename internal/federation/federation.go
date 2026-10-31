@@ -28,7 +28,21 @@ type Service struct {
 	dm dmNotifier
 	// AGORA-380: local copies of remote avatars and covers.
 	mcache *mediacache.Cache
+	// AGORA-416: set via SetBluesky. Optional, see blueskyLookup.
+	bsky blueskyLookup
 }
+
+// blueskyLookup lets LookupUser resolve a Bluesky handle into a local profile
+// the same way it already does a fediverse one. Wired rather than imported:
+// internal/atproto owns the AppView client and the stub rows, and this package
+// only needs the resulting user id.
+type blueskyLookup interface {
+	LookupBlueskyUser(ctx context.Context, handle string) (string, error)
+}
+
+// SetBluesky wires that up. Optional: without it a Bluesky handle simply isn't
+// found, which is what happened before AGORA-416.
+func (s *Service) SetBluesky(b blueskyLookup) { s.bsky = b }
 
 func NewService(db *store.DB, cfg *config.Config, notif *notifications.Service) *Service {
 	return &Service{db: db, cfg: cfg, notif: notif, mcache: mediacache.New(db, cfg.UploadDir, fedHTTPClient)}
@@ -469,6 +483,25 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 	// everyone actually types. APLookup already does this same trim.
 	raw = strings.TrimPrefix(raw, "@")
 
+	// AGORA-416: a Bluesky account is a full handle too, in either of the two
+	// forms people actually have in hand: the bare domain handle Bluesky itself
+	// shows (foo.bsky.social), or the foo.bsky.social@bsky.app form this app
+	// displays for one. WebFinger against bsky.app finds nobody, so both are
+	// routed to the AppView instead.
+	if bskyHandle, ok := blueskyHandleFrom(raw); ok {
+		if s.bsky == nil {
+			writeError(w, 404, "user not found")
+			return
+		}
+		localID, err := s.bsky.LookupBlueskyUser(r.Context(), bskyHandle)
+		if err != nil || localID == "" {
+			writeError(w, 404, "user not found on Bluesky, check the handle and try again")
+			return
+		}
+		s.writeLookedUpUser(w, localID)
+		return
+	}
+
 	parts := strings.SplitN(raw, "@", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		writeError(w, 400, "invalid handle — format: username@instance.com")
@@ -526,6 +559,10 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeLookedUpUser(w, localID)
+}
+
+func (s *Service) writeLookedUpUser(w http.ResponseWriter, localID string) {
 	type Result struct {
 		ID          string `json:"id"`
 		Username    string `json:"username"`
@@ -540,6 +577,50 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.IsRemote, &u.Instance)
 
 	writeJSON(w, 200, map[string]any{"user": u, "local": false})
+}
+
+// blueskyHandleFrom reports whether raw (already stripped of a leading @) is
+// a Bluesky handle rather than a fediverse one, and returns the handle itself.
+// Either a bare domain (no @ at all, at least one dot) or anything@bsky.app,
+// bsky.app being the remote_instance marker Bluesky-origin rows carry and so
+// the suffix this app's own UI puts on a Bluesky handle.
+func blueskyHandleFrom(raw string) (string, bool) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if local, host, ok := strings.Cut(raw, "@"); ok {
+		if host != "bsky.app" || !looksLikeDomainHandle(local) {
+			return "", false
+		}
+		return local, true
+	}
+	if !looksLikeDomainHandle(raw) {
+		return "", false
+	}
+	return raw, true
+}
+
+// looksLikeDomainHandle is the shape of an AT Proto handle: dot-separated
+// labels of letters, digits and hyphens, with a final label that isn't all
+// digits (so an IP address or "v1.2" doesn't qualify).
+func looksLikeDomainHandle(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for _, c := range l {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	tld := labels[len(labels)-1]
+	return strings.IndexFunc(tld, func(c rune) bool { return c < '0' || c > '9' }) >= 0
 }
 
 func (s *Service) FetchInstanceInfo(domain string) (string, string, string, error) {

@@ -3354,33 +3354,9 @@ func (s *Service) handleInboundAnnounceOfRemotePost(activityID, verifiedActor, o
 		return
 	}
 
-	remoteAuthorID, err := s.getOrCreateRemoteAPUserAsInstance(note.AttributedTo)
-	if err != nil || remoteAuthorID == "" {
+	postID, ok := s.storeStandaloneRemoteNote(note)
+	if !ok {
 		return
-	}
-
-	domain := domainFromURL(note.ID)
-	imageURLs, videoURL := matchAttachments(note.Attachment)
-	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
-	var postID string
-	err = s.db.QueryRow(`
-		INSERT INTO posts (author_id, content, visibility, parent_id, is_remote, remote_post_id, remote_instance, content_warning, emojis, published_at)
-		VALUES ($1, $2, 'public', NULL, true, $3, $4, $5, $6, $7)
-		ON CONFLICT (remote_post_id, remote_instance) WHERE is_remote = true AND remote_post_id != '' DO NOTHING
-		RETURNING id
-	`, remoteAuthorID, HTMLToPlainText(note.Content), note.ID, domain, HTMLToPlainText(note.Summary), emojisJSON(emojisFromAPTags(note.Tag)), parseAPTime(note.Published)).Scan(&postID)
-	if err != nil {
-		// Already ingested (e.g. a previous boost of the same post, or a
-		// relay forwarded it too) — look up its id so the repost below still
-		// attaches to it instead of dropping.
-		if s.db.QueryRow(`SELECT id FROM posts WHERE remote_post_id = $1 AND remote_instance = $2 AND is_remote = true`,
-			note.ID, domain).Scan(&postID) != nil {
-			return
-		}
-	} else {
-		s.storeInboundImages(postID, imageURLs, imageAlts)
-		s.storeInboundVideo(postID, videoURL)
-		s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
 	}
 
 	remoteReposterID, err := s.getOrCreateRemoteAPUserAsInstance(verifiedActor)

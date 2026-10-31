@@ -325,6 +325,9 @@ type apRemoteNote struct {
 	Attachment   []apAttachment
 	Tag          []apTagEntry // AGORA-213
 	Published    string       // AGORA-270: origin publish time
+	// AGORA-419: addressed to as:Public. Only fetchRemoteNoteSignedAsInstance
+	// sets it; the relay paths never needed it.
+	Public bool
 }
 
 // ingestRelayForwardedCreate handles a relay forwarding a full Create
@@ -438,6 +441,10 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 		Attachment   []apAttachment `json:"attachment"`
 		Tag          []apTagEntry   `json:"tag"`       // AGORA-213
 		Published    string         `json:"published"` // AGORA-270
+		// AGORA-419: raw because to/cc may be a single string rather than an
+		// array, and a strict []string would fail the whole note over it.
+		To json.RawMessage `json:"to"`
+		CC json.RawMessage `json:"cc"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&note); err != nil {
 		return nil, err
@@ -449,7 +456,22 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 		ID: note.ID, AttributedTo: note.AttributedTo, Content: note.Content,
 		Summary: note.Summary, InReplyTo: note.InReplyTo, Attachment: note.Attachment,
 		Tag: note.Tag, Published: note.Published,
+		Public: isAddressedPublicly(addressList(note.To), addressList(note.CC)),
 	}, nil
+}
+
+// addressList reads an AP to/cc field, which is an array of IRIs or, from
+// some servers, a single IRI.
+func addressList(raw json.RawMessage) []string {
+	var list []string
+	if json.Unmarshal(raw, &list) == nil {
+		return list
+	}
+	var one string
+	if json.Unmarshal(raw, &one) == nil && one != "" {
+		return []string{one}
+	}
+	return nil
 }
 
 // getOrCreateRemoteAPUserAsInstance mirrors getOrCreateRemoteAPUser, signing

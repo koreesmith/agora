@@ -1854,4 +1854,10 @@ var schema = []string{
 	// names the column, so the default is the whole change.
 	`ALTER TABLE ap_following ALTER COLUMN show_in_feed SET DEFAULT true`,
 	`ALTER TABLE at_following ALTER COLUMN show_in_feed SET DEFAULT true`,
+
+	// AGORA-419: what a standalone remote post (a boosted reply, or one of its
+	// ancestors) was replying to, so its post page can show the conversation.
+	// Nullable on purpose: NULL means not known yet, '' means not a reply.
+	// Existing rows stay NULL and learn theirs the first time they're opened.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS ap_in_reply_to TEXT`,
 }

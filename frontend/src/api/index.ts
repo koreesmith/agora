@@ -311,6 +311,8 @@ export const federationApi = {
   listFollowers:            ()                 => api.get('/federation/followers'),
   toggleFollowNotify:       (id: string, notify: boolean) => api.put(`/federation/follow/${id}/notify`, { notify }),
   toggleShowInFeed:         (id: string, showInFeed: boolean) => api.put(`/federation/follow/${id}/show-in-feed`, { show_in_feed: showInFeed }),
+  // AGORA-419: the posts a remote reply was replying to, oldest first.
+  threadContext:            (postId: string) => api.get(`/federation/posts/${postId}/context`),
 }
 
 // ── AT Proto / Bluesky ───────────────────────────────────────────────────────

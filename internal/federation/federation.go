@@ -96,6 +96,9 @@ func RegisterAuthedRoutes(r chi.Router, s *Service) {
 	r.Get("/federation/followers",      s.ListFollowers)
 	r.Put("/federation/follow/{id}/notify", s.ToggleFollowNotify)
 	r.Put("/federation/follow/{id}/show-in-feed", s.ToggleShowInFeed)
+	// AGORA-419: the conversation above a remote reply. Authed for the same
+	// reason as lookup: it can trigger fetches to other servers.
+	r.Get("/federation/posts/{id}/context", s.GetThreadContext)
 }
 
 // ── Instance info (public) ────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { feedApi } from '../api'
 import PostCard from '../components/feed/PostCard'
 import CommentsSection from '../components/feed/CommentsSection'
+import ThreadContext from '../components/feed/ThreadContext'
 import { Lock, Users, UserX, ArrowLeft } from 'lucide-react'
 
 export default function PostPage() {
@@ -51,6 +52,7 @@ export default function PostPage() {
       <Link to="/" className="flex items-center gap-1.5 text-sm text-agora-500 hover:text-agora-700 transition-colors">
         <ArrowLeft size={14} /> Back to feed
       </Link>
+      <ThreadContext post={post} />
       <PostCard post={post} invalidateKey="post" detail />
       <CommentsSection postId={id!} postAuthorId={post.author_id} />
     </div>

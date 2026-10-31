@@ -95,6 +95,28 @@ func TestHandleTicketsDropsOnlyUnregisteredTokens(t *testing.T) {
 	}
 }
 
+// AGORA-425: the icon's badge counts unread messages as well as unread
+// notifications, but not the user's own messages or ones already read.
+func TestBadgeCountIncludesUnreadMessages(t *testing.T) {
+	db := pushTestDB(t)
+	s := &Service{db: db}
+	me, them := pushTestUser(t, db, "me"), pushTestUser(t, db, "them")
+	var convID string
+	db.QueryRow(`INSERT INTO conversations DEFAULT VALUES RETURNING id`).Scan(&convID)
+	t.Cleanup(func() { db.Exec(`DELETE FROM conversations WHERE id = $1`, convID) })
+	db.Exec(`INSERT INTO conversation_participants (conversation_id, user_id, is_accepted, last_read_at) VALUES ($1,$2,true,NOW() - interval '1 hour')`, convID, me)
+	db.Exec(`INSERT INTO conversation_participants (conversation_id, user_id, is_accepted) VALUES ($1,$2,true)`, convID, them)
+	db.Exec(`INSERT INTO messages (conversation_id, author_id, content, created_at) VALUES ($1,$2,'old',NOW() - interval '2 hours')`, convID, them)
+	db.Exec(`INSERT INTO messages (conversation_id, author_id, content) VALUES ($1,$2,'new one')`, convID, them)
+	db.Exec(`INSERT INTO messages (conversation_id, author_id, content) VALUES ($1,$2,'new two')`, convID, them)
+	db.Exec(`INSERT INTO messages (conversation_id, author_id, content) VALUES ($1,$2,'mine')`, convID, me)
+	db.Exec(`INSERT INTO notifications (user_id, type) VALUES ($1, 'friend_request')`, me)
+
+	if got := s.badgeCount(me); got != 3 {
+		t.Errorf("badgeCount = %d, want 3 (two unread messages and one notification)", got)
+	}
+}
+
 // A comment's notification opens the post it's on.
 func TestRootPostIDResolvesComments(t *testing.T) {
 	db := pushTestDB(t)

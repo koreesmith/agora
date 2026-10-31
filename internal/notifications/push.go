@@ -73,6 +73,74 @@ func (s *Service) unreadCount(userID string) int {
 	return count
 }
 
+// badgeCount is the number on the app icon: unread notifications plus unread
+// direct messages (AGORA-425), the same two counts the app shows on its
+// Notifications and Messages tabs. Unread messages are counted the way the DM
+// service counts them per conversation.
+func (s *Service) badgeCount(userID string) int {
+	var messages int
+	s.db.QueryRow(`
+		SELECT COUNT(*) FROM messages m
+		JOIN conversation_participants cp ON cp.conversation_id = m.conversation_id AND cp.user_id = $1
+		WHERE m.author_id != $1
+		  AND m.deleted_at IS NULL
+		  AND (cp.last_read_at IS NULL OR m.created_at > cp.last_read_at)
+	`, userID).Scan(&messages)
+	return s.unreadCount(userID) + messages
+}
+
+// PushDirectMessage tells a recipient's devices about a new direct message
+// (AGORA-425). Messages used to reach only an open app, over the DM socket.
+//
+// The push names the sender but not what they wrote: a message is the most
+// private thing on the instance, and a push travels through Expo and Apple or
+// Google and sits on a lock screen. A first message from someone the recipient
+// hasn't accepted yet says it's a request, matching the Requests split the
+// Messages tab makes. Nothing is pushed between users who have blocked each
+// other.
+func (s *Service) PushDirectMessage(recipientID, senderID, convID string, isRequest bool) {
+	var blocked bool
+	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`,
+		recipientID, senderID).Scan(&blocked)
+	if blocked {
+		return
+	}
+	tokens := s.pushTokens(recipientID)
+	if len(tokens) == 0 {
+		return
+	}
+
+	senderName, senderUsername := "Someone", ""
+	var display, username string
+	s.db.QueryRow(`SELECT COALESCE(display_name,''), username FROM users WHERE id = $1`, senderID).Scan(&display, &username)
+	if display != "" { senderName = display } else if username != "" { senderName = username }
+	senderUsername = username
+
+	title, body := "New message", senderName+" sent you a message"
+	if isRequest {
+		title, body = "New message request", senderName+" wants to send you a message"
+	}
+	data := map[string]string{
+		"type":            "new_message",
+		"conversation_id": convID,
+		"actor_username":  senderUsername,
+	}
+	badge := s.badgeCount(recipientID)
+	messages := make([]expoMessage, len(tokens))
+	for i, t := range tokens {
+		messages[i] = expoMessage{
+			To: t, Title: title, Body: body, Sound: "default", Data: data,
+			Badge: &badge, Priority: "high",
+		}
+	}
+	s.sendPush(messages)
+}
+
+// SyncBadge is syncBadge for the DM service, which calls it when a
+// conversation is read so the icon's count comes down on the user's other
+// devices too.
+func (s *Service) SyncBadge(userID string) { s.syncBadge(userID) }
+
 // rootPostID resolves a comment (or a reply to one) to the post it's on, the
 // way List does for the notifications page. Anything else comes back as is.
 func (s *Service) rootPostID(postID string) string {
@@ -98,7 +166,7 @@ func (s *Service) syncBadge(userID string) {
 	if len(tokens) == 0 {
 		return
 	}
-	badge := s.unreadCount(userID)
+	badge := s.badgeCount(userID)
 	messages := make([]expoMessage, len(tokens))
 	for i, t := range tokens {
 		messages[i] = expoMessage{To: t, Badge: &badge, Data: map[string]string{"type": "badge_sync"}}

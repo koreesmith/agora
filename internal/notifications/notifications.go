@@ -358,7 +358,7 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData s
 		"data":           extraData,
 	}
 
-	badge := s.unreadCount(userID)
+	badge := s.badgeCount(userID)
 	messages := make([]expoMessage, len(tokens))
 	for i, t := range tokens {
 		messages[i] = expoMessage{

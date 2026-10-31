@@ -21,6 +21,51 @@ type Service struct {
 	hub      *Hub
 	upgrader websocket.Upgrader
 	fed      fedSender
+	push     pusher
+}
+
+// pusher reaches a recipient whose app isn't open (AGORA-425). The socket hub
+// below only ever reached an open client, so a message to a phone in someone's
+// pocket arrived silently and waited for the app to be opened.
+type pusher interface {
+	PushDirectMessage(recipientID, senderID, convID string, isRequest bool)
+	SyncBadge(userID string)
+}
+
+// SetPusher wires that up. Optional: without it messages behave as before.
+func (s *Service) SetPusher(p pusher) { s.push = p }
+
+// pushNewMessage pushes a message to each local recipient in the conversation.
+// Every recipient gets the push even with an app open, because an open web
+// tab says nothing about the phone; the app decides whether to show it.
+// Remote participants have no devices here, and their own instance pushes.
+func (s *Service) pushNewMessage(convID, senderID string) {
+	if s.push == nil {
+		return
+	}
+	rows, err := s.db.Query(`
+		SELECT cp.user_id, cp.is_accepted FROM conversation_participants cp
+		JOIN users u ON u.id = cp.user_id
+		WHERE cp.conversation_id = $1 AND cp.user_id != $2 AND COALESCE(u.is_remote, false) = false
+	`, convID, senderID)
+	if err != nil {
+		return
+	}
+	type recipient struct {
+		id       string
+		accepted bool
+	}
+	var recipients []recipient
+	for rows.Next() {
+		var r recipient
+		if rows.Scan(&r.id, &r.accepted) == nil {
+			recipients = append(recipients, r)
+		}
+	}
+	rows.Close()
+	for _, r := range recipients {
+		s.push.PushDirectMessage(r.id, senderID, convID, !r.accepted)
+	}
 }
 
 // fedSender is the outbound half of AGORA-323. Messages were local-only: this
@@ -424,6 +469,7 @@ func (s *Service) StartConversation(w http.ResponseWriter, r *http.Request) {
 		s.db.Exec(`UPDATE conversations SET updated_at=NOW() WHERE id=$1`, convID)
 		m := s.loadMessage(msgID)
 		s.hub.broadcast(recipientID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
+		go s.pushNewMessage(convID, userID) // AGORA-425
 		if rid := s.remoteRecipient(convID, userID); rid != "" {
 			go s.fed.SendDirectMessage(userID, rid, msgID)
 		}
@@ -515,6 +561,7 @@ func (s *Service) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	m := s.loadMessage(msgID)
 	s.broadcastToConv(convID, userID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
+	go s.pushNewMessage(convID, userID) // AGORA-425
 	// AGORA-323: delivered after the local row exists, like every other
 	// outbound federation path, so a delivery failure leaves the sender's own
 	// view intact and the queue retries.
@@ -614,6 +661,9 @@ func (s *Service) MarkRead(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`UPDATE conversation_participants SET last_read_at=NOW() WHERE conversation_id=$1 AND user_id=$2`, convID, userID)
 	s.broadcastToConv(convID, userID, WSEvent{Type: "read_receipt", ConvID: convID,
 		Data: map[string]string{"user_id": userID, "at": time.Now().UTC().Format(time.RFC3339)}})
+	if s.push != nil {
+		go s.push.SyncBadge(userID) // AGORA-425
+	}
 	writeJSON(w, 200, map[string]string{"message": "marked read"})
 }
 
@@ -752,6 +802,9 @@ func (s *Service) WebSocket(w http.ResponseWriter, r *http.Request) {
 			s.db.Exec(`UPDATE conversation_participants SET last_read_at=NOW() WHERE conversation_id=$1 AND user_id=$2`, msg.ConvID, userID)
 			s.broadcastToConv(msg.ConvID, userID, WSEvent{Type: "read_receipt", ConvID: msg.ConvID,
 				Data: map[string]string{"user_id": userID, "at": time.Now().UTC().Format(time.RFC3339)}})
+			if s.push != nil {
+				go s.push.SyncBadge(userID) // AGORA-425
+			}
 		}
 	}
 }
@@ -768,4 +821,5 @@ func (s *Service) DeliverInboundMessage(convID, recipientID, messageID string) {
 		return
 	}
 	s.hub.broadcast(recipientID, WSEvent{Type: "new_message", ConvID: convID, Data: m})
+	go s.pushNewMessage(convID, m.AuthorID) // AGORA-425
 }

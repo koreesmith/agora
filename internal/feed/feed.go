@@ -1032,7 +1032,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
-		ORDER BY p.published_at DESC LIMIT $3 OFFSET $4
+		ORDER BY p.published_at DESC, p.id DESC LIMIT $3 OFFSET $4
 	`, viewerParam, authorID, limit, offset)
 	if err != nil {
 		writeError(w, 500, "db error")

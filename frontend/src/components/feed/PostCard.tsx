@@ -1173,19 +1173,25 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       </div>
                     </>
                   )}
-                  <img
-                    src={lightboxPhotos[lightboxIdx]}
-                    alt={photoAlts[lightboxIdx] || ''}
-                    className="max-w-[90vw] max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl object-contain"
-                    onClick={e => e.stopPropagation()}
-                  />
-                  {/* AGORA-400: the lightbox only ever shows this post's own photos */}
-                  {photoAlts[lightboxIdx] && (
-                    <p onClick={e => e.stopPropagation()}
-                      className="absolute bottom-12 left-1/2 -translate-x-1/2 max-w-[min(90vw,40rem)] max-h-32 overflow-y-auto rounded-lg bg-black/70 px-3 py-2 text-sm text-white whitespace-pre-wrap z-10">
-                      {photoAlts[lightboxIdx]}
-                    </p>
-                  )}
+                  {/* AGORA-414: the description gets its own band under the photo
+                      instead of overlaying it, and the photo gives up the height
+                      the band needs. The bottom padding keeps clear of the
+                      carousel dots. */}
+                  <div className="flex flex-col items-center gap-3 pb-6">
+                    <img
+                      src={lightboxPhotos[lightboxIdx]}
+                      alt={photoAlts[lightboxIdx] || ''}
+                      className={`max-w-[90vw] w-auto h-auto rounded-lg shadow-2xl object-contain ${photoAlts[lightboxIdx] ? 'max-h-[70vh]' : 'max-h-[90vh]'}`}
+                      onClick={e => e.stopPropagation()}
+                    />
+                    {/* AGORA-400: the lightbox only ever shows this post's own photos */}
+                    {photoAlts[lightboxIdx] && (
+                      <p onClick={e => e.stopPropagation()}
+                        className="max-w-[min(90vw,40rem)] max-h-[16vh] overflow-y-auto rounded-lg bg-black/70 px-3 py-2 text-sm text-white whitespace-pre-wrap">
+                        {photoAlts[lightboxIdx]}
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
                 </>

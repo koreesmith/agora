@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { friendsApi, federationApi, atprotoApi, instanceApi } from '../api'
 import { handle } from '../utils/handle'
 import { UserCheck, UserX, Users, Trash2, Plus, ChevronRight, ChevronDown, UserMinus, List, Search, UserPlus, Clock, Bell, BellOff, Globe, Home, Cloud, Compass, Mail } from 'lucide-react'
@@ -135,6 +135,20 @@ export default function ConnectionsPage() {
     if (!fediHandle.trim()) return
     resolveFediHandle.mutate(fediHandle.trim())
   }
+
+  // AGORA-421: a search preview isn't a followed account yet, so it has no
+  // local profile row to link to. /federation/lookup creates the stub (the
+  // same path the header search uses) and returns the username to route to.
+  const navigate = useNavigate()
+  const [profileError, setProfileError] = useState('')
+  const openProfile = useMutation({
+    mutationFn: (h: string) => federationApi.lookupUser(h).then(r => r.data),
+    onSuccess: (data) => {
+      setProfileError('')
+      if (data?.user?.username) navigate(`/profile/${data.user.username}`)
+    },
+    onError: (e: any) => setProfileError(e.response?.data?.error || 'Could not open that profile.'),
+  })
 
   const alreadyFollowingFedi = fediPreview && following.some(f => f.actor_url === fediPreview.actor_url)
 
@@ -440,6 +454,7 @@ export default function ConnectionsPage() {
               </button>
             </form>
             {fediSearchError && <p className="text-sm text-red-500">{fediSearchError}</p>}
+            {profileError && <p className="text-sm text-red-500">{profileError}</p>}
 
             {/* AGORA-196: a Bluesky account bridged into the fediverse via
                 Bridgy Fed (handle@bsky.brid.gy) should be followed natively
@@ -461,15 +476,17 @@ export default function ConnectionsPage() {
             )}
             {fediPreview && !isBridgedBlueskyInstance(fediPreview.instance) && (
               <div className="flex items-center gap-3 p-3 rounded-xl border border-agora-100 dark:border-agora-700">
-                <div className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                <button type="button" onClick={() => openProfile.mutate(`${fediPreview.preferred_username}@${fediPreview.instance}`)}
+                  aria-label="View profile" className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
                   {fediPreview.icon_url
                     ? <img src={fediPreview.icon_url} alt="" className="w-full h-full object-cover" />
                     : <span className="w-full h-full flex items-center justify-center font-bold text-agora-500">
                         {(fediPreview.name || fediPreview.preferred_username || '?')[0]}
                       </span>}
-                </div>
+                </button>
                 <div className="flex-1 min-w-0">
-                  <p className="font-medium text-sm truncate">{fediPreview.name || fediPreview.preferred_username}</p>
+                  <button type="button" onClick={() => openProfile.mutate(`${fediPreview.preferred_username}@${fediPreview.instance}`)}
+                    className="font-medium text-sm truncate hover:underline block max-w-full text-left">{fediPreview.name || fediPreview.preferred_username}</button>
                   <p className="text-xs text-agora-400 truncate">@{fediPreview.preferred_username}@{fediPreview.instance}</p>
                   {fediPreview.summary && <p className="text-xs text-agora-500 mt-1 line-clamp-2">{fediPreview.summary}</p>}
                 </div>
@@ -683,18 +700,21 @@ export default function ConnectionsPage() {
               </button>
             </form>
             {bskySearchError && <p className="text-sm text-red-500">{bskySearchError}</p>}
+            {profileError && <p className="text-sm text-red-500">{profileError}</p>}
 
             {bskyPreview && (
               <div className="flex items-center gap-3 p-3 rounded-xl border border-agora-100 dark:border-agora-700">
-                <div className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                <button type="button" onClick={() => openProfile.mutate(bskyPreview.handle)}
+                  aria-label="View profile" className="w-12 h-12 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
                   {bskyPreview.avatar_url
                     ? <img src={bskyPreview.avatar_url} alt="" className="w-full h-full object-cover" />
                     : <span className="w-full h-full flex items-center justify-center font-bold text-agora-500">
                         {(bskyPreview.display_name || bskyPreview.handle || '?')[0]}
                       </span>}
-                </div>
+                </button>
                 <div className="flex-1 min-w-0">
-                  <p className="font-medium text-sm truncate">{bskyPreview.display_name || bskyPreview.handle}</p>
+                  <button type="button" onClick={() => openProfile.mutate(bskyPreview.handle)}
+                    className="font-medium text-sm truncate hover:underline block max-w-full text-left">{bskyPreview.display_name || bskyPreview.handle}</button>
                   <p className="text-xs text-agora-400 truncate">@{bskyPreview.handle}</p>
                   {bskyPreview.description && <p className="text-xs text-agora-500 mt-1 line-clamp-2">{bskyPreview.description}</p>}
                 </div>

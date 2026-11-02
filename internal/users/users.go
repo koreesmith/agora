@@ -172,6 +172,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		RemoteFollowerCount  *int `json:"remote_follower_count,omitempty"`
 		RemoteFollowingCount *int `json:"remote_following_count,omitempty"`
 		RemotePostCount      *int `json:"remote_post_count,omitempty"`
+		// AGORA-422: a local account's follower/following totals across every
+		// network it's on: friends (mutual, so counted on both sides), plus
+		// fediverse and Bluesky. nil for remote accounts, which use the
+		// Remote* live counts above.
+		FollowerCount  *int `json:"follower_count,omitempty"`
+		FollowingCount *int `json:"following_count,omitempty"`
 		// AGORA-258: custom emoji (shortcode -> image URL) referenced in
 		// DisplayName/Bio, sourced from the actor's own "tag" array at
 		// ingestion time.
@@ -300,6 +306,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		SELECT COUNT(*) FROM friendships
 		WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
 	`, u.ID).Scan(&u.FriendCount)
+
+	// AGORA-422: only a local account's graph is ours to total. Pending
+	// fediverse follows are not follows yet, so they are left out.
+	if !u.IsRemote {
+		var apFollowers, atFollowers, apFollowing, atFollowing int
+		s.db.QueryRow(`SELECT COUNT(*) FROM ap_followers WHERE followed_user_id = $1`, u.ID).Scan(&apFollowers)
+		s.db.QueryRow(`SELECT COUNT(*) FROM at_followers WHERE local_user_id = $1`, u.ID).Scan(&atFollowers)
+		s.db.QueryRow(`SELECT COUNT(*) FROM ap_following WHERE follower_user_id = $1 AND accepted = true`, u.ID).Scan(&apFollowing)
+		s.db.QueryRow(`SELECT COUNT(*) FROM at_following WHERE local_user_id = $1`, u.ID).Scan(&atFollowing)
+		followers := u.FriendCount + apFollowers + atFollowers
+		following := u.FriendCount + apFollowing + atFollowing
+		u.FollowerCount, u.FollowingCount = &followers, &following
+	}
 
 	// Post notification status
 	if viewerID != "" && viewerID != u.ID {

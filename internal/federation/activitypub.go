@@ -402,6 +402,7 @@ func (s *Service) writeActorObject(w http.ResponseWriter, r *http.Request, handl
 		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
 		"outbox":             actor + "/outbox",
 		"followers":          actor + "/followers",
+		"following":          actor + "/following",
 		"url":                strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username,
 		"publicKey": map[string]string{
 			"id":           actor + "#main-key",
@@ -497,6 +498,7 @@ func (s *Service) BroadcastActorUpdate(userID string) {
 		"inbox":              strings.TrimRight(s.cfg.InstanceDomain, "/") + "/federation/inbox",
 		"outbox":             actor + "/outbox",
 		"followers":          actor + "/followers",
+		"following":          actor + "/following",
 		"url":                strings.TrimRight(s.cfg.InstanceDomain, "/") + "/profile/" + u.Username,
 		"publicKey": map[string]string{
 			"id":           actor + "#main-key",
@@ -712,12 +714,21 @@ func (s *Service) Outbox(w http.ResponseWriter, r *http.Request) {
 		items = []map[string]any{}
 	}
 
+	// AGORA-422: totalItems is what Mastodon shows as the account's post
+	// count; len(items) is only the 20-post page above, so it capped at 20.
+	var total int
+	s.db.QueryRow(`
+		SELECT COUNT(*) FROM posts
+		WHERE author_id = $1 AND visibility = 'public' AND parent_id IS NULL
+		  AND deleted_at IS NULL AND is_remote = false
+	`, u.ID).Scan(&total)
+
 	w.Header().Set("Content-Type", "application/activity+json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"@context":     "https://www.w3.org/ns/activitystreams",
 		"id":           actor + "/outbox",
 		"type":         "OrderedCollection",
-		"totalItems":   len(items),
+		"totalItems":   total,
 		"orderedItems": items,
 	})
 }
@@ -1109,6 +1120,32 @@ func (s *Service) Followers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"@context":   "https://www.w3.org/ns/activitystreams",
 		"id":         actor + "/followers",
+		"type":       "OrderedCollection",
+		"totalItems": count,
+	})
+}
+
+// AGORA-422: the actor document advertised no "following" collection, so
+// Mastodon and the rest showed 0 following for every Agora account. Like
+// Followers this exposes only totalItems, and only the fediverse follows the
+// account actually holds: accepted ones, since a pending request is not yet
+// a follow. Friendships and Bluesky follows are not fediverse relationships.
+func (s *Service) Following(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	u, ok := s.apEligibleUser(handle)
+	if !ok {
+		writeError(w, 404, "user not found")
+		return
+	}
+
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM ap_following WHERE follower_user_id = $1 AND accepted = true`, u.ID).Scan(&count)
+
+	actor := s.actorURL(u.Username)
+	w.Header().Set("Content-Type", "application/activity+json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"@context":   "https://www.w3.org/ns/activitystreams",
+		"id":         actor + "/following",
 		"type":       "OrderedCollection",
 		"totalItems": count,
 	})

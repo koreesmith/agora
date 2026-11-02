@@ -560,7 +560,16 @@ export default function ProfilePage() {
                 <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_following_count ?? 0}</strong> following</span>
               </>
             ) : (
-              <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+              <>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+                {/* AGORA-422: totals across Agora, the Fediverse and Bluesky */}
+                {profile.follower_count != null && (
+                  <span><strong className="text-agora-800 dark:text-agora-200">{profile.follower_count}</strong> followers</span>
+                )}
+                {profile.following_count != null && (
+                  <span><strong className="text-agora-800 dark:text-agora-200">{profile.following_count}</strong> following</span>
+                )}
+              </>
             )}
             {profile.location && <span>{profile.location}</span>}
             {profile.website && <a href={profile.website} className="text-agora-600 hover:underline" target="_blank" rel="noreferrer">{profile.website}</a>}

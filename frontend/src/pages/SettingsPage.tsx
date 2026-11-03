@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
-import { usersApi, authApi, notificationsApi, blocksApi, hiddenPostsApi } from '../api'
+import { usersApi, authApi, notificationsApi, blocksApi, hiddenPostsApi, keywordMutesApi } from '../api'
 import CoverPhoto from '../components/common/CoverPhoto'
 import CustomDomainPanel from '../components/common/CustomDomainPanel'
 
@@ -224,6 +224,38 @@ export default function SettingsPage() {
     mutationFn: (username: string) => blocksApi.unblock(username),
     onSuccess: () => refetchBlocked(),
   })
+
+  // AGORA-428: muted keywords sit with blocked users and hidden posts for the
+  // same reason: one more thing the user has chosen not to see.
+  const [muteWord, setMuteWord] = useState('')
+  const [muteDays, setMuteDays] = useState('0')
+  const { data: mutesData, refetch: refetchMutes } = useQuery({
+    queryKey: ['keyword-mutes'],
+    queryFn: () => keywordMutesApi.list().then(r => r.data),
+    enabled: tab === 'blocked',
+  })
+  const muteChanged = () => {
+    refetchMutes()
+    qc.invalidateQueries({ queryKey: ['feed'] })
+    qc.invalidateQueries({ queryKey: ['public-feed'] })
+  }
+  const addMute = useMutation({
+    mutationFn: () => keywordMutesApi.add(muteWord.trim(), parseInt(muteDays, 10) || 0),
+    onSuccess: () => { setMuteWord(''); muteChanged() },
+    onError: fail,
+  })
+  const removeMute = useMutation({
+    mutationFn: (id: string) => keywordMutesApi.remove(id),
+    onSuccess: muteChanged,
+  })
+  const muteRemaining = (expiresAt: string | null) => {
+    if (!expiresAt) return 'Forever'
+    const ms = new Date(expiresAt).getTime() - Date.now()
+    const days = Math.ceil(ms / 86400000)
+    if (days >= 2) return `${days} days left`
+    const hours = Math.max(1, Math.ceil(ms / 3600000))
+    return hours >= 24 ? '1 day left' : `${hours} ${hours === 1 ? 'hour' : 'hours'} left`
+  }
 
   const tabs = ['profile','account','privacy','notifications','fediverse','bluesky','data','blocked'] as const
 
@@ -534,6 +566,59 @@ export default function SettingsPage() {
                     className="btn-secondary text-xs py-1 px-3"
                   >
                     Unblock
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'blocked' && (
+        <div className="card p-4 space-y-3 mt-4">
+          <h3 className="font-semibold">Muted keywords</h3>
+          <p className="text-sm text-agora-500">
+            Posts containing a muted word or phrase are hidden from your timelines, including posts from the
+            Fediverse and Bluesky. Matching ignores capitals and whole words only, so muting "cat" does not hide
+            "category". It checks the post text, content warning and image description. Muted posts still show in
+            Bookmarks, on profiles and in search.
+          </p>
+          <form
+            onSubmit={e => { e.preventDefault(); if (muteWord.trim()) addMute.mutate() }}
+            className="flex flex-wrap gap-2"
+          >
+            <input
+              className="input flex-1 min-w-[10rem]"
+              placeholder="Word or phrase"
+              maxLength={100}
+              value={muteWord}
+              onChange={e => setMuteWord(e.target.value)}
+            />
+            <select className="input w-auto" value={muteDays} onChange={e => setMuteDays(e.target.value)} aria-label="Mute duration">
+              <option value="0">Forever</option>
+              <option value="1">1 day</option>
+              <option value="7">7 days</option>
+              <option value="30">30 days</option>
+              <option value="90">90 days</option>
+            </select>
+            <button type="submit" disabled={addMute.isPending || !muteWord.trim()} className="btn-primary">Mute</button>
+          </form>
+          {(mutesData?.mutes || []).length === 0 ? (
+            <p className="text-sm text-agora-400 py-4 text-center">You haven't muted any keywords.</p>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {(mutesData?.mutes || []).map((m: any) => (
+                <div key={m.id} className="flex items-center gap-3 py-2 border-b border-agora-100 dark:border-agora-700 last:border-0">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium break-words">{m.keyword}</p>
+                    <p className="text-xs text-agora-400">{muteRemaining(m.expires_at)}</p>
+                  </div>
+                  <button
+                    onClick={() => removeMute.mutate(m.id)}
+                    disabled={removeMute.isPending}
+                    className="btn-secondary text-xs py-1 px-3 flex-shrink-0"
+                  >
+                    Unmute
                   </button>
                 </div>
               ))}

@@ -175,6 +175,10 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts/{id}/react",                  s.ReactPost)
 	r.Delete("/posts/{id}/react",                s.UnreactPost)
 	r.Post("/posts/{id}/repost",                 s.Repost)
+	r.Post("/posts/{id}/bookmark",               s.AddBookmark)    // AGORA-429
+	r.Delete("/posts/{id}/bookmark",             s.RemoveBookmark) // AGORA-429
+	r.Get("/bookmarks",                          s.ListBookmarks)  // AGORA-429
+	registerKeywordMuteRoutes(r, s)                                // AGORA-428
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
@@ -256,6 +260,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  -- as well as them from you.
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4
@@ -320,6 +325,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 			  AND (
 			    p.author_id = $1
 			    OR p.wall_user_id = $1
@@ -673,6 +679,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 		  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 		  AND (
 		    p.author_id = $1
 		    OR p.wall_user_id = $1
@@ -778,7 +785,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 	blockClause := ""
 	if viewerID != "" {
 		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
-		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)`
+		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id) ` + keywordMuteClause
 	}
 
 	rows, err := s.db.Query(fmt.Sprintf(`
@@ -1032,7 +1039,7 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND p.wall_user_id IS NULL
 		  AND `+visFilter+`
-		ORDER BY p.published_at DESC LIMIT $3 OFFSET $4
+		ORDER BY p.published_at DESC, p.id DESC LIMIT $3 OFFSET $4
 	`, viewerParam, authorID, limit, offset)
 	if err != nil {
 		writeError(w, 500, "db error")
@@ -2906,6 +2913,8 @@ type Post struct {
 	RepostCount    int     `json:"repost_count"`
 	Liked          bool    `json:"liked"`
 	Reposted       bool    `json:"reposted"`
+	// AGORA-429: the viewer has saved this post. Filled in by enrichReactions.
+	Bookmarked     bool    `json:"bookmarked"`
 	// Reactions (AGORA-25)
 	ReactionCount  int     `json:"reaction_count"`
 	MyReaction     string  `json:"my_reaction"` // empty string = no reaction
@@ -3414,6 +3423,19 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 					posts[idx].MyReaction = rtype
 				}
 			}
+		}
+
+		// AGORA-429: which of these the viewer has bookmarked.
+		if brows, err := s.db.Query(`SELECT post_id FROM bookmarks WHERE user_id = $1 AND post_id = ANY($2::uuid[])`, userID, pq.Array(ids)); err == nil {
+			for brows.Next() {
+				var postID string
+				if brows.Scan(&postID) == nil {
+					if idx, ok := idxMap[postID]; ok {
+						posts[idx].Bookmarked = true
+					}
+				}
+			}
+			brows.Close()
 		}
 
 		// For posts where user has no reactions entry, check legacy likes

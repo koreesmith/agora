@@ -101,6 +101,9 @@ export const usersApi = {
   cancelDeletion:   ()                 => api.delete('/users/me/request-deletion'),
   deleteImmediately:()                 => api.post('/users/me/delete-immediately'),
   discover:         ()                 => api.get('/users/discover'),
+  // AGORA-423: stop offering someone in Find Friends. key is the network's id
+  // for them: a user id, username@instance, an actor URL, or a DID.
+  dismissSuggestion:(kind: 'user' | 'peer' | 'fediverse' | 'bluesky', key: string) => api.post('/users/discover/dismiss', { kind, key }),
   mentionSearch:    (q: string)        => api.get('/users/mention-search', { params: { q } }),
   enablePostNotify: (username: string) => api.post(`/users/${username}/notify`),
   disablePostNotify:(username: string) => api.delete(`/users/${username}/notify`),
@@ -397,6 +400,22 @@ export const hiddenPostsApi = {
   list:   ()               => api.get('/hidden-posts'),
   hide:   (postId: string) => api.post(`/posts/${postId}/hide`),
   unhide: (postId: string) => api.delete(`/posts/${postId}/hide`),
+}
+
+// AGORA-429: saving a post to come back to. Private to the user; nothing is
+// federated and the author is not told.
+export const bookmarksApi = {
+  list:   (params?: any)   => api.get('/bookmarks', { params }),
+  add:    (postId: string) => api.post(`/posts/${postId}/bookmark`),
+  remove: (postId: string) => api.delete(`/posts/${postId}/bookmark`),
+}
+
+// AGORA-428: words the user has muted from their timelines. days omitted or 0
+// means forever.
+export const keywordMutesApi = {
+  list:   ()                                  => api.get('/keyword-mutes'),
+  add:    (keyword: string, days?: number)    => api.post('/keyword-mutes', { keyword, days: days || 0 }),
+  remove: (id: string)                        => api.delete(`/keyword-mutes/${id}`),
 }
 
 export const dmApi = {

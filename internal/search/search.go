@@ -48,7 +48,19 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		               WHEN f.status = 'accepted' THEN 'accepted'
 		               ELSE ''
 		           END, ''
-		       ) AS friendship_status
+		       ) AS friendship_status,
+		       -- AGORA-432: a remote account is followed rather than
+		       -- friended, so friendship_status alone made someone you
+		       -- already follow look like a stranger.
+		       (u.ap_actor_url != '' AND EXISTS (
+		           SELECT 1 FROM ap_following af
+		           WHERE af.follower_user_id = $1 AND af.followed_actor_url = u.ap_actor_url AND af.accepted))
+		       OR (u.atproto_remote_did != '' AND EXISTS (
+		           SELECT 1 FROM at_following atf
+		           WHERE atf.local_user_id = $1 AND atf.remote_did = u.atproto_remote_did)) AS following,
+		       u.ap_actor_url != '' AND EXISTS (
+		           SELECT 1 FROM ap_following af
+		           WHERE af.follower_user_id = $1 AND af.followed_actor_url = u.ap_actor_url AND NOT af.accepted) AS follow_pending
 		FROM users u
 		LEFT JOIN friendships f ON (
 			(f.requester_id = $1 AND f.addressee_id = u.id)
@@ -90,6 +102,8 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		Emojis         json.RawMessage `json:"emojis,omitempty"`
 		CustomDomain   string          `json:"custom_domain,omitempty"`
 		FriendStatus   string          `json:"friendship_status"`
+		Following      bool            `json:"following"`
+		FollowPending  bool            `json:"follow_pending"`
 	}
 
 	var results []Result
@@ -97,7 +111,8 @@ func (s *Service) SearchUsers(w http.ResponseWriter, r *http.Request) {
 		var u Result
 		var emojis string
 		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio,
-			&u.IsRemote, &u.RemoteInstance, &emojis, &u.CustomDomain, &u.FriendStatus)
+			&u.IsRemote, &u.RemoteInstance, &emojis, &u.CustomDomain, &u.FriendStatus,
+			&u.Following, &u.FollowPending)
 		u.Emojis = json.RawMessage(emojis)
 		results = append(results, u)
 	}
@@ -156,7 +171,8 @@ const postResultColumns = `
 	(SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 	(SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
 	EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
-	COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')`
+	COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'),
+	EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.id AND user_id = $1) AS bookmarked`
 
 func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
@@ -225,6 +241,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		LikeCount      int             `json:"like_count"`
 		CommentCount   int             `json:"comment_count"`
 		Liked          bool            `json:"liked"`
+		Bookmarked     bool            `json:"bookmarked"` // AGORA-434
 		AuthorEmojis   json.RawMessage `json:"author_emojis,omitempty"`
 		ContentEmojis  json.RawMessage `json:"content_emojis,omitempty"`
 	}
@@ -237,7 +254,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt, &p.PublishedAt,
 			&p.IsRemote, &p.RemoteInstance,
 			&p.LikeCount, &p.CommentCount, &p.Liked,
-			&authorEmojis, &contentEmojis)
+			&authorEmojis, &contentEmojis, &p.Bookmarked)
 		p.AuthorEmojis = json.RawMessage(authorEmojis)
 		p.ContentEmojis = json.RawMessage(contentEmojis)
 		posts = append(posts, p)

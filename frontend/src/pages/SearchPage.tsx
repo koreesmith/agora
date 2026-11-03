@@ -158,7 +158,7 @@ export default function SearchPage() {
           )}
           {!lookupFetching && lookupData?.user && (
             <UserResult
-              user={{ ...lookupData.user, friendship_status: '' }}
+              user={lookupData.user}
               currentUserId={user?.id}
               onAdd={() => send.mutate(lookupData.user.id)}
               addPending={send.isPending}
@@ -202,7 +202,7 @@ export default function SearchPage() {
               )}
               <ResultGroup title="Exact match" count={exactMatch ? 1 : 0}>
                 {exactMatch && (
-                  <UserResult user={{ ...exactMatch, friendship_status: '' }} currentUserId={user?.id}
+                  <UserResult user={exactMatch} currentUserId={user?.id}
                     onAdd={() => send.mutate(exactMatch.id)} addPending={send.isPending} />
                 )}
               </ResultGroup>
@@ -320,13 +320,20 @@ function UserResult({ user: u, currentUserId, onAdd, addPending }: {
           {u.friendship_status === 'accepted' && (
             <span className="text-xs text-agora-400 flex items-center gap-1"><Check size={12} /> Friends</span>
           )}
-          {(u.friendship_status === 'pending' || sent) && (
+          {/* AGORA-432: a remote account you follow is not a stranger to add. */}
+          {u.friendship_status !== 'accepted' && u.following && (
+            <span className="text-xs text-agora-400 flex items-center gap-1"><Check size={12} /> Following</span>
+          )}
+          {u.friendship_status !== 'accepted' && !u.following && u.follow_pending && (
+            <span className="text-xs text-agora-400 flex items-center gap-1"><Clock size={12} /> Requested</span>
+          )}
+          {(u.friendship_status === 'pending' || sent) && !u.following && !u.follow_pending && (
             <span className="text-xs text-agora-400 flex items-center gap-1"><Clock size={12} /> Pending</span>
           )}
           {u.friendship_status === 'pending_incoming' && (
             <Link to={`/profile/${u.username}`} className="text-xs text-agora-600 hover:underline">Respond</Link>
           )}
-          {!u.friendship_status && !sent && (
+          {!u.friendship_status && !u.following && !u.follow_pending && !sent && (
             <button onClick={handleAdd} disabled={addPending}
               className="btn-primary text-xs py-1 px-2.5 flex items-center gap-1">
               <UserPlus size={12} /> Add
@@ -411,7 +418,7 @@ function ResultGroup({ title, count, children }: { title: string, count: number,
 function BlueskyActorResult({ actor: a, onFollow, followPending }: {
   actor: any, onFollow: () => void, followPending: boolean
 }) {
-  const [followed, setFollowed] = useState(false)
+  const [followed, setFollowed] = useState(!!a.following)
   const handleFollow = () => { setFollowed(true); onFollow() }
 
   return (

@@ -1878,4 +1878,43 @@ var schema = []string{
 		WHERE expo_push_token != ''
 		ORDER BY expo_push_token, updated_at DESC
 		ON CONFLICT (token) DO NOTHING`,
+
+	// AGORA-423: a Find Friends suggestion the viewer waved away. kind says
+	// which network the target belongs to ('user' for a local account id,
+	// 'peer' for username@instance on a federated Agora instance, 'fediverse'
+	// for an actor URL, 'bluesky' for a DID), and target is that network's key
+	// for the person. Not a foreign key because three of the four are not rows
+	// here at all.
+	`CREATE TABLE IF NOT EXISTS suggestion_dismissals (
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		kind       VARCHAR(20) NOT NULL,
+		target     TEXT        NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, kind, target)
+	)`,
+
+	// AGORA-429: a post the user saved to come back to. Private to the user and
+	// never federated. Cascades on both sides, so a deleted post or account
+	// leaves nothing behind.
+	`CREATE TABLE IF NOT EXISTS bookmarks (
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_bookmarks_user_created ON bookmarks(user_id, created_at DESC)`,
+
+	// AGORA-428: words a user has muted from their timelines. pattern is the
+	// whole-word regex built from keyword when the row is written, so feed
+	// queries never escape user text. expires_at NULL means forever; a lapsed
+	// row is ignored by the feed and swept out the next time one is added.
+	`CREATE TABLE IF NOT EXISTS keyword_mutes (
+		id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		keyword    TEXT        NOT NULL,
+		pattern    TEXT        NOT NULL,
+		expires_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_keyword_mutes_user_keyword ON keyword_mutes(user_id, lower(keyword))`,
 }

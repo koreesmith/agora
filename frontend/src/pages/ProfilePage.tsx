@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
 import { usersApi, feedApi, friendsApi, albumsApi, dmApi, blocksApi, federationApi, atprotoApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useChatStore } from '../store/chat'
@@ -39,11 +39,36 @@ export default function ProfilePage() {
   const isSelf = me?.id === profile?.id || me?.username === username
   const canSeeTimeline = isSelf || (!profile?.hide_timeline && (!profile?.profile_private || profile?.friend_status === 'accepted'))
 
-  const { data: postsData } = useQuery({
+  // AGORA-424: the posts tab loads a page at a time and fetches the next one
+  // as the sentinel below the list scrolls into view, like the main feed.
+  const POSTS_PAGE_SIZE = 20
+  const postsBottomRef = useRef<HTMLDivElement>(null)
+  const {
+    data: postsData,
+    fetchNextPage: fetchMorePosts,
+    hasNextPage: hasMorePosts,
+    isFetchingNextPage: loadingMorePosts,
+    isFetchNextPageError: morePostsFailed,
+  } = useInfiniteQuery({
     queryKey: ['user-posts', username],
-    queryFn: () => feedApi.getUserPosts(username!).then(r => r.data),
+    queryFn: ({ pageParam = 0 }) =>
+      feedApi.getUserPosts(username!, { offset: pageParam, limit: POSTS_PAGE_SIZE }).then(r => r.data),
+    getNextPageParam: (last, pages) => last.posts?.length === POSTS_PAGE_SIZE ? pages.length * POSTS_PAGE_SIZE : undefined,
+    initialPageParam: 0,
     enabled: !!profile && canSeeTimeline && tab === 'posts',
   })
+
+  // A failed page stops auto-loading (otherwise the sentinel, still in view,
+  // would retry in a tight loop); the Retry button below drives it instead.
+  useEffect(() => {
+    const el = postsBottomRef.current
+    if (!el || !hasMorePosts || loadingMorePosts || morePostsFailed) return
+    const obs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) fetchMorePosts()
+    }, { rootMargin: '400px' })
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [hasMorePosts, loadingMorePosts, morePostsFailed, fetchMorePosts, tab, postsData])
 
   // Photos/Wall require auth — the tabs are hidden for guests, but also
   // gate the queries so a stale tab state can't fire an unauthenticated request.
@@ -247,7 +272,11 @@ export default function ProfilePage() {
     && !profile.following && !profile.follows_back
 
   const albums: any[] = albumsData?.albums ?? []
-  const posts: any[]  = postsData?.posts ?? []
+  // Offset paging can repeat a post when a new one is published mid-scroll,
+  // so de-duplicate by id across pages.
+  const posts: any[]  = Array.from(
+    new Map((postsData?.pages.flatMap(pg => pg.posts ?? []) ?? []).map((p: any) => [p.id, p])).values()
+  )
 
   return (
     <>
@@ -531,7 +560,16 @@ export default function ProfilePage() {
                 <span><strong className="text-agora-800 dark:text-agora-200">{profile.remote_following_count ?? 0}</strong> following</span>
               </>
             ) : (
-              <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+              <>
+                <span><strong className="text-agora-800 dark:text-agora-200">{profile.friend_count || 0}</strong> friends</span>
+                {/* AGORA-422: totals across Agora, the Fediverse and Bluesky */}
+                {profile.follower_count != null && (
+                  <span><strong className="text-agora-800 dark:text-agora-200">{profile.follower_count}</strong> followers</span>
+                )}
+                {profile.following_count != null && (
+                  <span><strong className="text-agora-800 dark:text-agora-200">{profile.following_count}</strong> following</span>
+                )}
+              </>
             )}
             {profile.location && <span>{profile.location}</span>}
             {profile.website && <a href={profile.website} className="text-agora-600 hover:underline" target="_blank" rel="noreferrer">{profile.website}</a>}
@@ -580,6 +618,14 @@ export default function ProfilePage() {
         <div className="space-y-4">
           {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts`} />)}
           {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
+          <div ref={postsBottomRef} className="h-4" />
+          {loadingMorePosts && <div className="text-center text-agora-400 text-sm py-2">Loading more…</div>}
+          {morePostsFailed && !loadingMorePosts && (
+            <div className="text-center text-sm py-2">
+              <p className="text-red-500">Could not load more posts.</p>
+              <button onClick={() => fetchMorePosts()} className="btn-secondary text-xs mt-2">Retry</button>
+            </div>
+          )}
         </div>
       ) : tab === 'wall' ? (
         <div className="space-y-4">

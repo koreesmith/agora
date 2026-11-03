@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bluesky-social/indigo/api/bsky"
+	"github.com/lib/pq"
 	"github.com/bluesky-social/indigo/xrpc"
 
 	"github.com/agora-social/agora/internal/auth"
@@ -66,6 +67,28 @@ func (s *Service) SearchBlueskyActors(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		AvatarURL   string `json:"avatar_url"`
 		Description string `json:"description"`
+		// AGORA-432: the viewer already follows this account.
+		Following bool `json:"following"`
+	}
+
+	// One lookup for the whole page of hits rather than one per actor.
+	followed := map[string]bool{}
+	if len(out.Actors) > 0 {
+		dids := make([]string, 0, len(out.Actors))
+		for _, a := range out.Actors {
+			if a != nil {
+				dids = append(dids, a.Did)
+			}
+		}
+		if rows, err := s.db.Query(`SELECT remote_did FROM at_following WHERE local_user_id = $1 AND remote_did = ANY($2)`, viewerID, pq.Array(dids)); err == nil {
+			for rows.Next() {
+				var did string
+				if rows.Scan(&did) == nil {
+					followed[did] = true
+				}
+			}
+			rows.Close()
+		}
 	}
 
 	results := []actorResult{}
@@ -80,7 +103,7 @@ func (s *Service) SearchBlueskyActors(w http.ResponseWriter, r *http.Request) {
 		if s.isBlueskyActorBlocked(a.Did, a.Handle) {
 			continue
 		}
-		res := actorResult{DID: a.Did, Handle: a.Handle}
+		res := actorResult{DID: a.Did, Handle: a.Handle, Following: followed[a.Did]}
 		if a.DisplayName != nil {
 			res.DisplayName = *a.DisplayName
 		}

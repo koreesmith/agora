@@ -67,6 +67,9 @@ type atprotoSyncer interface {
 	// package from needing to import internal/atproto's types, matching
 	// this interface's existing primitive-only convention.
 	SearchActorsForMention(ctx context.Context, viewerID, q string, limit int) (handles, displayNames, avatarURLs []string, disabled bool)
+	// SuggestFollows returns Bluesky accounts to offer in Find Friends
+	// (AGORA-423), best first, as parallel slices like the method above.
+	SuggestFollows(ctx context.Context, viewerID string, limit int) (dids, handles, displayNames, avatarURLs, bios, reasons []string)
 }
 
 type Service struct {
@@ -93,6 +96,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/users/me/delete-immediately", s.DeleteImmediately)
 	r.Delete("/users/me/push-token",      s.RemovePushToken) // AGORA-420
 	r.Get("/users/discover",              s.Discover)
+	r.Post("/users/discover/dismiss",     s.DismissSuggestion) // AGORA-423
 	r.Get("/users/mention-search",        s.MentionSearch)
 	r.Get("/mention-search",              s.UnifiedMentionSearch) // groups + pages + users
 	r.Post("/users/{username}/notify",    s.EnablePostNotify)
@@ -172,6 +176,12 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		RemoteFollowerCount  *int `json:"remote_follower_count,omitempty"`
 		RemoteFollowingCount *int `json:"remote_following_count,omitempty"`
 		RemotePostCount      *int `json:"remote_post_count,omitempty"`
+		// AGORA-422: a local account's follower/following totals across every
+		// network it's on: friends (mutual, so counted on both sides), plus
+		// fediverse and Bluesky. nil for remote accounts, which use the
+		// Remote* live counts above.
+		FollowerCount  *int `json:"follower_count,omitempty"`
+		FollowingCount *int `json:"following_count,omitempty"`
 		// AGORA-258: custom emoji (shortcode -> image URL) referenced in
 		// DisplayName/Bio, sourced from the actor's own "tag" array at
 		// ingestion time.
@@ -300,6 +310,19 @@ func (s *Service) GetProfile(w http.ResponseWriter, r *http.Request) {
 		SELECT COUNT(*) FROM friendships
 		WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
 	`, u.ID).Scan(&u.FriendCount)
+
+	// AGORA-422: only a local account's graph is ours to total. Pending
+	// fediverse follows are not follows yet, so they are left out.
+	if !u.IsRemote {
+		var apFollowers, atFollowers, apFollowing, atFollowing int
+		s.db.QueryRow(`SELECT COUNT(*) FROM ap_followers WHERE followed_user_id = $1`, u.ID).Scan(&apFollowers)
+		s.db.QueryRow(`SELECT COUNT(*) FROM at_followers WHERE local_user_id = $1`, u.ID).Scan(&atFollowers)
+		s.db.QueryRow(`SELECT COUNT(*) FROM ap_following WHERE follower_user_id = $1 AND accepted = true`, u.ID).Scan(&apFollowing)
+		s.db.QueryRow(`SELECT COUNT(*) FROM at_following WHERE local_user_id = $1`, u.ID).Scan(&atFollowing)
+		followers := u.FriendCount + apFollowers + atFollowers
+		following := u.FriendCount + apFollowing + atFollowing
+		u.FollowerCount, u.FollowingCount = &followers, &following
+	}
 
 	// Post notification status
 	if viewerID != "" && viewerID != u.ID {
@@ -680,124 +703,6 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 var _ = sql.ErrNoRows
-
-// ── Discover ──────────────────────────────────────────────────────────────────
-
-type DiscoverUser struct {
-	ID             string   `json:"id"`
-	Username       string   `json:"username"`
-	DisplayName    string   `json:"display_name"`
-	AvatarURL      string   `json:"avatar_url"`
-	Bio            string   `json:"bio"`
-	MutualCount    int      `json:"mutual_count"`
-	MutualFriends  []string `json:"mutual_friends"`
-	FriendStatus   string   `json:"friend_status"` // "", "pending", "pending_incoming"
-}
-
-func (s *Service) Discover(w http.ResponseWriter, r *http.Request) {
-	userID := auth.UserIDFromCtx(r.Context())
-	if userID == "" {
-		writeError(w, 401, "unauthorized")
-		return
-	}
-
-	rows, err := s.db.Query(`
-		WITH my_friends AS (
-			SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END AS fid
-			FROM friendships
-			WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
-		)
-		SELECT u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.bio,''),
-		       COUNT(DISTINCT f.id) AS mutual_count,
-		       COALESCE((
-		           SELECT CASE
-		               WHEN fs.requester_id = $1 THEN 'pending'
-		               ELSE 'pending_incoming'
-		           END
-		           FROM friendships fs
-		           WHERE ((fs.requester_id = $1 AND fs.addressee_id = u.id)
-		               OR (fs.addressee_id = $1 AND fs.requester_id = u.id))
-		             AND fs.status = 'pending'
-		           LIMIT 1
-		       ), '') AS friend_status
-		FROM users u
-		LEFT JOIN friendships f ON f.status = 'accepted'
-			AND (
-				(f.requester_id = u.id AND f.addressee_id IN (SELECT fid FROM my_friends))
-				OR (f.addressee_id = u.id AND f.requester_id IN (SELECT fid FROM my_friends))
-			)
-		WHERE u.id != $1
-		  AND u.deletion_scheduled_at IS NULL
-		  AND u.email_verified = true
-		  AND u.is_remote = false
-		  AND u.id NOT IN (SELECT fid FROM my_friends)
-		GROUP BY u.id
-		ORDER BY mutual_count DESC, u.display_name
-		LIMIT 50
-	`, userID)
-	if err != nil {
-		writeError(w, 500, "db error")
-		return
-	}
-	defer rows.Close()
-
-	var results []DiscoverUser
-	for rows.Next() {
-		var u DiscoverUser
-		rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.MutualCount, &u.FriendStatus)
-		results = append(results, u)
-	}
-
-	// For each candidate, fetch up to 3 mutual friend display names
-	for i, u := range results {
-		mrows, err := s.db.Query(`
-			WITH my_friends AS (
-				SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END AS fid
-				FROM friendships WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
-			)
-			SELECT COALESCE(NULLIF(u2.display_name,''), u2.username)
-			FROM friendships f
-			JOIN users u2 ON u2.id = CASE
-				WHEN f.requester_id = $2 THEN f.addressee_id
-				ELSE f.requester_id
-			END
-			WHERE f.status = 'accepted'
-			  AND (f.requester_id = $2 OR f.addressee_id = $2)
-			  AND CASE WHEN f.requester_id = $2 THEN f.addressee_id ELSE f.requester_id END
-			      IN (SELECT fid FROM my_friends)
-			LIMIT 3
-		`, userID, u.ID)
-		if err == nil {
-			var names []string
-			for mrows.Next() {
-				var name string
-				mrows.Scan(&name)
-				names = append(names, name)
-			}
-			mrows.Close()
-			results[i].MutualFriends = names
-		}
-		if results[i].MutualFriends == nil {
-			results[i].MutualFriends = []string{}
-		}
-	}
-
-	if results == nil {
-		results = []DiscoverUser{}
-	}
-
-	// AGORA-364: a second, clearly separate source, users on instances this
-	// one is directly federated with. These are light previews, not local
-	// user rows, so they carry no id, mutual-friend, or friend-status
-	// information the way the local suggestions above do, adding one goes
-	// through the federated lookup first.
-	peerSuggestions := federation.SuggestPeerUsers(s.db)
-	if peerSuggestions == nil {
-		peerSuggestions = []federation.PeerUserSuggestion{}
-	}
-
-	writeJSON(w, 200, map[string]any{"users": results, "federated_suggestions": peerSuggestions})
-}
 
 // ── Mention search (for @tagging autocomplete) ────────────────────────────────
 

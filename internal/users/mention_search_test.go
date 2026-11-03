@@ -25,6 +25,9 @@ func (s *stubAtprotoSyncer) FollowsMe(viewerUserID, theirDID string) bool { retu
 func (s *stubAtprotoSyncer) GetRemoteActorStats(did string) (followers, following, posts int, bio string, ok bool) {
 	return 0, 0, 0, "", false
 }
+func (s *stubAtprotoSyncer) SuggestFollows(ctx context.Context, viewerID string, limit int) (dids, handles, displayNames, avatarURLs, bios, reasons []string) {
+	return
+}
 func (s *stubAtprotoSyncer) SearchActorsForMention(ctx context.Context, viewerID, q string, limit int) (handles, displayNames, avatarURLs []string, disabled bool) {
 	return s.handles, s.displayNames, s.avatarURLs, s.disabled
 }

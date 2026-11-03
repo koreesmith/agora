@@ -1,6 +1,7 @@
 package media
 
 import (
+	"math"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -168,9 +169,15 @@ func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, e
 		os.Remove(rawPath)
 		return "", fmt.Errorf("could not read video — ensure it is a valid MP4, MOV, AVI, MKV, or WebM file")
 	}
-	if dur > float64(maxVideoDurationSec) {
+	// AGORA-439: an optional trim and cover frame. The length limit applies to
+	// the part that is kept, so a long video can be cut down to size.
+	edit, eerr := parseVideoEdit(
+		r.FormValue("trim_start_ms"), r.FormValue("trim_end_ms"), r.FormValue("cover_ms"),
+		dur, maxVideoDurationSec,
+	)
+	if eerr != nil {
 		os.Remove(rawPath)
-		return "", fmt.Errorf("video is too long (max 2 minutes — this video is %.0f seconds)", dur)
+		return "", eerr
 	}
 
 	id := uuid.New().String()
@@ -182,7 +189,7 @@ func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, e
 		return "", fmt.Errorf("internal error")
 	}
 
-	go s.runTranscode(jobID, rawPath, id)
+	go s.runTranscode(jobID, rawPath, id, edit)
 	return jobID, nil
 }
 
@@ -190,7 +197,7 @@ func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, e
 // the outcome on the job row. The output is written to a temp file and atomically
 // renamed into place only on success, so the served URL never points at a
 // partially-written (unplayable) file.
-func (s *Service) runTranscode(jobID, rawPath, id string) {
+func (s *Service) runTranscode(jobID, rawPath, id string, edit videoEdit) {
 	defer os.Remove(rawPath)
 
 	// Bound concurrency so we don't run more CPU-saturating ffmpeg jobs than the
@@ -210,8 +217,18 @@ func (s *Service) runTranscode(jobID, rawPath, id string) {
 	// -pix_fmt yuv420p forces 4:2:0 chroma: libx264 otherwise preserves the
 	// source pixel format, and browsers cannot decode 4:4:4/4:2:2 H.264, so a
 	// non-4:2:0 source would transcode "successfully" yet refuse to play.
-	ffmpegArgs := []string{
-		"-i", rawPath,
+	// AGORA-439: a trim is applied here, during the one transcode, rather than
+	// as a second pass. -ss before -i seeks in the input; -t after it limits
+	// the output's length.
+	ffmpegArgs := []string{}
+	if edit.Trimmed {
+		ffmpegArgs = append(ffmpegArgs, "-ss", fmt.Sprintf("%.3f", edit.StartSec))
+	}
+	ffmpegArgs = append(ffmpegArgs, "-i", rawPath)
+	if edit.Trimmed {
+		ffmpegArgs = append(ffmpegArgs, "-t", fmt.Sprintf("%.3f", edit.LenSec))
+	}
+	ffmpegArgs = append(ffmpegArgs,
 		"-vf", "scale=-2:min(720\\,ih)",
 		"-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
 		"-pix_fmt", "yuv420p",
@@ -219,7 +236,7 @@ func (s *Service) runTranscode(jobID, rawPath, id string) {
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		"-y", tmpOut,
-	}
+	)
 	if out, cerr := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs...).CombinedOutput(); cerr != nil {
 		os.Remove(tmpOut)
 		log.Printf("media: transcode job %s failed: %v — %s", jobID, cerr, strings.TrimSpace(string(out)))
@@ -235,24 +252,41 @@ func (s *Service) runTranscode(jobID, rawPath, id string) {
 		return
 	}
 
-	// Generate poster thumbnail at 1 second — non-fatal; thumbnail is optional.
-	thumbArgs := []string{
-		"-i", finalOut,
-		"-ss", "1", "-vframes", "1",
-		"-vf", "scale=-2:320",
-		"-y", thumbPath,
-	}
-	thumbURL := ""
-	if err := exec.CommandContext(ctx, "ffmpeg", thumbArgs...).Run(); err == nil {
-		thumbURL = fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id)
-	}
-
 	// AGORA-437: the shape of what was actually produced (after ffmpeg's own
 	// rotation handling), so a player can size it before it loads. Not fatal:
 	// a video that can't be probed still plays, it just has no dimensions.
 	meta, perr := ProbeVideo(finalOut)
 	if perr != nil {
 		log.Printf("media: transcode job %s: could not probe output: %v", jobID, perr)
+	}
+
+	// Poster thumbnail, non-fatal; it is optional. AGORA-439: the frame the
+	// person picked, as a time within the clip. Otherwise the usual frame at
+	// one second (or the first frame, for a clip shorter than that, which used
+	// to end up with no thumbnail at all). A pick outside the clip was already
+	// dropped when the upload was checked.
+	thumbAt := 1.0
+	if meta.DurationMs > 0 && float64(meta.DurationMs)/1000 <= 1.0 {
+		thumbAt = 0
+	}
+	if edit.HasCover {
+		thumbAt = edit.CoverSec
+		if meta.DurationMs > 0 && thumbAt >= float64(meta.DurationMs)/1000 {
+			// The output ended up a touch shorter than the request; stay
+			// inside it so the frame grab doesn't come back empty.
+			thumbAt = math.Max(0, float64(meta.DurationMs)/1000-0.1)
+		}
+	}
+	thumbArgs := []string{
+		"-ss", fmt.Sprintf("%.3f", thumbAt),
+		"-i", finalOut,
+		"-vframes", "1",
+		"-vf", "scale=-2:320",
+		"-y", thumbPath,
+	}
+	thumbURL := ""
+	if err := exec.CommandContext(ctx, "ffmpeg", thumbArgs...).Run(); err == nil {
+		thumbURL = fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id)
 	}
 
 	videoURL := fmt.Sprintf("/uploads/videos/%s.mp4", id)

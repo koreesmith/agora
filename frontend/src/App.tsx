@@ -42,6 +42,7 @@ import PagesPage         from './pages/PagesPage'
 import PageProfilePage   from './pages/PageProfilePage'
 import PageSettingsPage  from './pages/PageSettingsPage'
 import ExplorePage       from './pages/ExplorePage'
+import ReelsPage         from './pages/ReelsPage'
 import WelcomePage       from './pages/WelcomePage'
 
 const qc = new QueryClient({
@@ -116,6 +117,7 @@ function AppRoutes() {
       </Route>
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
         <Route path="/feed"                    element={<FeedPage />} />
+        <Route path="/reels"                   element={<ReelsPage />} />
         <Route path="/connections"             element={<ConnectionsPage />} />
         {/* Old routes from before the Friends/Fediverse merge — kept as
             redirects so existing links and bookmarks still land somewhere. */}

@@ -388,6 +388,13 @@ export const instanceApi = {
   },
 }
 
+// AGORA-440: the Reels feed. tab is 'following' or 'discover'; cursor is the
+// previous page's next_cursor; include_viewed brings back watched videos.
+export const reelsApi = {
+  list:   (params: { tab: string, cursor?: string, limit?: number, include_viewed?: boolean }) => api.get('/reels', { params }),
+  viewed: (id: string) => api.post(`/reels/${id}/viewed`),
+}
+
 // ── Blocks ────────────────────────────────────────────────────────────────────
 export const blocksApi = {
   list:     ()                 => api.get('/blocks'),

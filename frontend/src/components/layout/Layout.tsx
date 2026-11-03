@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles, Compass, Bookmark } from 'lucide-react'
+import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles, Compass, Bookmark, Clapperboard } from 'lucide-react'
 import WhatsNewModal from '../common/WhatsNewModal'
 import { welcomeShownThisSession } from '../welcome/wizardSession'
 import SearchBar from './SearchBar'
@@ -67,6 +67,7 @@ export default function Layout() {
   //   Invite a Friend -> the same
   const nav = [
     { to: '/',                          icon: Home,           label: 'Feed' },
+    { to: '/reels',                     icon: Clapperboard,   label: 'Reels' },
     { to: '/notifications',             icon: Bell,           label: 'Notifications', badge: unread },
     { to: '/messages',                  icon: MessageCircle,  label: 'Messages',      badge: unreadDMs },
     { to: '/connections',               icon: Users,          label: 'Connections' },
@@ -87,6 +88,8 @@ export default function Layout() {
   // Shared by the topbar and <main> so the search field sits directly over the
   // content column instead of drifting out of line on the wider DM view.
   const contentWidth = location.pathname.startsWith('/messages') ? 'max-w-5xl' : 'max-w-2xl'
+  // AGORA-440: Reels runs edge to edge in a narrower column, with no padding.
+  const isReels = location.pathname === '/reels'
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full">
@@ -226,7 +229,7 @@ export default function Layout() {
           </div>
         </header>
 
-        <main className={`mx-auto px-4 py-6 ${contentWidth}`}>
+        <main className={isReels ? 'mx-auto max-w-[26rem]' : `mx-auto px-4 py-6 ${contentWidth}`}>
           <Outlet />
         </main>
       </div>

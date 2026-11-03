@@ -19,7 +19,7 @@ import MentionTextarea from './MentionTextarea'
 
 import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
 
-interface Post {
+export interface Post {
   id: string
   author_id: string
   author_username: string
@@ -110,6 +110,10 @@ interface Post {
   // Video (AGORA-119)
   video_url?: string
   video_thumb_url?: string
+  // AGORA-437: the video's size and length; absent while unknown
+  video_width?: number
+  video_height?: number
+  video_duration_ms?: number
   // Page attribution (AGORA-109)
   page_id?: string
   page_slug?: string

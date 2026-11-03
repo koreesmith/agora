@@ -85,3 +85,13 @@
   mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
 }
+
+
+/* AGORA-440: Reels fills the space under the top bar. dvh follows the mobile
+   browser's collapsing address bar; the vh line is the fallback. */
+.reels-viewport {
+  height: calc(100vh - 3.5rem);
+  height: calc(100dvh - 3.5rem);
+}
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

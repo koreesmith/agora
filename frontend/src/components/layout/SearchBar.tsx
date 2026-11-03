@@ -23,6 +23,16 @@ import CustomHandle from '../common/CustomHandle'
 // to find an account this instance hasn't cached yet.
 const MAX_PER_GROUP = 3
 
+// AGORA-432: who the viewer already follows or is friends with, so a result
+// does not look like a stranger.
+function relationshipLabel(u: any): string {
+  if (u.friendship_status === 'accepted') return 'Friends'
+  if (u.following) return 'Following'
+  if (u.follow_pending) return 'Requested'
+  if (u.friendship_status === 'pending') return 'Pending'
+  return ''
+}
+
 interface Props {
   // Layout's mobile drawer. The dropdown lives inside a sticky, z-indexed
   // header, so it can't paint over the drawer anyway, but leaving it open
@@ -255,6 +265,9 @@ export default function SearchBar({ menuOpen }: Props) {
                     <CustomHandle domain={u.custom_domain} />
                   </span>
                 </span>
+                {relationshipLabel(u) && (
+                  <span className="text-xs text-agora-400 flex-shrink-0">{relationshipLabel(u)}</span>
+                )}
               </Row>
             ))}
           </Group>

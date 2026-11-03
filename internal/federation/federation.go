@@ -502,7 +502,7 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "user not found on Bluesky, check the handle and try again")
 			return
 		}
-		s.writeLookedUpUser(w, localID)
+		s.writeLookedUpUser(w, auth.UserIDFromCtx(r.Context()), localID)
 		return
 	}
 
@@ -528,6 +528,9 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 			Bio         string `json:"bio"`
 			ID          string `json:"id"`
 			IsRemote    bool   `json:"is_remote"`
+			// AGORA-432: friendship_status, so a friend looked up by handle
+			// does not read as a stranger.
+			FriendStatus string `json:"friendship_status"`
 		}
 		s.db.QueryRow(`SELECT id, username, display_name, avatar_url, bio FROM users WHERE username = $1 AND is_remote = false AND deletion_scheduled_at IS NULL`, username).
 			Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio)
@@ -535,6 +538,7 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "user not found")
 			return
 		}
+		u.FriendStatus, _, _ = s.lookedUpRelationship(auth.UserIDFromCtx(r.Context()), u.ID)
 		writeJSON(w, 200, map[string]any{"user": u, "local": true})
 		return
 	}
@@ -563,22 +567,58 @@ func (s *Service) LookupUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeLookedUpUser(w, localID)
+	s.writeLookedUpUser(w, auth.UserIDFromCtx(r.Context()), localID)
 }
 
-func (s *Service) writeLookedUpUser(w http.ResponseWriter, localID string) {
+// lookedUpRelationship is the viewer's standing with a looked-up account
+// (AGORA-432): the same friendship_status vocabulary search results use, plus
+// whether they already follow it. Without it a lookup result always looked like
+// a stranger, even for somebody the viewer follows.
+func (s *Service) lookedUpRelationship(viewerID, userID string) (friendStatus string, following, followPending bool) {
+	s.db.QueryRow(`
+		SELECT COALESCE((
+		           SELECT CASE
+		               WHEN f.requester_id = $1 AND f.status = 'pending' THEN 'pending'
+		               WHEN f.addressee_id = $1 AND f.status = 'pending' THEN 'pending_incoming'
+		               WHEN f.status = 'accepted' THEN 'accepted'
+		               ELSE ''
+		           END
+		           FROM friendships f
+		           WHERE (f.requester_id = $1 AND f.addressee_id = u.id)
+		              OR (f.requester_id = u.id AND f.addressee_id = $1)
+		           LIMIT 1
+		       ), ''),
+		       (u.ap_actor_url != '' AND EXISTS (
+		           SELECT 1 FROM ap_following af
+		           WHERE af.follower_user_id = $1 AND af.followed_actor_url = u.ap_actor_url AND af.accepted))
+		       OR (u.atproto_remote_did != '' AND EXISTS (
+		           SELECT 1 FROM at_following atf
+		           WHERE atf.local_user_id = $1 AND atf.remote_did = u.atproto_remote_did)),
+		       u.ap_actor_url != '' AND EXISTS (
+		           SELECT 1 FROM ap_following af
+		           WHERE af.follower_user_id = $1 AND af.followed_actor_url = u.ap_actor_url AND NOT af.accepted)
+		FROM users u WHERE u.id = $2
+	`, viewerID, userID).Scan(&friendStatus, &following, &followPending)
+	return
+}
+
+func (s *Service) writeLookedUpUser(w http.ResponseWriter, viewerID, localID string) {
 	type Result struct {
-		ID          string `json:"id"`
-		Username    string `json:"username"`
-		DisplayName string `json:"display_name"`
-		AvatarURL   string `json:"avatar_url"`
-		Bio         string `json:"bio"`
-		IsRemote    bool   `json:"is_remote"`
-		Instance    string `json:"remote_instance"`
+		ID            string `json:"id"`
+		Username      string `json:"username"`
+		DisplayName   string `json:"display_name"`
+		AvatarURL     string `json:"avatar_url"`
+		Bio           string `json:"bio"`
+		IsRemote      bool   `json:"is_remote"`
+		Instance      string `json:"remote_instance"`
+		FriendStatus  string `json:"friendship_status"`
+		Following     bool   `json:"following"`
+		FollowPending bool   `json:"follow_pending"`
 	}
 	var u Result
 	s.db.QueryRow(`SELECT id, username, display_name, avatar_url, bio, is_remote, remote_instance FROM users WHERE id = $1`, localID).
 		Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL, &u.Bio, &u.IsRemote, &u.Instance)
+	u.FriendStatus, u.Following, u.FollowPending = s.lookedUpRelationship(viewerID, localID)
 
 	writeJSON(w, 200, map[string]any{"user": u, "local": false})
 }

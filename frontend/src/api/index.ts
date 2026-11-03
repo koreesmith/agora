@@ -410,6 +410,14 @@ export const bookmarksApi = {
   remove: (postId: string) => api.delete(`/posts/${postId}/bookmark`),
 }
 
+// AGORA-428: words the user has muted from their timelines. days omitted or 0
+// means forever.
+export const keywordMutesApi = {
+  list:   ()                                  => api.get('/keyword-mutes'),
+  add:    (keyword: string, days?: number)    => api.post('/keyword-mutes', { keyword, days: days || 0 }),
+  remove: (id: string)                        => api.delete(`/keyword-mutes/${id}`),
+}
+
 export const dmApi = {
   listConversations:  ()                                     => api.get('/conversations'),
   startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),

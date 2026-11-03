@@ -178,6 +178,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts/{id}/bookmark",               s.AddBookmark)    // AGORA-429
 	r.Delete("/posts/{id}/bookmark",             s.RemoveBookmark) // AGORA-429
 	r.Get("/bookmarks",                          s.ListBookmarks)  // AGORA-429
+	registerKeywordMuteRoutes(r, s)                                // AGORA-428
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
@@ -259,6 +260,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  -- as well as them from you.
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 			  AND p.author_id IN (
 			    SELECT friend_id FROM friend_group_members
 			    WHERE group_id = $4
@@ -323,6 +325,7 @@ func (s *Service) GetFeed(w http.ResponseWriter, r *http.Request) {
 			  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 			  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 			  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 			  AND (
 			    p.author_id = $1
 			    OR p.wall_user_id = $1
@@ -676,6 +679,7 @@ func (s *Service) execCustomFeed(w http.ResponseWriter, userID string, limit, of
 		  AND (p.wall_user_id IS NULL OR p.wall_status = 'approved')
 		  AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
 		  AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)
+			`+keywordMuteClause+`
 		  AND (
 		    p.author_id = $1
 		    OR p.wall_user_id = $1
@@ -781,7 +785,7 @@ func (s *Service) PublicFeed(w http.ResponseWriter, r *http.Request) {
 	blockClause := ""
 	if viewerID != "" {
 		blockClause = `AND NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id = $1 AND blocked_id = p.author_id) OR (blocker_id = p.author_id AND blocked_id = $1))
-		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id)`
+		               AND NOT EXISTS (SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = p.id) ` + keywordMuteClause
 	}
 
 	rows, err := s.db.Query(fmt.Sprintf(`

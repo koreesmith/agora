@@ -1903,4 +1903,18 @@ var schema = []string{
 		PRIMARY KEY (user_id, post_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_bookmarks_user_created ON bookmarks(user_id, created_at DESC)`,
+
+	// AGORA-428: words a user has muted from their timelines. pattern is the
+	// whole-word regex built from keyword when the row is written, so feed
+	// queries never escape user text. expires_at NULL means forever; a lapsed
+	// row is ignored by the feed and swept out the next time one is added.
+	`CREATE TABLE IF NOT EXISTS keyword_mutes (
+		id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		keyword    TEXT        NOT NULL,
+		pattern    TEXT        NOT NULL,
+		expires_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_keyword_mutes_user_keyword ON keyword_mutes(user_id, lower(keyword))`,
 }

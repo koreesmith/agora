@@ -1246,6 +1246,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.applyUploadedVideoMeta(id, userID, req.VideoURL) // AGORA-437
+
 	// Insert poll options if provided
 	for i, opt := range pollOpts {
 		s.db.Exec(`INSERT INTO poll_options (post_id, text, position) VALUES ($1, $2, $3)`, id, opt, i)
@@ -2940,6 +2942,12 @@ type Post struct {
 	// Video (AGORA-119)
 	VideoURL      string `json:"video_url,omitempty"`
 	VideoThumbURL string `json:"video_thumb_url,omitempty"`
+	// AGORA-437: the video's shape, so a player can reserve the right space
+	// before it loads. Filled in by markVideoMeta rather than scanned (see
+	// enrichCustomHandles for why), and omitted while unknown.
+	VideoWidth      int `json:"video_width,omitempty"`
+	VideoHeight     int `json:"video_height,omitempty"`
+	VideoDurationMs int `json:"video_duration_ms,omitempty"`
 	// Page attribution (AGORA-109)
 	PageID     *string `json:"page_id,omitempty"`
 	PageSlug   *string `json:"page_slug,omitempty"`
@@ -3085,6 +3093,7 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 		return
 	}
 	s.markPrivateAuthors(posts)
+	s.markVideoMeta(posts) // AGORA-437
 	mentions := make([][]string, len(posts))
 	var names []string
 	for i, p := range posts {
@@ -3128,6 +3137,62 @@ func (s *Service) markPrivateAuthors(posts []Post) {
 	}
 	for i := range posts {
 		posts[i].AuthorProfilePrivate = private[posts[i].AuthorID]
+	}
+}
+
+// applyUploadedVideoMeta (AGORA-437) gives a new video post the shape its
+// transcode job measured. It reads the job (scoped to this user and the exact
+// URL) rather than trusting the request, so clients need no change and can't
+// claim a size the file doesn't have. A post with no video, or one not made
+// by an upload of the user's own, is left alone.
+func (s *Service) applyUploadedVideoMeta(postID, userID, videoURL string) {
+	if videoURL == "" {
+		return
+	}
+	s.db.Exec(`
+		UPDATE posts SET video_width = j.video_width, video_height = j.video_height, video_duration_ms = j.video_duration_ms
+		FROM video_transcode_jobs j
+		WHERE posts.id = $1 AND j.user_id = $2 AND j.video_url = $3 AND j.status = 'done'
+	`, postID, userID, videoURL)
+}
+
+// markVideoMeta (AGORA-437) fills a video post's width, height and duration in
+// one query over the already-scanned posts, for the same reason
+// enrichCustomHandles avoids a join (the column list is repeated across a dozen
+// SELECTs that all have to stay positionally in step with scanPosts). Like
+// markPrivateAuthors it runs from enrichCustomHandles, so every feed path gets
+// it. Posts with no video, or whose shape isn't known, are left untouched.
+func (s *Service) markVideoMeta(posts []Post) {
+	ids := make([]string, 0, len(posts))
+	for _, p := range posts {
+		if p.VideoURL != "" {
+			ids = append(ids, p.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	rows, err := s.db.Query(
+		`SELECT id, video_width, video_height, video_duration_ms FROM posts
+		  WHERE id = ANY($1::uuid[]) AND (video_width > 0 OR video_duration_ms > 0)`, pq.Array(ids))
+	if err != nil {
+		log.Printf("feed: markVideoMeta: %v", err)
+		return
+	}
+	defer rows.Close()
+	type shape struct{ w, h, d int }
+	byID := map[string]shape{}
+	for rows.Next() {
+		var id string
+		var sh shape
+		if rows.Scan(&id, &sh.w, &sh.h, &sh.d) == nil {
+			byID[id] = sh
+		}
+	}
+	for i := range posts {
+		if sh, ok := byID[posts[i].ID]; ok {
+			posts[i].VideoWidth, posts[i].VideoHeight, posts[i].VideoDurationMs = sh.w, sh.h, sh.d
+		}
 	}
 }
 

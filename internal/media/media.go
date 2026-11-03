@@ -78,7 +78,13 @@ func NewService(db *store.DB, uploadDir string) *Service {
 	if db != nil {
 		db.Exec(`UPDATE video_transcode_jobs SET status='failed', error='video processing was interrupted — please try again', updated_at=NOW() WHERE status='processing'`)
 	}
-	return &Service{db: db, uploadDir: uploadDir}
+	svc := &Service{db: db, uploadDir: uploadDir}
+	// AGORA-437: videos uploaded before their dimensions were recorded get
+	// them filled in, in the background so startup isn't held up.
+	if db != nil {
+		go svc.BackfillVideoMeta()
+	}
+	return svc
 }
 
 func (s *Service) UploadDir() string { return s.uploadDir }
@@ -241,10 +247,19 @@ func (s *Service) runTranscode(jobID, rawPath, id string) {
 		thumbURL = fmt.Sprintf("/uploads/videos/%s_thumb.jpg", id)
 	}
 
+	// AGORA-437: the shape of what was actually produced (after ffmpeg's own
+	// rotation handling), so a player can size it before it loads. Not fatal:
+	// a video that can't be probed still plays, it just has no dimensions.
+	meta, perr := ProbeVideo(finalOut)
+	if perr != nil {
+		log.Printf("media: transcode job %s: could not probe output: %v", jobID, perr)
+	}
+
 	videoURL := fmt.Sprintf("/uploads/videos/%s.mp4", id)
 	s.db.Exec(
-		`UPDATE video_transcode_jobs SET status='done', video_url=$2, video_thumb_url=$3, updated_at=NOW() WHERE id=$1`,
-		jobID, videoURL, thumbURL,
+		`UPDATE video_transcode_jobs SET status='done', video_url=$2, video_thumb_url=$3,
+		        video_width=$4, video_height=$5, video_duration_ms=$6, updated_at=NOW() WHERE id=$1`,
+		jobID, videoURL, thumbURL, meta.Width, meta.Height, meta.DurationMs,
 	)
 }
 
@@ -263,20 +278,27 @@ func (s *Service) VideoJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
 
 	var status, videoURL, thumbURL, errMsg string
+	var meta VideoMeta
 	err := s.db.QueryRow(
-		`SELECT status, video_url, video_thumb_url, error FROM video_transcode_jobs WHERE id=$1 AND user_id=$2`,
+		`SELECT status, video_url, video_thumb_url, error, video_width, video_height, video_duration_ms
+		   FROM video_transcode_jobs WHERE id=$1 AND user_id=$2`,
 		jobID, userID,
-	).Scan(&status, &videoURL, &thumbURL, &errMsg)
+	).Scan(&status, &videoURL, &thumbURL, &errMsg, &meta.Width, &meta.Height, &meta.DurationMs)
 	if err != nil {
 		writeError(w, 404, "job not found")
 		return
 	}
 
-	writeJSON(w, 200, map[string]string{
-		"status":    status,
-		"url":       videoURL,
-		"thumb_url": thumbURL,
-		"error":     errMsg,
+	// AGORA-437: width, height and duration_ms are new and numeric; the four
+	// original fields are unchanged, so existing clients are unaffected.
+	writeJSON(w, 200, map[string]any{
+		"status":      status,
+		"url":         videoURL,
+		"thumb_url":   thumbURL,
+		"error":       errMsg,
+		"width":       meta.Width,
+		"height":      meta.Height,
+		"duration_ms": meta.DurationMs,
 	})
 }
 

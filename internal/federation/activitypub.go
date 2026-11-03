@@ -866,6 +866,15 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 		if thumbURL != "" {
 			video["icon"] = map[string]string{"type": "Image", "url": thumbURL}
 		}
+		// AGORA-437: lets a receiving app lay the video out before it loads.
+		if m := s.postVideoShape(postID); m.known() {
+			if m.Width > 0 && m.Height > 0 {
+				video["width"], video["height"] = m.Width, m.Height
+			}
+			if m.DurationMs > 0 {
+				video["duration"] = isoDurationFromMs(m.DurationMs)
+			}
+		}
 		existing, _ := note["attachment"].([]map[string]any)
 		note["attachment"] = append(existing, video)
 	}
@@ -1803,6 +1812,13 @@ type apAttachment struct {
 	MediaType string `json:"mediaType"`
 	URL       string `json:"url"`
 	Name      string `json:"name"` // the image description (AGORA-400)
+	// AGORA-437: a video's size and length, when the sender gives them. Raw
+	// because servers disagree on the type (a number, a string, or for the
+	// duration an ISO 8601 string) and an optional field must never be able
+	// to fail the whole Note; read with apInt and apDurationMs.
+	Width    json.RawMessage `json:"width,omitempty"`
+	Height   json.RawMessage `json:"height,omitempty"`
+	Duration json.RawMessage `json:"duration,omitempty"`
 }
 
 // apImageField (AGORA-308) decodes an ActivityStreams Image|Link property
@@ -2178,6 +2194,9 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// public, since that is what its author's own followers already saw.
 		visibility := friendsOnlyVisibility(note.Audience, isAddressedPublicly(note.To, note.CC))
 		postID := s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+		if postID != "" {
+			s.storeInboundVideoMeta(postID, matchVideoMeta(note.Attachment)) // AGORA-437
+		}
 
 		// AGORA-342: a list post is stored invisible and becomes visible only
 		// through this record. Written after the insert rather than before,
@@ -2284,6 +2303,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 	}
 	s.storeInboundImages(commentID, imageURLs, imageAlts)
 	s.storeInboundVideo(commentID, videoURL)
+	s.storeInboundVideoMeta(commentID, matchVideoMeta(note.Attachment)) // AGORA-437
 	s.storeHashtags(commentID, hashtagsFromAPTags(note.Tag)) // AGORA-213
 
 	// AGORA-340: this instance owns the thread, so it is the only party that
@@ -2373,7 +2393,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	logUnmatchedAttachments(verifiedActor, objectRaw, note.Attachment, imageURLs, videoURL)
 
 	s.db.Exec(`
-		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', edited_at = NOW(), emojis = $4
+		UPDATE posts SET content = $1, content_warning = $2, image_url = '', video_url = '', video_width = 0, video_height = 0, video_duration_ms = 0, edited_at = NOW(), emojis = $4
 		WHERE id = $3
 	`, HTMLToPlainText(note.Content), HTMLToPlainText(note.Summary), postID, emojisJSON(emojisFromAPTags(note.Tag)))
 	// Attachments are fully replaced, not merged — clear the old multi-image
@@ -2382,6 +2402,7 @@ func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMe
 	s.db.Exec(`DELETE FROM post_photos WHERE post_id = $1`, postID)
 	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
+	s.storeInboundVideoMeta(postID, matchVideoMeta(note.Attachment)) // AGORA-437
 	// AGORA-210: Mastodon re-sends a poll's full object (not a diff) as vote
 	// tallies change, so this is the mechanism that keeps an already-ingested
 	// poll's counts from going stale over its lifetime.

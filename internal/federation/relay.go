@@ -397,7 +397,7 @@ func (s *Service) ingestRelaySourcedNote(note *apRemoteNote) {
 	}
 	imageURLs, videoURL := matchAttachments(note.Attachment)
 	imageAlts := attachmentAlts(note.Attachment) // AGORA-400
-	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
+	s.ingestRelayedPost(note.AttributedTo, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, matchVideoMeta(note.Attachment), hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 }
 
 // fetchRemoteNoteSignedAsInstance dereferences a relay-announced post URL,
@@ -508,7 +508,7 @@ func (s *Service) getOrCreateRemoteAPUserAsInstance(actorURL string) (string, er
 // ON CONFLICT (remote_post_id, remote_instance) unique constraint on posts
 // is what actually dedupes a post forwarded by more than one subscribed
 // relay, or redelivered by the same one — no separate dedup table needed.
-func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs, imageAlts []string, videoURL string, tags []string, emojis map[string]string, publishedAt time.Time) {
+func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, imageURLs, imageAlts []string, videoURL string, videoShape videoMeta, tags []string, emojis map[string]string, publishedAt time.Time) {
 	if actorURL == "" || noteID == "" {
 		return
 	}
@@ -533,5 +533,6 @@ func (s *Service) ingestRelayedPost(actorURL, noteID, content, summary string, i
 	}
 	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
+	s.storeInboundVideoMeta(postID, videoShape) // AGORA-437
 	s.storeHashtags(postID, tags) // AGORA-213
 }

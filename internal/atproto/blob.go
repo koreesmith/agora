@@ -184,10 +184,18 @@ func (s *Service) buildVideoEmbed(ctx context.Context, bs *pgBlockstore, postID 
 		log.Printf("atproto: could not upload video blob for %s: %v", url, err)
 		return nil
 	}
-	return &bsky.FeedPost_Embed{EmbedVideo: &bsky.EmbedVideo{
+	embed := &bsky.EmbedVideo{
 		LexiconTypeID: "app.bsky.embed.video",
 		Video:         blob,
-	}}
+	}
+	// AGORA-437: lets Bluesky clients reserve the right shape before the video
+	// loads. Left off when the size isn't known, as before.
+	var w, h int64
+	s.db.QueryRowContext(ctx, `SELECT video_width, video_height FROM posts WHERE id = $1`, postID).Scan(&w, &h)
+	if w > 0 && h > 0 {
+		embed.AspectRatio = &bsky.EmbedDefs_AspectRatio{Width: w, Height: h}
+	}
+	return &bsky.FeedPost_Embed{EmbedVideo: embed}
 }
 
 // buildMediaEmbed picks whichever of image or video a post actually has

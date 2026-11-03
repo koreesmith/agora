@@ -695,6 +695,16 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_video_jobs_user ON video_transcode_jobs(user_id, created_at DESC)`,
 
+	// ── AGORA-437: a video's shape, so players can lay it out before it loads ──
+	// 0 means unknown (older videos until the startup backfill reaches them,
+	// and remote videos whose source doesn't say).
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_width       INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_height      INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_duration_ms INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_width       INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_height      INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_duration_ms INTEGER NOT NULL DEFAULT 0`,
+
 	// AGORA-145: per-account opt-out of standard ActivityPub federation,
 	// separate from the instance-wide federation_enabled toggle.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,

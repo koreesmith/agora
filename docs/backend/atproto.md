@@ -98,7 +98,7 @@ Embed handling (`storeInboundEmbed` and friends):
 | Bluesky embed | Agora storage |
 |---|---|
 | `app.bsky.embed.images` | `posts.image_url` / `post_photos` |
-| `app.bsky.embed.video` | `posts.video_url`/`video_thumb_url` (an HLS `.m3u8` playlist, not an mp4) |
+| `app.bsky.embed.video` | `posts.video_url`/`video_thumb_url` (an HLS `.m3u8` playlist, not an mp4), and `posts.video_width`/`video_height` from the embed's `aspectRatio` when present. Bluesky doesn't send a length, so `video_duration_ms` stays 0. An outgoing video record carries `aspectRatio` when Agora knows the video's size |
 | `app.bsky.embed.external` | `posts.link_url/link_title/link_description/link_image/link_domain` — Bluesky has no distinct GIF embed type, so a GIF picked from Bluesky's own composer is just an external link embed too |
 | `app.bsky.embed.record` (quote post) | The quoted post is ingested as a real local post and `repost_of_id` is set to it — one level deep only, no recursive quote-of-quote resolution |
 | `#tag` richtext facets | `post_hashtags` rows, lowercased and deduped |

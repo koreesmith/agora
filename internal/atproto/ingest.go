@@ -336,7 +336,16 @@ func (s *Service) storeInboundVideo(postID string, v *bsky.EmbedVideo_View) {
 	if v.Thumbnail != nil {
 		thumb = *v.Thumbnail
 	}
-	s.db.Exec(`UPDATE posts SET video_url = $1, video_thumb_url = $2 WHERE id = $3`, v.Playlist, thumb, postID)
+	// AGORA-437: Bluesky gives the aspect ratio but not the length. The ratio
+	// is all a player needs to lay the video out; a missing or nonsensical one
+	// leaves the size unknown.
+	var w, h int
+	if v.AspectRatio != nil && v.AspectRatio.Width > 0 && v.AspectRatio.Height > 0 &&
+		v.AspectRatio.Width <= 100000 && v.AspectRatio.Height <= 100000 {
+		w, h = int(v.AspectRatio.Width), int(v.AspectRatio.Height)
+	}
+	s.db.Exec(`UPDATE posts SET video_url = $1, video_thumb_url = $2, video_width = $4, video_height = $5 WHERE id = $3`,
+		v.Playlist, thumb, postID, w, h)
 }
 
 // textWithLinks (AGORA-375) is the plain text Agora stores for an ingested

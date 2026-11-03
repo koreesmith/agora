@@ -207,6 +207,7 @@ func (s *Service) storeStandaloneRemoteNote(note *apRemoteNote) (string, bool) {
 	}
 	s.storeInboundImages(postID, imageURLs, imageAlts)
 	s.storeInboundVideo(postID, videoURL)
+	s.storeInboundVideoMeta(postID, matchVideoMeta(note.Attachment)) // AGORA-437
 	s.storeHashtags(postID, hashtagsFromAPTags(note.Tag))
 	return postID, true
 }

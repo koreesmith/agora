@@ -1892,4 +1892,15 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (user_id, kind, target)
 	)`,
+
+	// AGORA-429: a post the user saved to come back to. Private to the user and
+	// never federated. Cascades on both sides, so a deleted post or account
+	// leaves nothing behind.
+	`CREATE TABLE IF NOT EXISTS bookmarks (
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_bookmarks_user_created ON bookmarks(user_id, created_at DESC)`,
 }

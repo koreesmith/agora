@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles, Compass } from 'lucide-react'
+import { Home, Bell, Users, Settings, Shield, LogOut, User, Menu, X, Sun, Moon, Users2, MessageCircle, Rss, BookOpen, HelpCircle, Sparkles, Compass, Bookmark } from 'lucide-react'
 import WhatsNewModal from '../common/WhatsNewModal'
 import { welcomeShownThisSession } from '../welcome/wizardSession'
 import SearchBar from './SearchBar'
@@ -73,6 +73,7 @@ export default function Layout() {
     { to: '/groups',                    icon: Users2,         label: 'Groups' },
     { to: '/pages',                     icon: BookOpen,       label: 'Pages' },
     { to: '/my-feeds',                  icon: Rss,            label: 'My Feeds' },
+    { to: '/bookmarks',                 icon: Bookmark,       label: 'Bookmarks' },
     { to: `/profile/${user?.username}`, icon: User,           label: 'Profile',       photo: user?.avatar_url },
     { to: '/settings',                  icon: Settings,       label: 'Settings' },
     ...(user?.role === 'admin' || user?.role === 'moderator'

@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff, Bookmark } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { feedApi, friendsApi, hiddenPostsApi } from '../../api'
+import { feedApi, friendsApi, hiddenPostsApi, bookmarksApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow, format } from 'date-fns'
 import CommentsSection, { renderContent, renderName } from './CommentsSection'
@@ -84,6 +84,8 @@ interface Post {
   repost_count: number
   liked: boolean
   reposted: boolean
+  // AGORA-429: the viewer saved this post.
+  bookmarked?: boolean
   // Reactions (AGORA-25)
   reaction_count: number
   my_reaction: string
@@ -551,6 +553,18 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
   const hide = useMutation({
     mutationFn: () => hiddenPostsApi.hide(post.id),
     onSuccess: invalidate,
+  })
+
+  // AGORA-429: the saved state is optimistic and re-synced from the post when
+  // the list reloads. Only the bookmarks list is refetched, not the timeline
+  // the card is sitting in, so saving a post never reshuffles the feed.
+  const [bookmarked, setBookmarked] = useState(!!post.bookmarked)
+  useEffect(() => setBookmarked(!!post.bookmarked), [post.bookmarked])
+  const toggleBookmark = useMutation({
+    mutationFn: (save: boolean) => save ? bookmarksApi.add(post.id) : bookmarksApi.remove(post.id),
+    onMutate: (save: boolean) => setBookmarked(save),
+    onError: (_e, save) => setBookmarked(!save),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['bookmarks'] }),
   })
 
   const edit = useMutation({
@@ -1301,6 +1315,19 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                   Repost beside it. Guests get it too, since a public post's
                   permalink works for them. */}
               {isShareable(post) && <ShareMenu post={post} />}
+
+              {/* AGORA-429: save for later. Signed-in only, since a bookmark
+                  belongs to an account. */}
+              {user && (
+                <button
+                  onClick={() => toggleBookmark.mutate(!bookmarked)}
+                  title={bookmarked ? 'Remove bookmark' : 'Bookmark'}
+                  aria-label={bookmarked ? 'Remove bookmark' : 'Bookmark'}
+                  aria-pressed={bookmarked}
+                  className={`flex items-center gap-1.5 text-sm transition-colors ${bookmarked ? 'text-agora-700 dark:text-agora-200' : 'hover:text-agora-700 dark:hover:text-agora-200'}`}>
+                  <Bookmark size={16} fill={bookmarked ? 'currentColor' : 'none'} />
+                </button>
+              )}
             </div>
 
             {/* Reaction summary bar */}

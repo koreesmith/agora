@@ -402,6 +402,14 @@ export const hiddenPostsApi = {
   unhide: (postId: string) => api.delete(`/posts/${postId}/hide`),
 }
 
+// AGORA-429: saving a post to come back to. Private to the user; nothing is
+// federated and the author is not told.
+export const bookmarksApi = {
+  list:   (params?: any)   => api.get('/bookmarks', { params }),
+  add:    (postId: string) => api.post(`/posts/${postId}/bookmark`),
+  remove: (postId: string) => api.delete(`/posts/${postId}/bookmark`),
+}
+
 export const dmApi = {
   listConversations:  ()                                     => api.get('/conversations'),
   startConversation:  (username: string, message?: string)  => api.post('/conversations', { username, message }),

@@ -35,6 +35,7 @@ import AlbumPage           from './pages/AlbumPage'
 import MessagesPage        from './pages/MessagesPage'
 import InviteFriendPage   from './pages/InviteFriendPage'
 import CustomFeedsPage    from './pages/CustomFeedsPage'
+import BookmarksPage      from './pages/BookmarksPage'
 import CustomFeedViewPage from './pages/CustomFeedViewPage'
 import CreatePagePage     from './pages/CreatePagePage'
 import PagesPage         from './pages/PagesPage'
@@ -135,6 +136,7 @@ function AppRoutes() {
         <Route path="/messages/:convId"        element={<MessagesPage />} />
         <Route path="/invite-friend"           element={<InviteFriendPage />} />
         <Route path="/my-feeds"               element={<CustomFeedsPage />} />
+        <Route path="/bookmarks"              element={<BookmarksPage />} />
         <Route path="/my-feeds/:id"           element={<CustomFeedViewPage />} />
         <Route path="/pages"                  element={<PagesPage />} />
         <Route path="/pages/new"              element={<CreatePagePage />} />

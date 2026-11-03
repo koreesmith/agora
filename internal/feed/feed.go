@@ -175,6 +175,9 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Post("/posts/{id}/react",                  s.ReactPost)
 	r.Delete("/posts/{id}/react",                s.UnreactPost)
 	r.Post("/posts/{id}/repost",                 s.Repost)
+	r.Post("/posts/{id}/bookmark",               s.AddBookmark)    // AGORA-429
+	r.Delete("/posts/{id}/bookmark",             s.RemoveBookmark) // AGORA-429
+	r.Get("/bookmarks",                          s.ListBookmarks)  // AGORA-429
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
@@ -2906,6 +2909,8 @@ type Post struct {
 	RepostCount    int     `json:"repost_count"`
 	Liked          bool    `json:"liked"`
 	Reposted       bool    `json:"reposted"`
+	// AGORA-429: the viewer has saved this post. Filled in by enrichReactions.
+	Bookmarked     bool    `json:"bookmarked"`
 	// Reactions (AGORA-25)
 	ReactionCount  int     `json:"reaction_count"`
 	MyReaction     string  `json:"my_reaction"` // empty string = no reaction
@@ -3414,6 +3419,19 @@ func (s *Service) enrichReactions(posts []Post, userID string) {
 					posts[idx].MyReaction = rtype
 				}
 			}
+		}
+
+		// AGORA-429: which of these the viewer has bookmarked.
+		if brows, err := s.db.Query(`SELECT post_id FROM bookmarks WHERE user_id = $1 AND post_id = ANY($2::uuid[])`, userID, pq.Array(ids)); err == nil {
+			for brows.Next() {
+				var postID string
+				if brows.Scan(&postID) == nil {
+					if idx, ok := idxMap[postID]; ok {
+						posts[idx].Bookmarked = true
+					}
+				}
+			}
+			brows.Close()
 		}
 
 		// For posts where user has no reactions entry, check legacy likes

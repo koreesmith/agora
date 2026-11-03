@@ -1878,4 +1878,18 @@ var schema = []string{
 		WHERE expo_push_token != ''
 		ORDER BY expo_push_token, updated_at DESC
 		ON CONFLICT (token) DO NOTHING`,
+
+	// AGORA-423: a Find Friends suggestion the viewer waved away. kind says
+	// which network the target belongs to ('user' for a local account id,
+	// 'peer' for username@instance on a federated Agora instance, 'fediverse'
+	// for an actor URL, 'bluesky' for a DID), and target is that network's key
+	// for the person. Not a foreign key because three of the four are not rows
+	// here at all.
+	`CREATE TABLE IF NOT EXISTS suggestion_dismissals (
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		kind       VARCHAR(20) NOT NULL,
+		target     TEXT        NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, kind, target)
+	)`,
 }

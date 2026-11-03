@@ -17,6 +17,8 @@ interface Person {
   // '' | 'pending' (sent) | 'pending_incoming' | 'friends', or the search
   // endpoint's 'accepted' / 'self'.
   friend_status: string
+  // Why the ranking picked them, when there is a specific reason (AGORA-423).
+  reason?: string
 }
 
 function Avatar({ name, url, size = 'w-11 h-11' }: { name: string; url?: string; size?: string }) {
@@ -56,7 +58,7 @@ export default function FindPeopleStep({ instance, me, setNotes, next, back }: S
 
   const suggested: (Person & { note: string })[] = [
     ...(suggestions?.inviter ? [{ ...suggestions.inviter, note: 'Invited you to Agora' }] : []),
-    ...(suggestions?.people ?? []).map((p: Person) => ({ ...p, note: 'Joined recently' })),
+    ...(suggestions?.people ?? []).map((p: Person) => ({ ...p, note: p.reason || 'Joined recently' })),
   ]
   const found: (Person & { note: string })[] = (results ?? [])
     .filter(u => !u.is_remote && u.friendship_status !== 'self')

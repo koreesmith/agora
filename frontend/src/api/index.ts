@@ -101,6 +101,9 @@ export const usersApi = {
   cancelDeletion:   ()                 => api.delete('/users/me/request-deletion'),
   deleteImmediately:()                 => api.post('/users/me/delete-immediately'),
   discover:         ()                 => api.get('/users/discover'),
+  // AGORA-423: stop offering someone in Find Friends. key is the network's id
+  // for them: a user id, username@instance, an actor URL, or a DID.
+  dismissSuggestion:(kind: 'user' | 'peer' | 'fediverse' | 'bluesky', key: string) => api.post('/users/discover/dismiss', { kind, key }),
   mentionSearch:    (q: string)        => api.get('/users/mention-search', { params: { q } }),
   enablePostNotify: (username: string) => api.post(`/users/${username}/notify`),
   disablePostNotify:(username: string) => api.delete(`/users/${username}/notify`),

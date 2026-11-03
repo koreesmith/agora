@@ -37,6 +37,15 @@ type onboardingPerson struct {
 	AvatarURL    string `json:"avatar_url"`
 	Bio          string `json:"bio"`
 	FriendStatus string `json:"friend_status"`
+	// Reason is why this person is suggested, when there is a specific one.
+	Reason string `json:"reason,omitempty"`
+}
+
+func firstReason(reasons []string) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	return reasons[0]
 }
 
 // onboardingFriendStatus is the caller's ($1) relationship with u, in the
@@ -63,14 +72,15 @@ const onboardingNotBlocked = `NOT EXISTS (
 )`
 
 // OnboardingSuggestions feeds the wizard's Find people step: the account
-// whose invite code the caller registered with, then the newest accounts on
-// this instance.
+// whose invite code the caller registered with, then the best matches among
+// this instance's accounts (the same ranking Discover uses, which falls back
+// to the newest accounts for someone with no connections yet).
 //
 // The inviter comes from invite_codes, so only invite-mode registrations have
 // one. An email invite (/invites/send) only mails a link to /register and
 // records nothing about who sent it.
 //
-// Recent members leave out private profiles: a brand-new account has no
+// The suggestions leave out private profiles: a brand-new account has no
 // reason to know they exist, and their owners chose not to be browsed. The
 // inviter is shown whatever their privacy, since they reached out first.
 func (s *Service) OnboardingSuggestions(w http.ResponseWriter, r *http.Request) {
@@ -107,39 +117,18 @@ func (s *Service) OnboardingSuggestions(w http.ResponseWriter, r *http.Request) 
 		inviterID = inviter.ID
 	}
 
-	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url, COALESCE(u.bio, ''),
-		       `+onboardingFriendStatus+`
-		FROM users u
-		WHERE u.id != $1 AND u.id::text != $2
-		  AND u.is_remote = false AND u.email_verified = true
-		  AND u.deletion_scheduled_at IS NULL AND u.is_suspended = false
-		  AND u.profile_private = false
-		  AND u.waitlist_status != 'pending'
-		  AND NOT EXISTS (
-		      SELECT 1 FROM friendships f
-		      WHERE f.status = 'accepted'
-		        AND ((f.requester_id = $1 AND f.addressee_id = u.id)
-		          OR (f.addressee_id = $1 AND f.requester_id = u.id))
-		  )
-		  AND `+onboardingNotBlocked+`
-		ORDER BY u.created_at DESC
-		LIMIT 5
-	`, userID, inviterID)
+	ranked, err := s.rankedLocalSuggestions(userID, inviterID, 5)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
 	}
-	defer rows.Close()
-
-	people := []onboardingPerson{}
-	for rows.Next() {
-		var p onboardingPerson
-		if err := rows.Scan(&p.ID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.Bio, &p.FriendStatus); err != nil {
-			writeError(w, 500, "db error")
-			return
-		}
-		people = append(people, p)
+	people := make([]onboardingPerson, 0, len(ranked))
+	for _, u := range ranked {
+		people = append(people, onboardingPerson{
+			ID: u.ID, Username: u.Username, DisplayName: u.DisplayName,
+			AvatarURL: u.AvatarURL, Bio: u.Bio, FriendStatus: u.FriendStatus,
+			Reason: firstReason(u.Reasons),
+		})
 	}
 
 	writeJSON(w, 200, map[string]any{"inviter": inviter, "people": people})

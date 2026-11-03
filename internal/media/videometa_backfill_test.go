@@ -15,7 +15,8 @@ import (
 // was recorded, leaves posts that already have one alone, skips files it
 // can't read, and is safe to run twice.
 //
-// Needs ffmpeg (to make a sample video) and the local agora-postgres-test
+// Needs ffmpeg (to make a sample video; MPEG-4 is used because every build has
+// it, unlike libx264) and the local agora-postgres-test
 // instance (localhost:15433); skips if either is missing.
 func TestBackfillVideoMeta(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
@@ -38,7 +39,7 @@ func TestBackfillVideoMeta(t *testing.T) {
 	name := fmt.Sprintf("bf437_%d", time.Now().UnixNano())
 	good := filepath.Join(dir, "videos", name+".mp4")
 	if out, err := exec.Command("ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=360x640:rate=24",
-		"-t", "2", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-y", good).CombinedOutput(); err != nil {
+		"-t", "2", "-pix_fmt", "yuv420p", "-c:v", "mpeg4", "-y", good).CombinedOutput(); err != nil {
 		t.Fatalf("make sample video: %v %s", err, out)
 	}
 	bad := filepath.Join(dir, "videos", name+"_bad.mp4")

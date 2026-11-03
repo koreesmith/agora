@@ -171,7 +171,8 @@ const postResultColumns = `
 	(SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
 	(SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS comment_count,
 	EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS liked,
-	COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}')`
+	COALESCE(u.emojis::text,'{}'), COALESCE(p.emojis::text,'{}'),
+	EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.id AND user_id = $1) AS bookmarked`
 
 func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := auth.UserIDFromCtx(r.Context())
@@ -240,6 +241,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 		LikeCount      int             `json:"like_count"`
 		CommentCount   int             `json:"comment_count"`
 		Liked          bool            `json:"liked"`
+		Bookmarked     bool            `json:"bookmarked"` // AGORA-434
 		AuthorEmojis   json.RawMessage `json:"author_emojis,omitempty"`
 		ContentEmojis  json.RawMessage `json:"content_emojis,omitempty"`
 	}
@@ -252,7 +254,7 @@ func (s *Service) SearchPosts(w http.ResponseWriter, r *http.Request) {
 			&p.Content, &p.ImageURL, &p.Visibility, &p.CreatedAt, &p.PublishedAt,
 			&p.IsRemote, &p.RemoteInstance,
 			&p.LikeCount, &p.CommentCount, &p.Liked,
-			&authorEmojis, &contentEmojis)
+			&authorEmojis, &contentEmojis, &p.Bookmarked)
 		p.AuthorEmojis = json.RawMessage(authorEmojis)
 		p.ContentEmojis = json.RawMessage(contentEmojis)
 		posts = append(posts, p)

@@ -32,12 +32,24 @@ func (s *Service) DeliverUnlike(userID, postID string) {
 // local repost post id) isn't used here — unlike AP's Announce activity,
 // an AT Proto repost record has no separate activity id of its own to
 // construct, so only originalPostID matters.
+//
+// AGORA-358: when the original has no Bluesky presence there is nothing for a
+// repost record to point at, so the repost goes out as a flattened post with a
+// link back instead (see broadcastFlattenedRepost).
 func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
+	if _, _, ok := s.blueskyRef(originalPostID); !ok {
+		s.broadcastFlattenedRepost(userID, repostID, originalPostID)
+		return
+	}
 	s.deliverInteraction(userID, originalPostID, "repost")
 }
 
 // DeliverUnannounce mirrors DeliverUnlike for a repost.
+//
+// AGORA-358: also takes down the flattened post, if the repost was sent as
+// one. BroadcastPostDelete no-ops when repostID never had an atproto_posts row.
 func (s *Service) DeliverUnannounce(userID, repostID, originalPostID string) {
+	s.BroadcastPostDelete(userID, repostID)
 	s.undoInteraction(userID, originalPostID, "repost")
 }
 

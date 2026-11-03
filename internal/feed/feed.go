@@ -179,6 +179,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Delete("/posts/{id}/bookmark",             s.RemoveBookmark) // AGORA-429
 	r.Get("/bookmarks",                          s.ListBookmarks)  // AGORA-429
 	registerKeywordMuteRoutes(r, s)                                // AGORA-428
+	registerReelsRoutes(r, s)                                      // AGORA-438
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)

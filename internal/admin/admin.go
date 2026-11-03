@@ -122,7 +122,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // Shared by GetSettings and UpdateSettings so the two can't drift apart.
 var adminEditableSettings = map[string]bool{
 	"instance_name": true, "instance_description": true, "registration_mode": true,
-	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "deletion_grace_days": true, "logo_url": true,
+	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "reels_discover_enabled": true, "deletion_grace_days": true, "logo_url": true,
 	"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
 	"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
 	// AGORA-285: 'auto' or 'manual' — whether a DNS-verified custom domain

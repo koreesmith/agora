@@ -246,6 +246,9 @@ var schema = []string{
 		('smtp_enabled',         'false'),
 		('logo_url',             ''),
 		('atproto_enabled',      'false'),
+		-- AGORA-438: whether the Reels Discover tab is offered. 'true' unless an
+		-- admin turns it off.
+		('reels_discover_enabled', 'true'),
 		-- AGORA-285: 'manual' or 'auto'. Defaults to manual so the feature
 		-- can't silently start binding handles on an instance that upgrades
 		-- into it — DNS verification already proves the user controls the
@@ -705,6 +708,15 @@ var schema = []string{
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_height      INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_duration_ms INTEGER NOT NULL DEFAULT 0`,
 
+	// ── AGORA-438: Reels ───────────────────────────────────────────────────────
+	// Which reels a user has watched, so the feed doesn't show them again.
+	`CREATE TABLE IF NOT EXISTS reel_views (
+		user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id   UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		viewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+
 	// AGORA-145: per-account opt-out of standard ActivityPub federation,
 	// separate from the instance-wide federation_enabled toggle.
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS activitypub_enabled BOOLEAN NOT NULL DEFAULT true`,
@@ -1146,6 +1158,18 @@ var schema = []string{
 	`ALTER TABLE posts ALTER COLUMN published_at SET DEFAULT NOW()`,
 	`ALTER TABLE posts ALTER COLUMN published_at SET NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published_at DESC)`,
+
+	// AGORA-438: every feed counts a post's reposts and checks whether the viewer
+	// reposted it with `repost_of_id = p.id`, once per post shown, and nothing
+	// indexed that column, so each count scanned the whole posts table. Only
+	// reposts are indexed, which is a small fraction of posts.
+	`CREATE INDEX IF NOT EXISTS idx_posts_repost_of ON posts(repost_of_id) WHERE repost_of_id IS NOT NULL`,
+
+	// AGORA-438: the Reels feed. Placed here because it needs published_at.
+	// Keeps "newest videos first" fast on an instance with many posts: only
+	// the (small) video subset is indexed.
+	`CREATE INDEX IF NOT EXISTS idx_posts_video_published ON posts (published_at DESC, id DESC)
+	   WHERE video_url <> '' AND parent_id IS NULL AND deleted_at IS NULL`,
 
 	// AGORA-281: a user's claim on their own domain as a handle alias. The
 	// protocol column is what makes this table shared rather than AT-Proto-

@@ -867,6 +867,8 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	// unless set to "false", AT Proto is off unless set to "true".
 	info["activitypub_enabled"] = s.getSetting("activitypub_enabled") != "false"
 	info["atproto_enabled"] = s.getSetting("atproto_enabled") == "true"
+	// AGORA-438: on unless an admin turns the Reels Discover tab off.
+	info["reels_discover_enabled"] = s.getSetting("reels_discover_enabled") != "false"
 	info["domain"] = domainFromURL(s.cfg.InstanceDomain)
 	writeJSON(w, 200, info)
 }

@@ -128,6 +128,37 @@ Author or admin only. Soft-deletes.
 
 ---
 
+## `GET /api/reels`
+One page of the Reels feed: posts that have a video, newest first, with nothing ranked. Videos the viewer has already watched are left out unless asked for.
+
+**Query params:**
+- `tab` — `following` (default) or `discover`
+  - `following`: videos from you, your friends, pages you subscribe to, and Fediverse and Bluesky accounts you follow with "show in feed" on. The same audience rules as `GET /api/feed`.
+  - `discover`: public videos from this instance and its peered Agora instances, the same pool as the public Explore feed. Never your own videos, private profiles, or accounts scheduled for deletion. Returns 404 when an admin has turned Discover off (`reels_discover_enabled`, also on `GET /api/instance`).
+- `limit` (int, default 10, max 50)
+- `cursor` (string) — the `next_cursor` of the previous page. Opaque.
+- `include_viewed` (`true`) — include videos already marked viewed, for "watch older videos"
+
+Both tabs also respect blocks, hidden posts and keyword mutes.
+
+**Response 200:**
+```json
+{ "posts": [ ... ], "next_cursor": "string", "exhausted": false }
+```
+Posts have the same shape as in `GET /api/feed`, including `video_url`, `video_thumb_url`, `video_width`, `video_height` and `video_duration_ms`. `next_cursor` is empty on the last page, and `exhausted` is then `true`: nothing further to watch, which is the cue for "You're all caught up". Pages use a cursor rather than `page` or `offset`, so marking a video viewed between requests never makes the next page skip or repeat one.
+
+**Errors:** 400 for an unknown `tab` or a malformed `cursor`; 404 for `discover` while it is turned off.
+
+---
+
+## `POST /api/reels/{id}/viewed`
+Record that the viewer watched a reel, so it stops coming back. Call it after a few seconds of playback or on completion. Idempotent.
+
+**Response 200:** `{"viewed": true}`
+**Errors:** 404 when the post doesn't exist, has no video, or isn't visible to the viewer.
+
+---
+
 ## `GET /api/preview?url=...`
 Fetch Open Graph metadata for a URL.
 

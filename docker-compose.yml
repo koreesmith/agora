@@ -65,11 +65,13 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      # AGORA-458: /health answers only if the database does, so a server that
+      # is up but stuck shows as unhealthy here (docker ps), not just "port open".
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://127.0.0.1:8080/health || exit 1"]
       interval: 10s
-      timeout: 5s
+      timeout: 8s
       retries: 5
-      start_period: 15s
+      start_period: 20s
 
   # ── React frontend (built, served by its own nginx) ───────────────────────
   frontend:

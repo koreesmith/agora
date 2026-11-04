@@ -99,7 +99,9 @@ func (s *Service) broadcastFlattenedRepost(userID, repostID, originalPostID stri
 	repo, bs := s.getOrCreateRepo(ctx, userID, did, repoHead)
 
 	permalink := strings.TrimRight(s.cfg.InstanceDomain, "/") + "/post/" + originalPostID
-	finalText := flattenRepostForBluesky(commentary, authorName, content, permalink)
+	// AGORA-459: the warning (the repost's own, else the original's) is the
+	// first line of the text, since Bluesky shows no label for it.
+	finalText := flattenRepostForBluesky(withWarning(contentWarning, commentary), authorName, content, permalink)
 	rec := &bsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
 		Text:          finalText,

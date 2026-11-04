@@ -65,3 +65,29 @@ func contentWarningFromLabels(labels *bsky.FeedPost_Labels) string {
 	}
 	return "Bluesky content label: " + strings.Join(vals, ", ")
 }
+
+// warningLine is how a content warning is shown to people on Bluesky, which has
+// no field for one: as the first line of the text (AGORA-459). The self-label
+// above stays too, for clients that understand it, but Bluesky does not display
+// an unknown label, so this line is what makes the warning visible.
+func warningLine(contentWarning string) string {
+	cw := strings.TrimSpace(contentWarning)
+	if cw == "" {
+		return ""
+	}
+	return "CW: " + cw
+}
+
+// withWarning puts the warning line in front of text, leaving text alone when
+// there is no warning.
+func withWarning(contentWarning, text string) string {
+	line := warningLine(contentWarning)
+	switch {
+	case line == "":
+		return text
+	case strings.TrimSpace(text) == "":
+		return line
+	default:
+		return line + "\n\n" + text
+	}
+}

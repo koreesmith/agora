@@ -37,8 +37,14 @@ func (s *Service) DeliverUnlike(userID, postID string) {
 // repost record to point at, so the repost goes out as a flattened post with a
 // link back instead (see broadcastFlattenedRepost).
 func (s *Service) DeliverAnnounce(userID, repostID, originalPostID string) {
-	if _, _, ok := s.blueskyRef(originalPostID); !ok {
+	targetURI, targetCid, ok := s.blueskyRef(originalPostID)
+	if !ok {
 		s.broadcastFlattenedRepost(userID, repostID, originalPostID)
+		return
+	}
+	// AGORA-459: a native repost has no text and no labels, so a repost that
+	// carries a warning or the sharer's own words goes out as a quote post.
+	if s.broadcastQuoteRepost(userID, repostID, targetURI, targetCid) {
 		return
 	}
 	s.deliverInteraction(userID, originalPostID, "repost")

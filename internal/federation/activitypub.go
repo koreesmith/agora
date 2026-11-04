@@ -2122,6 +2122,8 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		// AGORA-323: a direct message. Read here rather than in a second parse
 		// so the branch below can be taken before any post handling runs.
 		DirectMessage bool `json:"agora:directMessage"`
+		// AGORA-453: which post this one quotes, when the sender says.
+		apQuoteRefs
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -2202,6 +2204,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 		postID := s.ingestFollowedPostAs(visibility, verifiedActor, note.ID, note.Content, note.Summary, imageURLs, imageAlts, videoURL, poll, hashtagsFromAPTags(note.Tag), emojisFromAPTags(note.Tag), parseAPTime(note.Published))
 		if postID != "" {
 			s.storeInboundVideoMeta(postID, matchVideoMeta(note.Attachment)) // AGORA-437
+			s.linkInboundQuote(postID, note.apQuoteRefs.first())             // AGORA-453
 		}
 
 		// AGORA-342: a list post is stored invisible and becomes visible only
@@ -4556,11 +4559,12 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	// and DeliverReply already call, rather than re-deriving remoteness
 	// ad hoc the way quotedPostURL below does for its own, different purpose
 	// (a human-readable fallback link, not an addressee).
-	var quotedActorURL, quotedInboxURL string
+	var quotedActorURL, quotedInboxURL, quoteRefURL string
 	quotedOK := false
 	if repostOfID != nil {
 		if quoteURL := s.quotedPostURL(*repostOfID); quoteURL != "" {
 			content = strings.TrimRight(content, " \n") + "\n\nRE: " + quoteURL
+			quoteRefURL = quoteURL
 		}
 		quotedActorURL, quotedInboxURL, _, quotedOK = s.lookupRemoteTarget(*repostOfID)
 	}
@@ -4573,6 +4577,16 @@ func (s *Service) BroadcastPublicPost(userID, postID string) {
 	}
 	// AGORA-163: a fediverse mention adds recipients on top of the normal
 	// Public/followers audience — it doesn't replace it.
+	// AGORA-453: name the quoted post in properties too, so software that reads
+	// them (Misskey and its forks, Fedibird, Akkoma, Agora) can show a quote
+	// instead of the "RE:" text above, which stays for Mastodon.
+	if quoteRefURL != "" {
+		if note, ok := activity["object"].(map[string]any); ok {
+			note["quoteUrl"] = quoteRefURL
+			note["quoteUri"] = quoteRefURL
+			note["_misskey_quote"] = quoteRefURL
+		}
+	}
 	tags, mentionedActorURLs, mentionedInboxURLs := s.resolveFediverseMentions(userID, content)
 	log.Printf("federation: BroadcastPublicPost %s resolved %d fediverse mention(s)", postID, len(tags))
 	if len(tags) > 0 || quotedOK {

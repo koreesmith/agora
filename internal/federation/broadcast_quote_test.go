@@ -1,7 +1,9 @@
 package federation
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,11 +81,29 @@ func TestBroadcastPublicPostDeliversQuoteToRemoteAuthor(t *testing.T) {
 	s.BroadcastPublicPost(quoterID, quoteShareID)
 
 	var queuedInbox string
+	var queuedActivity []byte
 	err = db.QueryRow(`
-		SELECT inbox_url FROM ap_delivery_queue WHERE actor_user_id = $1 AND inbox_url = $2
-	`, quoterID, remoteInboxURL).Scan(&queuedInbox)
+		SELECT inbox_url, activity FROM ap_delivery_queue WHERE actor_user_id = $1 AND inbox_url = $2
+	`, quoterID, remoteInboxURL).Scan(&queuedInbox, &queuedActivity)
 	t.Cleanup(func() { db.Exec(`DELETE FROM ap_delivery_queue WHERE actor_user_id = $1`, quoterID) })
 	if err != nil {
 		t.Fatalf("expected a Create delivery queued to the quoted author's inbox %s, got none: %v", remoteInboxURL, err)
+	}
+
+	// AGORA-453: besides the "RE:" text Mastodon needs, the Note names the
+	// quoted post in properties, so software that reads them can show a quote.
+	var act struct {
+		Object map[string]any `json:"object"`
+	}
+	if err := json.Unmarshal(queuedActivity, &act); err != nil {
+		t.Fatalf("queued activity is not JSON: %v", err)
+	}
+	for _, k := range []string{"quoteUrl", "quoteUri", "_misskey_quote"} {
+		if act.Object[k] != remoteNoteID {
+			t.Errorf("Note %s = %v, want %s", k, act.Object[k], remoteNoteID)
+		}
+	}
+	if c, _ := act.Object["content"].(string); !strings.Contains(c, "RE: ") || !strings.Contains(c, remoteNoteID) {
+		t.Errorf("the RE: fallback text must stay for Mastodon, content = %q", c)
 	}
 }

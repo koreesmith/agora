@@ -18,6 +18,7 @@ import MentionTextarea from './MentionTextarea'
 // ── Reaction config ───────────────────────────────────────────────────────────
 
 import { REACTIONS, REACTION_MAP } from '../../utils/reactions'
+import { setReactionInCache, withReaction } from '../../utils/reactionCache'
 
 export interface Post {
   id: string
@@ -491,33 +492,36 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false,
     },
   })
 
-  // Optimistic reaction state — holds until the refetched prop catches up
-  // undefined = use post.my_reaction; null = optimistically removed; string = optimistically set
-  const [optimisticReaction, setOptimisticReaction] = useState<string | null | undefined>(undefined)
-  const myReaction = optimisticReaction !== undefined ? (optimisticReaction ?? '') : (post.my_reaction ?? '')
+  // AGORA-456: the reaction shows at once and the list is not fetched again.
+  // The post is changed in place in the query cache, so every list that holds
+  // it updates; `shown` carries the same change for a card whose post is not
+  // in the cache. If the server does not take the reaction, both go back.
+  const [override, setOverride] = useState<Post | null>(null)
+  useEffect(() => { setOverride(null) }, [post.my_reaction, post.reaction_count])
+  const shown: Post = override ?? post
+  const myReaction = shown.my_reaction ?? ''
 
-  // Once the server-returned prop matches the optimistic value, clear the override
-  useEffect(() => {
-    if (optimisticReaction === null && !post.my_reaction) setOptimisticReaction(undefined)
-    if (typeof optimisticReaction === 'string' && post.my_reaction === optimisticReaction) setOptimisticReaction(undefined)
-  }, [post.my_reaction])
-
-  // Reaction mutation — picks or removes
   const react = useMutation({
-    mutationFn: (type: string | null) =>
+    mutationFn: ({ type }: { type: string | null; prev: string }) =>
       type ? feedApi.reactPost(post.id, type) : feedApi.unreactPost(post.id),
-    onSettled: () => invalidate(),
+    onError: (_e, vars) => {
+      setOverride(null)
+      setReactionInCache(qc, post.id, vars.prev)
+      setReactionError("Couldn't save your reaction. Check your connection.")
+      setTimeout(() => setReactionError(''), 3500)
+    },
+    // Out of date, not refetched: it refreshes the next time it would anyway.
+    onSuccess: () => qc.invalidateQueries({ queryKey: [invalidateKey], refetchType: 'none' }),
   })
+  const [reactionError, setReactionError] = useState('')
 
   const handleReactionPick = (type: string) => {
     setShowReactionPicker(false)
-    if (myReaction === type) {
-      setOptimisticReaction(null)
-      react.mutate(null)
-    } else {
-      setOptimisticReaction(type)
-      react.mutate(type)
-    }
+    const prev = myReaction
+    const next = prev === type ? '' : type
+    setOverride(withReaction(shown, next))
+    setReactionInCache(qc, post.id, next)
+    react.mutate({ type: next || null, prev })
   }
 
   // Keep a stable ref so document listeners avoid stale closures
@@ -1312,7 +1316,7 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false,
                     <span className="flex items-center text-base leading-none" style={{lineHeight:1}}>
                       {myReaction ? REACTION_MAP[myReaction]?.emoji : <ThumbsUp size={16} />}
                     </span>
-                    <span className="text-sm">{post.reaction_count || ''}</span>
+                    <span className="text-sm">{shown.reaction_count || ''}</span>
                   </button>
                   {showReactionPicker && (
                     <ReactionPicker activeReaction={myReaction || undefined} highlightedReaction={highlightedReaction} />
@@ -1372,11 +1376,12 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false,
 
             {/* Reaction summary bar */}
             <ReactionBar
-              counts={post.reaction_counts || {}}
-              total={post.reaction_count || 0}
+              counts={shown.reaction_counts || {}}
+              total={shown.reaction_count || 0}
               myReaction={myReaction}
               onOpenModal={() => setShowReactionsModal(true)}
             />
+            {reactionError && <p role="status" className="text-xs text-red-500 mt-1">{reactionError}</p>}
           </div>
         </div>
       </div>

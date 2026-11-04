@@ -51,6 +51,11 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
   const barRef = useRef<HTMLDivElement | null>(null)
   const [scrubRatio, setScrubRatio] = useState<number | null>(null)
   const wasPlaying = useRef(false)
+  // AGORA-451: a click brings up the controls instead of pausing. While the
+  // video plays they hide again after a few seconds; `controlsTick` restarts
+  // that wait whenever one of them is used.
+  const [controlsShown, setControlsShown] = useState(false)
+  const [controlsTick, setControlsTick] = useState(0)
   const [cwShown, setCwShown] = useState(false)
   const [captionOpen, setCaptionOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -130,6 +135,21 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
   }
   const clock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`
 
+  useEffect(() => {
+    if (!controlsShown || paused) return
+    const t = setTimeout(() => setControlsShown(false), 3000)
+    return () => clearTimeout(t)
+  }, [controlsShown, paused, controlsTick])
+  useEffect(() => { if (!active) setControlsShown(false) }, [active])
+
+  // A click on the picture: play it if paused, otherwise show or hide the controls.
+  const onSurfaceClick = () => {
+    const v = videoRef.current
+    if (!v || failed) return
+    if (v.paused) { v.play().catch(() => {}); setControlsShown(false) }
+    else setControlsShown((c) => !c)
+  }
+
   const togglePlay = () => {
     const v = videoRef.current
     if (!v || failed) return
@@ -195,8 +215,8 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
       className="relative h-full snap-start snap-always bg-black text-white overflow-hidden select-none"
     >
       {/* Picture */}
-      <div className="absolute inset-0" onClick={togglePlay} role="button" tabIndex={-1}
-        aria-label={paused ? 'Play' : 'Pause'}>
+      <div className="absolute inset-0" onClick={onSurfaceClick} role="button" tabIndex={-1}
+        aria-label={paused ? 'Play' : 'Show controls'}>
         {post.video_thumb_url && !ready && (
           <img src={post.video_thumb_url} alt="" draggable={false}
             className="absolute inset-0 w-full h-full object-contain" />
@@ -219,20 +239,21 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
         )}
       </div>
 
-      {/* Paused: play, with 10 seconds back and forward either side. Outside
+      {/* Controls (paused, or just clicked): play or pause, with 10 seconds back and forward either side. Outside
           the click-to-play surface so the buttons never toggle it. */}
-      {active && paused && ready && !failed && cwOk && scrubRatio === null && (
+      {active && (paused || controlsShown) && ready && !failed && cwOk && scrubRatio === null && (
         <div className="absolute inset-0 z-10 flex items-center justify-center gap-6 pointer-events-none">
-          <button onClick={() => skip(-10)} aria-label="Back 10 seconds" title="Back 10 seconds"
+          <button onClick={() => { skip(-10); setControlsTick((n) => n + 1) }} aria-label="Back 10 seconds" title="Back 10 seconds"
             className="pointer-events-auto relative w-12 h-12 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
             <RotateCcw size={22} />
             <span className="absolute text-[10px] font-bold mt-0.5">10</span>
           </button>
-          <button onClick={togglePlay} aria-label="Play"
+          <button onClick={() => { togglePlay(); setControlsShown(paused); setControlsTick((n) => n + 1) }}
+            aria-label={paused ? 'Play' : 'Pause'}
             className="pointer-events-auto w-16 h-16 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
-            <Play size={30} fill="currentColor" />
+            {paused ? <Play size={30} fill="currentColor" /> : <Pause size={30} fill="currentColor" />}
           </button>
-          <button onClick={() => skip(10)} aria-label="Forward 10 seconds" title="Forward 10 seconds"
+          <button onClick={() => { skip(10); setControlsTick((n) => n + 1) }} aria-label="Forward 10 seconds" title="Forward 10 seconds"
             className="pointer-events-auto relative w-12 h-12 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
             <RotateCw size={22} />
             <span className="absolute text-[10px] font-bold mt-0.5">10</span>
@@ -353,7 +374,7 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
 
       {/* Progress */}
       {scrubRatio !== null && (videoRef.current?.duration ?? 0) > 0 && (
-        <div className="absolute inset-x-0 bottom-10 z-20 flex justify-center pointer-events-none">
+        <div className="absolute inset-x-0 bottom-14 z-20 flex justify-center pointer-events-none">
           <span className="bg-black/60 text-sm font-semibold px-2.5 py-1 rounded-lg">
             {clock(scrubRatio * (videoRef.current?.duration ?? 0))} / {clock(videoRef.current?.duration ?? 0)}
           </span>
@@ -364,7 +385,7 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
           aria-valuenow={Math.round((scrubRatio ?? progress) * 100)} tabIndex={-1}
           onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}
           onClick={(e) => e.stopPropagation()}
-          className="group absolute inset-x-0 bottom-0 h-6 z-20 cursor-pointer touch-none flex items-end">
+          className="group absolute inset-x-0 bottom-3 h-6 z-20 cursor-pointer touch-none flex items-end">
           <div className={`relative w-full bg-white/20 transition-[height] ${scrubRatio !== null ? 'h-1.5' : 'h-0.5 group-hover:h-1.5'}`}>
             <div className="h-full bg-white/85" style={{ width: `${Math.min(100, (scrubRatio ?? progress) * 100)}%` }} />
             <div className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-white shadow ${scrubRatio !== null ? '' : 'opacity-0 group-hover:opacity-100'}`}

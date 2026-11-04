@@ -665,13 +665,13 @@ export default function ProfilePage() {
               {wallQueueData.posts.map((p: any) => (
                 <div key={p.id} className="border border-agora-200 dark:border-agora-600 rounded-xl p-3 space-y-2">
                   <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                    <Link to={`/profile/${p.author_username}`} className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
                       {p.author_avatar_url
                         ? <img src={p.author_avatar_url} alt="" className="w-full h-full object-cover" />
                         : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{p.author_display_name?.[0]}</span>}
-                    </div>
+                    </Link>
                     <div>
-                      <span className="text-sm font-medium">{p.author_display_name ? renderName(p.author_display_name, p.author_emojis) : p.author_username}</span>
+                      <Link to={`/profile/${p.author_username}`} className="text-sm font-medium hover:underline">{p.author_display_name ? renderName(p.author_display_name, p.author_emojis) : p.author_username}</Link>
                       <span className="text-xs text-agora-400 ml-1">@{p.author_username}</span>
                     </div>
                   </div>

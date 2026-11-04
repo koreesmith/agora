@@ -258,7 +258,7 @@ export default function AdminPage() {
           {(usersData?.users||[]).map((u:any)=>(
             <div key={u.id} className="card p-3 flex items-center gap-3">
               <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm">{u.display_name||u.username} <span className="text-agora-400 font-normal">@{u.username}</span></p>
+                <p className="font-medium text-sm"><Link to={`/profile/${u.username}`} className="hover:underline">{u.display_name||u.username}</Link> <span className="text-agora-400 font-normal">@{u.username}</span></p>
                 <p className="text-xs text-agora-400">{u.email} · {u.role}{u.is_suspended?' · 🚫 suspended':''}</p>
               </div>
               <select value={u.role} onChange={e=>setRole.mutate({id:u.id,role:e.target.value})}

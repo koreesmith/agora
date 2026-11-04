@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"os/signal"
 	"syscall"
 	"time"
@@ -256,15 +258,29 @@ func main() {
 	linkpreview.RegisterRoutes(r, linkpreview.NewService(db, cfg))
 
 	// Health check
+	// AGORA-458: answers only if the database does, within a few seconds, and
+	// reports the connection pool, so a server that is up but stuck waiting for
+	// the database shows as unhealthy instead of "ok".
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		h := db.Health(3 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		if !h.OK {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(h)
 	})
 
 	// ── Background jobs ───────────────────────────────────────────────────
 	go fedSvc.StartBackgroundSync(context.Background())
 	go userSvc.StartDeletionCleanup(context.Background())
 	go feedSvc.StartDraftCleanup(context.Background()) // AGORA-431
+	// AGORA-458: log when the database pool is starved, and (if HEALTH_WATCHDOG
+	// is set to a number of failed checks) exit so Docker restarts a wedged server.
+	go db.MonitorPool(context.Background())
+	if n, _ := strconv.Atoi(os.Getenv("HEALTH_WATCHDOG")); n > 0 {
+		log.Printf("watchdog on: exiting after %d failed database checks in a row", n)
+		go db.Watchdog(context.Background(), n, 15*time.Second, os.Exit)
+	}
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
 	go atprotoSvc.StartBlueskyIngestion(context.Background())

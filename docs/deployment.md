@@ -214,6 +214,27 @@ hides Reels.
 
 The instance now reports version `5.0.0` in NodeInfo.
 
+## If the instance freezes (v5.0.0)
+
+If every page shows only "Loading..." (or "Can't reach the server") and `docker compose restart` fixes it, the server is up but stuck waiting for the database. v5.0.0 makes that visible and can recover from it on its own.
+
+**What to look at**
+
+* `docker compose ps`: the backend now shows `(unhealthy)` when it cannot reach the database, instead of staying `(healthy)` because its port is open.
+* `curl -s http://localhost:8080/health` from inside the backend container (or `docker compose exec backend wget -qO- http://127.0.0.1:8080/health`): returns JSON with `ok`, `ping_ms` and the connection pool (`open`, `in_use`, `idle`, `max_open`, `wait_count`, `wait_seconds`). It answers 503 if the database does not reply within 3 seconds. A pool with `in_use` equal to `max_open` (25) and a growing `wait_count` means every connection is held and requests are queuing.
+* `docker compose logs backend | grep "db pool"`: a line is logged (at most once a minute) when 20 or more of the 25 connections are in use or requests had to wait for one, so the start of a freeze is in the log.
+
+**Before you restart, capture what it is stuck on**
+
+1. What the database sees (the sessions holding connections and what they are waiting for):
+   `docker compose exec postgres psql -U agora -c "select pid, state, wait_event_type, wait_event, now()-query_start as running, left(query,120) as query from pg_stat_activity where datname='agora' order by running desc limit 30;"`
+2. Whether the host is starved: `docker stats --no-stream` (a video transcode using all the CPU can stall everything).
+3. What every part of the server is doing: `docker compose kill -s SIGQUIT backend`. The server writes a dump of all its goroutines to its log and exits, and Docker restarts it. Then `docker compose logs backend > freeze.log` has the stack that was blocked, which says what held the connections.
+
+Send those three with the time it froze when reporting it.
+
+**Self-healing.** Set `HEALTH_WATCHDOG=4` in `.env` (off by default). The server then exits after 4 database checks in a row fail (one every 15 seconds, so about a minute of silence) and Docker's `restart: unless-stopped` starts it again, with a line in the log saying why. It does not fix the cause, it just removes the need to restart by hand.
+
 ## Upgrading to v4.0.0
 
 Back up `./data/postgres` and `./data/uploads` first. Then read the points

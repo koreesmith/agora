@@ -76,10 +76,34 @@ function AuthAwareLayout() {
 
 function AppRoutes() {
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
+  // AGORA-458: the first request has a time limit. A server that accepts it and
+  // never answers used to leave the page on "Loading…" for ever; now the page
+  // says so and keeps trying.
+  const [unreachable, setUnreachable] = useState(false)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
-    api.get('/setup').then(r => setNeedsSetup(r.data.needs_setup)).catch(() => setNeedsSetup(false))
-  }, [])
+    let cancelled = false
+    api.get('/setup', { timeout: 10000 })
+      .then(r => { if (!cancelled) { setUnreachable(false); setNeedsSetup(r.data.needs_setup) } })
+      .catch((e: any) => {
+        if (cancelled) return
+        // The server answered with an error: carry on as before. No answer in
+        // time, or no connection: say so and try again.
+        if (e?.response) { setNeedsSetup(false); return }
+        setUnreachable(true)
+        setTimeout(() => { if (!cancelled) setAttempt(n => n + 1) }, 5000)
+      })
+    return () => { cancelled = true }
+  }, [attempt])
+
+  if (needsSetup === null && unreachable) return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-3 px-6 text-center text-agora-500">
+      <p className="font-medium text-agora-700 dark:text-agora-200">Can't reach the server right now.</p>
+      <p className="text-sm">It may be restarting. This page will keep trying.</p>
+      <button onClick={() => setAttempt(n => n + 1)} className="btn-primary text-sm">Try again now</button>
+    </div>
+  )
 
   if (needsSetup === null) return (
     <div className="min-h-screen flex items-center justify-center text-agora-400">Loading…</div>

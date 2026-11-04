@@ -21,7 +21,7 @@ func Open(dsn string) (*DB, error) {
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	db.SetMaxOpenConns(25)
+	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(5)
 	return &DB{db}, nil
 }

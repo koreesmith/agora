@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { AlertTriangle, Bookmark, EyeOff, Flag, MessageCircle, MoreHorizontal, Pause, Play, Repeat2, Share, ThumbsUp, Volume2, VolumeX, X, Ban } from 'lucide-react'
+import { AlertTriangle, Bookmark, EyeOff, Flag, MessageCircle, MoreHorizontal, Pause, Play, RotateCcw, RotateCw, Repeat2, Share, ThumbsUp, Volume2, VolumeX, X, Ban } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
 import { feedApi, bookmarksApi, hiddenPostsApi, blocksApi } from '../../api'
@@ -46,6 +46,11 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
   const [paused, setPaused] = useState(true)
   const [failed, setFailed] = useState(false)
   const [progress, setProgress] = useState(0)
+  // AGORA-450: dragging the bar. The video pauses while it is held and plays on
+  // from the new place when it lets go, if it was playing.
+  const barRef = useRef<HTMLDivElement | null>(null)
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null)
+  const wasPlaying = useRef(false)
   const [cwShown, setCwShown] = useState(false)
   const [captionOpen, setCaptionOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -87,6 +92,43 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
     const t = setTimeout(() => onViewed(post.id), VIEWED_AFTER_MS)
     return () => clearTimeout(t)
   }, [active, paused, failed, ready, post.id, onViewed])
+
+  const skip = (seconds: number) => {
+    const v = videoRef.current
+    if (!v || !(v.duration > 0)) return
+    v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + seconds))
+  }
+
+  const ratioFrom = (clientX: number) => {
+    const r = barRef.current?.getBoundingClientRect()
+    if (!r || r.width <= 0) return 0
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width))
+  }
+  const seekTo = (ratio: number) => {
+    const v = videoRef.current
+    setScrubRatio(ratio)
+    if (v && v.duration > 0) v.currentTime = ratio * v.duration
+  }
+  const onBarDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation()
+    const v = videoRef.current
+    if (!v || failed) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    wasPlaying.current = !v.paused
+    v.pause()
+    seekTo(ratioFrom(e.clientX))
+  }
+  const onBarMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (scrubRatio === null) return
+    seekTo(ratioFrom(e.clientX))
+  }
+  const onBarUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (scrubRatio === null) return
+    e.stopPropagation()
+    setScrubRatio(null)
+    if (wasPlaying.current) videoRef.current?.play().catch(() => {})
+  }
+  const clock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`
 
   const togglePlay = () => {
     const v = videoRef.current
@@ -175,14 +217,28 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
             onTime={(t, d) => { if (d > 0) setProgress(t / d) }}
           />
         )}
-        {active && paused && ready && !failed && cwOk && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-16 h-16 rounded-full bg-black/50 flex items-center justify-center">
-              <Play size={30} fill="currentColor" />
-            </div>
-          </div>
-        )}
       </div>
+
+      {/* Paused: play, with 10 seconds back and forward either side. Outside
+          the click-to-play surface so the buttons never toggle it. */}
+      {active && paused && ready && !failed && cwOk && scrubRatio === null && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center gap-6 pointer-events-none">
+          <button onClick={() => skip(-10)} aria-label="Back 10 seconds" title="Back 10 seconds"
+            className="pointer-events-auto relative w-12 h-12 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
+            <RotateCcw size={22} />
+            <span className="absolute text-[10px] font-bold mt-0.5">10</span>
+          </button>
+          <button onClick={togglePlay} aria-label="Play"
+            className="pointer-events-auto w-16 h-16 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
+            <Play size={30} fill="currentColor" />
+          </button>
+          <button onClick={() => skip(10)} aria-label="Forward 10 seconds" title="Forward 10 seconds"
+            className="pointer-events-auto relative w-12 h-12 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center">
+            <RotateCw size={22} />
+            <span className="absolute text-[10px] font-bold mt-0.5">10</span>
+          </button>
+        </div>
+      )}
 
       {/* Content warning gate */}
       {post.content_warning && !cwShown && (
@@ -296,9 +352,26 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
       </div>
 
       {/* Progress */}
-      <div className="absolute inset-x-0 bottom-0 h-0.5 bg-white/20 z-20" aria-hidden>
-        <div className="h-full bg-white/80" style={{ width: `${Math.min(100, progress * 100)}%` }} />
-      </div>
+      {scrubRatio !== null && (videoRef.current?.duration ?? 0) > 0 && (
+        <div className="absolute inset-x-0 bottom-10 z-20 flex justify-center pointer-events-none">
+          <span className="bg-black/60 text-sm font-semibold px-2.5 py-1 rounded-lg">
+            {clock(scrubRatio * (videoRef.current?.duration ?? 0))} / {clock(videoRef.current?.duration ?? 0)}
+          </span>
+        </div>
+      )}
+      {near && cwOk && !failed && post.video_url && (
+        <div ref={barRef} role="slider" aria-label="Seek" aria-valuemin={0} aria-valuemax={100}
+          aria-valuenow={Math.round((scrubRatio ?? progress) * 100)} tabIndex={-1}
+          onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}
+          onClick={(e) => e.stopPropagation()}
+          className="group absolute inset-x-0 bottom-0 h-6 z-20 cursor-pointer touch-none flex items-end">
+          <div className={`relative w-full bg-white/20 transition-[height] ${scrubRatio !== null ? 'h-1.5' : 'h-0.5 group-hover:h-1.5'}`}>
+            <div className="h-full bg-white/85" style={{ width: `${Math.min(100, (scrubRatio ?? progress) * 100)}%` }} />
+            <div className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-white shadow ${scrubRatio !== null ? '' : 'opacity-0 group-hover:opacity-100'}`}
+              style={{ left: `${Math.min(100, (scrubRatio ?? progress) * 100)}%` }} />
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div role="status" className="absolute top-28 left-1/2 -translate-x-1/2 z-30 bg-black/70 text-sm px-3 py-1.5 rounded-full">{toast}</div>

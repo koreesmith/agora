@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { usersApi, friendsApi, federationApi, atprotoApi } from '../api'
 import { UserPlus, Users, Compass, Check, Clock, Globe, X } from 'lucide-react'
 import { handle } from '../utils/handle'
@@ -91,7 +91,7 @@ export default function DiscoverPage() {
             {fediverseSuggestions.map((u: any) => (
               <FollowSuggestionCard key={u.actor_url}
                 name={u.display_name || u.username} handleText={handle(u.username, true, u.instance)}
-                avatarUrl={u.avatar_url} bio={u.bio} reason={u.reason}
+                avatarUrl={u.avatar_url} bio={u.bio} reason={u.reason} lookup={`${u.username}@${u.instance}`}
                 follow={() => federationApi.followFediverseAccount(u.actor_url)}
                 onDismiss={() => dismiss('fediverse', u.actor_url)} />
             ))}
@@ -108,7 +108,7 @@ export default function DiscoverPage() {
             {blueskySuggestions.map((u: any) => (
               <FollowSuggestionCard key={u.did}
                 name={u.display_name || u.handle} handleText={`@${u.handle}`}
-                avatarUrl={u.avatar_url} bio={u.bio} reason={u.reason}
+                avatarUrl={u.avatar_url} bio={u.bio} reason={u.reason} lookup={u.handle}
                 follow={() => atprotoApi.followBlueskyAccount(u.did)}
                 onDismiss={() => dismiss('bluesky', u.did)} />
             ))}
@@ -117,6 +117,25 @@ export default function DiscoverPage() {
       )}
     </div>
   )
+}
+
+// AGORA-454: a suggested Fediverse, Bluesky or peer-instance account is not
+// stored here yet, so there is no local profile to link to. Opening one looks
+// the handle up (which creates the profile, as AGORA-421 does for search
+// previews) and then goes to it.
+function useOpenProfile() {
+  const navigate = useNavigate()
+  const [error, setError] = useState('')
+  const open = useMutation({
+    mutationFn: (h: string) => federationApi.lookupUser(h).then(r => r.data),
+    onMutate: () => setError(''),
+    onSuccess: (data) => {
+      if (data?.user?.username) navigate(`/profile/${data.user.username}`)
+      else setError('Could not open that profile.')
+    },
+    onError: (e: any) => setError(e.response?.data?.error || 'Could not open that profile.'),
+  })
+  return { open: (h: string) => open.mutate(h), pending: open.isPending, error }
 }
 
 // A small dismiss control shared by every suggestion card.
@@ -205,6 +224,8 @@ function UserCard({ user: u, onRequestSent, onDismiss }: { user: any, onRequestS
 // id, then sends the request against that id.
 function FederatedUserCard({ user: u, onRequestSent, onDismiss }: { user: any, onRequestSent: () => void, onDismiss: () => void }) {
   const [status, setStatus] = useState<'' | 'resolving' | 'sent' | 'error'>('')
+  const profile = useOpenProfile()
+  const lookupHandle = `${u.username}@${u.instance}`
 
   const addFriend = useMutation({
     mutationFn: async () => {
@@ -221,18 +242,21 @@ function FederatedUserCard({ user: u, onRequestSent, onDismiss }: { user: any, o
   return (
     <div className="card p-4 flex gap-3 relative">
       <DismissButton onDismiss={onDismiss} />
-      <div className="flex-shrink-0 w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
+      <button onClick={() => profile.open(lookupHandle)} disabled={profile.pending} aria-label={`Open ${u.display_name || u.username}'s profile`}
+        className="flex-shrink-0 w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
         {u.avatar_url
           ? <img src={u.avatar_url} alt="" className="w-full h-full object-cover" />
           : <div className="w-full h-full flex items-center justify-center text-agora-400 font-bold text-lg">
               {(u.display_name || u.username).charAt(0).toUpperCase()}
             </div>
         }
-      </div>
+      </button>
 
       <div className="flex-1 min-w-0">
-        <p className="font-semibold truncate pr-6">{u.display_name || u.username}</p>
+        <button onClick={() => profile.open(lookupHandle)} disabled={profile.pending}
+          className="font-semibold hover:underline block truncate pr-6 max-w-full text-left">{u.display_name || u.username}</button>
         <p className="text-xs text-agora-400">{handle(u.username, true, u.instance)}</p>
+        {profile.error && <p className="text-xs text-red-500 mt-0.5">{profile.error}</p>}
 
         <div className="flex items-center gap-1 mt-1.5 text-xs text-agora-400">
           <Globe size={11} /> On {u.instance}
@@ -260,11 +284,12 @@ function FederatedUserCard({ user: u, onRequestSent, onDismiss }: { user: any, o
 
 // AGORA-423: a Fediverse or Bluesky account. Unlike a friend request these are
 // follows, so there is nothing to wait on once it goes through.
-function FollowSuggestionCard({ name, handleText, avatarUrl, bio, reason, follow, onDismiss }: {
-  name: string, handleText: string, avatarUrl?: string, bio?: string, reason?: string,
+function FollowSuggestionCard({ name, handleText, avatarUrl, bio, reason, lookup, follow, onDismiss }: {
+  name: string, handleText: string, avatarUrl?: string, bio?: string, reason?: string, lookup: string,
   follow: () => Promise<unknown>, onDismiss: () => void,
 }) {
   const [status, setStatus] = useState<'' | 'working' | 'done' | 'error'>('')
+  const profile = useOpenProfile()
 
   const run = useMutation({
     mutationFn: follow,
@@ -276,18 +301,21 @@ function FollowSuggestionCard({ name, handleText, avatarUrl, bio, reason, follow
   return (
     <div className="card p-4 flex gap-3 relative">
       <DismissButton onDismiss={onDismiss} />
-      <div className="flex-shrink-0 w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
+      <button onClick={() => profile.open(lookup)} disabled={profile.pending} aria-label={`Open ${name}'s profile`}
+        className="flex-shrink-0 w-12 h-12 rounded-full bg-agora-100 dark:bg-agora-700 overflow-hidden">
         {avatarUrl
           ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
           : <div className="w-full h-full flex items-center justify-center text-agora-400 font-bold text-lg">
               {name.charAt(0).toUpperCase()}
             </div>
         }
-      </div>
+      </button>
 
       <div className="flex-1 min-w-0">
-        <p className="font-semibold truncate pr-6">{name}</p>
+        <button onClick={() => profile.open(lookup)} disabled={profile.pending}
+          className="font-semibold hover:underline block truncate pr-6 max-w-full text-left">{name}</button>
         <p className="text-xs text-agora-400 truncate">{handleText}</p>
+        {profile.error && <p className="text-xs text-red-500 mt-0.5">{profile.error}</p>}
         {bio && <p className="text-xs text-agora-500 mt-1 line-clamp-1">{bio}</p>}
         {reason && (
           <div className="flex items-center gap-1 mt-1.5 text-xs text-agora-500">

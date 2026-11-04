@@ -627,13 +627,13 @@ function GroupSettings({ slug, group, isOwner, onDelete }: { slug: string, group
           <div className="divide-y divide-agora-100 dark:divide-agora-700">
             {requests.map((req: any) => (
               <div key={req.id} className="flex items-center gap-3 py-2.5">
-                <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                <Link to={`/profile/${req.username}`} className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
                   {req.avatar_url
                     ? <img src={req.avatar_url} alt="" className="w-full h-full object-cover" />
                     : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600 text-xs">{(req.display_name||req.username)[0].toUpperCase()}</span>}
-                </div>
+                </Link>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">{req.display_name || req.username}</p>
+                  <p className="text-sm font-medium"><Link to={`/profile/${req.username}`} className="hover:underline">{req.display_name || req.username}</Link></p>
                   {req.message && <p className="text-xs text-agora-400 truncate">"{req.message}"</p>}
                 </div>
                 <div className="flex gap-1.5">

@@ -42,20 +42,23 @@ export default function ThreadContext({ post }: { post: any }) {
       )}
       <div className="card divide-y divide-agora-100 dark:divide-agora-700 overflow-hidden">
         {ancestors.map(a => (
-          <Link key={a.id} to={`/post/${a.id}`}
-            className="flex gap-3 p-3 hover:bg-agora-50 dark:hover:bg-agora-700/40 transition-colors">
-            <span className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+          // AGORA-452: the row opens the post through a link stretched over it;
+          // the avatar and name sit above that link and open the author's
+          // profile. Two links can't be nested, so they are siblings.
+          <div key={a.id} className="relative flex gap-3 p-3 hover:bg-agora-50 dark:hover:bg-agora-700/40 transition-colors">
+            <Link to={`/post/${a.id}`} aria-label="Open this post" className="absolute inset-0" />
+            <Link to={`/profile/${a.username}`} className="relative z-10 w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
               {a.avatar_url
                 ? <img src={a.avatar_url} alt="" className="w-full h-full object-cover" />
                 : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
                     {(a.display_name || a.username)[0]?.toUpperCase()}
                   </span>}
-            </span>
-            <span className="flex-1 min-w-0">
+            </Link>
+            <span className="flex-1 min-w-0 pointer-events-none">
               <span className="flex items-baseline gap-1.5 min-w-0">
-                <span className="text-sm font-medium truncate">
+                <Link to={`/profile/${a.username}`} className="relative z-10 pointer-events-auto text-sm font-medium truncate hover:underline">
                   {a.display_name ? renderName(a.display_name, a.author_emojis) : a.username}
-                </span>
+                </Link>
                 <span className="text-xs text-agora-400 truncate">
                   {handle(a.username, a.is_remote, a.remote_instance)}
                 </span>
@@ -71,7 +74,7 @@ export default function ThreadContext({ post }: { post: any }) {
                     {renderContent(a.content)}
                   </span>}
             </span>
-          </Link>
+          </div>
         ))}
       </div>
     </div>

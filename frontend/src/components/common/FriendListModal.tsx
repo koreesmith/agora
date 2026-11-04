@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { friendsApi } from '../../api'
 import { X, Plus, Check } from 'lucide-react'
 
@@ -150,16 +151,18 @@ export default function FriendListModal({ friend, onClose }: Props) {
 
         {/* Friend avatar + name */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-agora-100 dark:border-agora-700">
-          <div className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+          <Link to={`/profile/${friend.username}`} onClick={onClose} className="w-9 h-9 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
             {friend.avatar_url
               ? <img src={friend.avatar_url} alt="" className="w-full h-full object-cover" />
               : <span className="w-full h-full flex items-center justify-center text-sm font-bold text-agora-600">
                   {displayName[0].toUpperCase()}
                 </span>
             }
-          </div>
+          </Link>
           <div>
-            <p className="text-sm font-medium text-agora-900 dark:text-agora-100">{displayName}</p>
+            <p className="text-sm font-medium text-agora-900 dark:text-agora-100">
+              <Link to={`/profile/${friend.username}`} onClick={onClose} className="hover:underline">{displayName}</Link>
+            </p>
             <p className="text-xs text-agora-400">@{friend.username}</p>
           </div>
         </div>

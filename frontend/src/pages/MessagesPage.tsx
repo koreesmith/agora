@@ -473,7 +473,7 @@ function ThreadView({ convId, onBack }: { convId: string; onBack?: () => void })
             <ArrowLeft size={18} />
           </button>
         )}
-        <Avatar user={other} size={9} showPresence />
+        <Link to={`/profile/${other.username}`} className="flex-shrink-0"><Avatar user={other} size={9} showPresence /></Link>
         <div className="flex-1 min-w-0">
           <Link to={`/profile/${other.username}`} className="font-semibold text-sm hover:underline">
             {other.display_name || other.username}

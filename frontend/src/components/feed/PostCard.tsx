@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff, Bookmark } from 'lucide-react'
+import { MessageCircle, Repeat2, Trash2, Flag, Globe, Users, Lock, MoreHorizontal, X, Pencil, AlertTriangle, ExternalLink, ArrowRight, ChevronLeft, ChevronRight, ThumbsUp, EyeOff, Bookmark, Pin, PinOff } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { feedApi, friendsApi, hiddenPostsApi, bookmarksApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
@@ -110,6 +110,8 @@ export interface Post {
   // Video (AGORA-119)
   video_url?: string
   video_thumb_url?: string
+  // AGORA-447: the author has pinned this post to their profile
+  pinned?: boolean
   // AGORA-437: the video's size and length; absent while unknown
   video_width?: number
   video_height?: number
@@ -428,7 +430,7 @@ function PollWidget({ post, onVote, invalidate }: { post: Post; onVote: (id: str
 
 // ── PostCard ──────────────────────────────────────────────────────────────────
 
-export default function PostCard({ post, invalidateKey = 'feed', detail = false }: { post: Post, invalidateKey?: string, detail?: boolean }) {
+export default function PostCard({ post, invalidateKey = 'feed', detail = false, showPinned = false }: { post: Post, invalidateKey?: string, detail?: boolean, showPinned?: boolean }) {
   const [lightboxPhotos, setLightboxPhotos] = useState<string[] | null>(null)
   const [lightboxIdx, setLightboxIdx] = useState(0)
   // AGORA-400: the post's images and their descriptions, in the same order
@@ -559,6 +561,19 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
     onSuccess: invalidate,
   })
 
+  // AGORA-447: pin or unpin one of your own posts. The label follows the server's
+  // answer rather than guessing, and a refusal (the limit, a kind of post that
+  // can't be pinned) is shown as it was written.
+  const [pinned, setPinned] = useState(!!post.pinned)
+  useEffect(() => setPinned(!!post.pinned), [post.pinned])
+  const togglePin = useMutation({
+    mutationFn: (pin: boolean) => pin ? feedApi.pinPost(post.id) : feedApi.unpinPost(post.id),
+    onSuccess: (_r, pin) => {
+      setPinned(pin)
+      qc.invalidateQueries({ queryKey: ['user-posts'] })
+    },
+    onError: (e: any) => alert(e.response?.data?.error || 'Could not update the pin'),
+  })
   // AGORA-429: the saved state is optimistic and re-synced from the post when
   // the list reloads. Only the bookmarks list is refetched, not the timeline
   // the card is sitting in, so saving a post never reshuffles the feed.
@@ -617,9 +632,18 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
 
   const isOwn = user?.id === post.author_id
   const canDelete = isOwn || user?.role === 'admin' || user?.role === 'moderator'
+  // Your own top-level posts on your profile: not a repost, a wall post, a group
+  // post or a page post. The server says no to the rest in any case.
+  const canPin = isOwn && !post.repost_of_id && !post.wall_user_id && !post.group_slug && !post.page_id
 
   return (
     <div className={`card p-4 ${post.group_slug ? 'border-l-4 border-agora-400 dark:border-agora-500' : ''}`}>
+      {/* AGORA-447: on a profile, a pinned post says so */}
+      {showPinned && post.pinned && (
+        <div className="flex items-center gap-1.5 text-xs font-medium text-agora-500 dark:text-agora-400 mb-2">
+          <Pin size={12} /> Pinned
+        </div>
+      )}
       {showReport && (
         <ReportModal postId={post.id} onClose={() => setShowReport(false)} />
       )}
@@ -737,6 +761,14 @@ export default function PostCard({ post, invalidateKey = 'feed', detail = false 
                       <button onClick={() => { setEditing(true); setEditContent(post.content); setEditVisibility(post.visibility); setEditFriendListId(post.friend_list_id || ''); setEditTwEnabled(!!post.content_warning); setEditTwLabel(post.content_warning || ''); setEditAlts(photoAlts); setShowMenu(false) }}
                         className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
                         <Pencil size={14} /> Edit
+                      </button>
+                    )}
+                    {/* AGORA-447 */}
+                    {canPin && (
+                      <button onClick={() => { togglePin.mutate(!pinned); setShowMenu(false) }}
+                        disabled={togglePin.isPending}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-agora-600 dark:text-agora-300 hover:bg-agora-50 dark:hover:bg-agora-700">
+                        {pinned ? <><PinOff size={14} /> Unpin from profile</> : <><Pin size={14} /> Pin to profile</>}
                       </button>
                     )}
                     {canDelete && (

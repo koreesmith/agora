@@ -718,6 +718,18 @@ var schema = []string{
 	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_bytes BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_bytes BIGINT NOT NULL DEFAULT 0`,
 
+	// ── AGORA-447: pinned posts. A person pins a few of their own posts to the
+	// top of their profile. The post itself decides who can see it, so this only
+	// records the choice and when it was made (newest pin first). Rows go with the
+	// post or the account.
+	`CREATE TABLE IF NOT EXISTS pinned_posts (
+		user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		post_id   UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+		pinned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, post_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_pinned_posts_post ON pinned_posts(post_id)`,
+
 	// ── AGORA-438: Reels ───────────────────────────────────────────────────────
 	// Which reels a user has watched, so the feed doesn't show them again.
 	`CREATE TABLE IF NOT EXISTS reel_views (

@@ -49,6 +49,9 @@ export const feedApi = {
   createPost:    (data: any)               => api.post('/posts', data),
   getPost:       (id: string)              => api.get(`/posts/${id}`),
   deletePost:    (id: string)              => api.delete(`/posts/${id}`),
+  // AGORA-447: pin one of your own posts to the top of your profile (at most 3)
+  pinPost:       (id: string)              => api.post(`/posts/${id}/pin`),
+  unpinPost:     (id: string)              => api.delete(`/posts/${id}/pin`),
   // image_alts alone re-describes the post's existing images (AGORA-400).
   editPost:      (id: string, data: { content?: string, image_url?: string, image_alts?: string[], visibility?: string, friend_list_id?: string, content_warning?: string }) => api.patch(`/posts/${id}`, data),
   likePost:      (id: string)              => api.post(`/posts/${id}/like`),

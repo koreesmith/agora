@@ -180,6 +180,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	r.Get("/bookmarks",                          s.ListBookmarks)  // AGORA-429
 	registerKeywordMuteRoutes(r, s)                                // AGORA-428
 	registerReelsRoutes(r, s)                                      // AGORA-438
+	registerPinRoutes(r, s)                                        // AGORA-447
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
@@ -1013,7 +1014,9 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		viewerParam = nil
 	}
 
-	rows, err := s.db.Query(`
+	// AGORA-447: the same query serves the page of posts and, on the first page,
+	// the posts the author has pinned, so the audience rules are written once.
+	profileQuery := `
 		SELECT p.id, p.author_id, u.username, u.display_name, u.pronouns, u.avatar_url,
 		       p.content, p.image_url, p.visibility, p.community_group_id, p.group_id,
 			       cg.name, cg.slug,
@@ -1039,7 +1042,9 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN pages pg ON pg.id = p.page_id
 		WHERE p.author_id = $2 AND p.parent_id IS NULL AND p.deleted_at IS NULL
 		  AND p.wall_user_id IS NULL
-		  AND `+visFilter+`
+		  AND ` + visFilter
+
+	rows, err := s.db.Query(profileQuery+`
 		ORDER BY p.published_at DESC, p.id DESC LIMIT $3 OFFSET $4
 	`, viewerParam, authorID, limit, offset)
 	if err != nil {
@@ -1055,7 +1060,18 @@ func (s *Service) GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	s.enrichPolls(posts, viewerID)
 	s.enrichPhotos(posts)
 	s.enrichExternalOnly(posts) // AGORA-372: badges the author's own external_only posts
-	writeJSON(w, 200, map[string]any{"posts": posts})
+	resp := map[string]any{"posts": posts}
+
+	// AGORA-447: the first page also carries the author's pinned posts, newest pin
+	// first, limited to the ones this viewer may see. They are in addition to the
+	// page, which still holds every post in its usual place, so paging is
+	// unchanged and a client that doesn't know about pins shows the same profile
+	// it always did. A client that does, shows these first and leaves them out of
+	// the list below.
+	if offset == 0 {
+		resp["pinned_posts"] = s.profilePinnedPosts(profileQuery, viewerParam, viewerID, authorID)
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ── Post CRUD ─────────────────────────────────────────────────────────────────
@@ -1506,6 +1522,7 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+	s.db.Exec(`DELETE FROM pinned_posts WHERE post_id = $1`, id) // AGORA-447: frees the slot
 	// AGORA-444: a moderator or admin removing someone else's video is a
 	// takedown, and the file has to be gone, not just hidden. The author
 	// deleting their own post is unchanged.
@@ -2956,6 +2973,9 @@ type Post struct {
 	// Video (AGORA-119)
 	VideoURL      string `json:"video_url,omitempty"`
 	VideoThumbURL string `json:"video_thumb_url,omitempty"`
+	// AGORA-447: the author has pinned this post to their profile. Filled in by
+	// markPinned, like the video shape below.
+	Pinned bool `json:"pinned,omitempty"`
 	// AGORA-437: the video's shape, so a player can reserve the right space
 	// before it loads. Filled in by markVideoMeta rather than scanned (see
 	// enrichCustomHandles for why), and omitted while unknown.
@@ -3108,6 +3128,7 @@ func (s *Service) enrichCustomHandles(posts []Post) {
 	}
 	s.markPrivateAuthors(posts)
 	s.markVideoMeta(posts) // AGORA-437
+	s.markPinned(posts)    // AGORA-447
 	mentions := make([][]string, len(posts))
 	var names []string
 	for i, p := range posts {

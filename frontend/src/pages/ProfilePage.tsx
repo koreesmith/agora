@@ -274,9 +274,13 @@ export default function ProfilePage() {
   const albums: any[] = albumsData?.albums ?? []
   // Offset paging can repeat a post when a new one is published mid-scroll,
   // so de-duplicate by id across pages.
+  // AGORA-447: the first page also carries the author's pinned posts. They go at
+  // the top, marked, and are left out of the list below so none shows twice.
+  const pinnedPosts: any[] = postsData?.pages?.[0]?.pinned_posts ?? []
+  const pinnedIds = new Set(pinnedPosts.map((p: any) => p.id))
   const posts: any[]  = Array.from(
     new Map((postsData?.pages.flatMap(pg => pg.posts ?? []) ?? []).map((p: any) => [p.id, p])).values()
-  )
+  ).filter((p: any) => !pinnedIds.has(p.id))
 
   return (
     <>
@@ -616,8 +620,9 @@ export default function ProfilePage() {
         </div>
       ) : tab === 'posts' ? (
         <div className="space-y-4">
+          {pinnedPosts.map((p: any) => <PostCard key={`pinned-${p.id}`} post={p} invalidateKey={`user-posts`} showPinned />)}
           {posts.map((p: any) => <PostCard key={p.id} post={p} invalidateKey={`user-posts`} />)}
-          {posts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
+          {posts.length === 0 && pinnedPosts.length === 0 && <div className="card p-6 text-center text-agora-400 text-sm">No posts yet.</div>}
           <div ref={postsBottomRef} className="h-4" />
           {loadingMorePosts && <div className="text-center text-agora-400 text-sm py-2">Loading more…</div>}
           {morePostsFailed && !loadingMorePosts && (

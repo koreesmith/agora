@@ -98,8 +98,23 @@ Author or admin only. Soft-deletes.
 ---
 
 ## `GET /api/users/{username}/posts`
-**Query params:** `page`, `limit`
-**Response 200:** `{"posts": [...], "total": 0}`
+**Query params:** `offset`, `limit`
+**Response 200:** `{"posts": [...], "pinned_posts": [...]}`
+
+`posts` is the page, newest first, with every post in its usual place. On the **first page only** (`offset` 0 or absent), `pinned_posts` also lists the author's pinned posts (AGORA-447), newest pin first, each with `"pinned": true`. It holds only the pins the viewer may see: a pin on a post they can't see leaves no trace, not the post and not a gap. Clients that know about pins show `pinned_posts` first and leave those posts out of `posts`; clients that don't show the same profile they always did. Any post in any list carries `"pinned": true` when its author has pinned it.
+
+---
+
+## `POST /api/posts/{id}/pin` 🔒
+Pin one of your own posts to the top of your profile. Idempotent. Quiet: nobody is notified and nothing is federated. At most **3** posts can be pinned at once; deleted posts don't count, so deleting a pinned post frees its slot.
+
+**Response 200:** `{"pinned": true}`
+**Errors:** 403 for someone else's post; 400 for a post that can't be pinned (a comment, a repost, a post written on someone's wall, or one made in a group or as a page); 404 for a missing or deleted post; 409 at the limit, with the message `You can pin up to 3 posts. Unpin one first.`
+
+A pin never changes who can see the post.
+
+## `DELETE /api/posts/{id}/pin` 🔒
+Remove a pin. Idempotent. **Response 200:** `{"pinned": false}`
 
 ## `GET /api/users/{username}/wall`
 **Response 200:** `{"posts": [...]}`

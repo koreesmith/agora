@@ -31,6 +31,17 @@ People who aren't signed in only see the **Posts** tab.
 
 What appears in **Posts** depends on each post's own visibility. A friends-only post shows up only for your friends, for example. See [Privacy settings](privacy.md).
 
+## Pinning posts
+
+You can pin up to **3** of your own posts to the top of your profile, for the things you most want people to see. Pinned posts are marked **Pinned** and stay above your newest post.
+
+- **On the web:** open the **...** menu on one of your posts and choose **Pin to profile**. Choose **Unpin from profile** to take it off.
+- **In the mobile app:** tap the **...** on one of your posts and choose **Pin to profile** or **Unpin from profile**.
+
+If you already have 3 pinned, unpin one first. Deleting a pinned post frees its place.
+
+Only your own posts on your profile can be pinned, so not a comment, a repost, a post you wrote on someone's wall, or a post made in a group or as a page. Pinning doesn't change who can see a post: a friends-only post you pin shows only to your friends, and everyone else sees the pins they could already see. Pinning is quiet. Nobody is notified, and it isn't sent to the Fediverse or Bluesky.
+
 ## Limiting who can see your profile
 
 Two settings control your profile. On the web they're in **Settings → Privacy**. In the mobile app they're under **Privacy** in **Settings**, and also on the **Edit profile** screen.

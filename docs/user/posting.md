@@ -92,4 +92,4 @@ If you don't want to see one particular post, but don't want to block or unfrien
 
 The post disappears from your feeds straight away. Hiding is private: the author isn't told, and nothing changes for anyone else. You can't hide your own posts (delete or edit them instead).
 
-To bring a post back, go to **Settings → Blocked → Hidden posts** on the web, or **Settings → Hidden posts** in the mobile app, and choose **Unhide**.
+To bring a post back, go to **Settings → Content → Hidden posts** on the web, or **Settings → Content → Hidden posts** in the mobile app, and choose **Unhide**.

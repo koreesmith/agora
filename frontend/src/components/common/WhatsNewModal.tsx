@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 
-// AGORA-435: moved on for v4.1.0 so members who dismissed the v4.0.0 list see
+// AGORA-448: moved on for v5.0.0 so members who dismissed the v4.1.0 list see
 // the new one once.
-const SEEN_KEY = 'agora_seen_v4_1_0'
+const SEEN_KEY = 'agora_seen_v5_0_0'
 
 // AGORA-388: a brand-new account has just been through the getting started
 // wizard, so the auto-shown What's New would only repeat it. Finishing or
@@ -16,51 +16,30 @@ export function markWhatsNewSeen() {
 
 const FEATURES = [
   {
-    emoji: '🔖',
-    title: 'Bookmarks',
-    desc: 'Save any post to come back to later. Tap the bookmark under a post, then find everything you saved in Bookmarks. Only you can see them.',
-    link: '/bookmarks',
-    linkText: 'Open Bookmarks →',
+    emoji: '🎬',
+    title: 'Reels',
+    desc: 'Watch short videos one after another. Following shows reels from the people you follow, and Discover shows reels from around the network. Videos you have already watched are skipped.',
+    link: '/reels',
+    linkText: 'Watch Reels →',
   },
   {
-    emoji: '🔇',
-    title: 'Muted keywords',
-    desc: 'Hide posts that contain words or phrases you choose, for a set number of days or for good. It applies to your timelines, including posts from the Fediverse and Bluesky.',
-    link: '/settings?tab=blocked',
-    linkText: 'Mute a word →',
+    emoji: '🎥',
+    title: 'Make a reel',
+    desc: 'Record a video or choose one, trim it, pick the cover frame and post it. Reels also reach the Fediverse, where other apps show them as videos.',
+    link: '/reels',
+    linkText: 'Make a reel →',
   },
   {
-    emoji: '🧭',
-    title: 'Better Find Friends',
-    desc: 'Suggestions now say why someone is suggested, you can dismiss the ones you do not want, and they include people from the Fediverse and Bluesky.',
-    link: '/discover',
-    linkText: 'Find friends →',
-  },
-  {
-    emoji: '🔎',
-    title: 'Search shows who you follow',
-    desc: 'Search results now show when you already follow someone or are friends with them.',
+    emoji: '📌',
+    title: 'Pinned posts',
+    desc: 'Pin up to three of your own posts to the top of your profile. Use the menu on a post to pin or unpin it.',
     link: null,
     linkText: null,
   },
   {
-    emoji: '🔢',
-    title: 'Accurate follower counts',
-    desc: 'Follower and following counts are now correct across Agora, the Fediverse and Bluesky.',
-    link: null,
-    linkText: null,
-  },
-  {
-    emoji: '♾️',
-    title: 'Keep scrolling on profiles',
-    desc: 'Posts on a profile page now keep loading as you scroll, instead of stopping after the first batch.',
-    link: null,
-    linkText: null,
-  },
-  {
-    emoji: '🔁',
-    title: 'Reposts reach Bluesky',
-    desc: "When you repost a public post that isn't on Bluesky, it now appears there as a post from you with the original text and a link back.",
+    emoji: '📝',
+    title: 'Drafts',
+    desc: 'Save a post to finish later. Use Save draft in the composer, then pick it from Drafts when you are ready. Drafts are kept for 90 days.',
     link: null,
     linkText: null,
   },
@@ -107,7 +86,7 @@ export default function WhatsNewModal({ forceShow, onClose }: Props = {}) {
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-6 pb-3">
           <div>
-            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v4.1.0</div>
+            <div className="text-xs font-semibold text-agora-500 uppercase tracking-wide mb-1">v5.0.0</div>
             <h2 className="text-xl font-bold text-agora-900 dark:text-agora-100">What's New in Agora</h2>
           </div>
           <button onClick={dismiss} className="text-agora-400 hover:text-agora-600 transition-colors ml-4 flex-shrink-0">

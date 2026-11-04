@@ -10,7 +10,7 @@ export default function SettingsPage() {
   const { user, updateUser, logout } = useAuthStore()
   const qc = useQueryClient()
   const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'fediverse'|'bluesky'|'data'|'blocked'>(
+  const [tab, setTab] = useState<'profile'|'account'|'privacy'|'notifications'|'fediverse'|'bluesky'|'data'|'blocked'|'content'>(
     (searchParams.get('tab') as any) || 'profile'
   )
 
@@ -201,13 +201,12 @@ export default function SettingsPage() {
     onError: fail,
   })
 
-  // AGORA-309: hidden posts live in the same tab as blocked users. Both are
-  // "things I have chosen not to see", and a tab of its own for a list most
-  // people will never open would cost more than it returns.
+  // AGORA-309: hidden posts are one of the things the user has chosen not to
+  // see; AGORA-457 moved them to the Content tab, away from blocked users.
   const { data: hiddenData, refetch: refetchHidden } = useQuery({
     queryKey: ['hidden-posts'],
     queryFn: () => hiddenPostsApi.list().then(r => r.data),
-    enabled: tab === 'blocked',
+    enabled: tab === 'content',
   })
   const unhide = useMutation({
     mutationFn: (postId: string) => hiddenPostsApi.unhide(postId),
@@ -225,14 +224,14 @@ export default function SettingsPage() {
     onSuccess: () => refetchBlocked(),
   })
 
-  // AGORA-428: muted keywords sit with blocked users and hidden posts for the
-  // same reason: one more thing the user has chosen not to see.
+  // AGORA-428: muted keywords sit with hidden posts in the Content tab
+  // (AGORA-457): both are things the user has chosen not to see in their timeline.
   const [muteWord, setMuteWord] = useState('')
   const [muteDays, setMuteDays] = useState('0')
   const { data: mutesData, refetch: refetchMutes } = useQuery({
     queryKey: ['keyword-mutes'],
     queryFn: () => keywordMutesApi.list().then(r => r.data),
-    enabled: tab === 'blocked',
+    enabled: tab === 'content',
   })
   const muteChanged = () => {
     refetchMutes()
@@ -257,7 +256,9 @@ export default function SettingsPage() {
     return hours >= 24 ? '1 day left' : `${hours} ${hours === 1 ? 'hour' : 'hours'} left`
   }
 
-  const tabs = ['profile','account','privacy','notifications','fediverse','bluesky','data','blocked'] as const
+  // AGORA-457: 'content' holds what shapes your timeline (muted keywords, hidden
+  // posts) and is where further timeline controls belong. Blocked is people only.
+  const tabs = ['profile','account','privacy','content','notifications','fediverse','bluesky','data','blocked'] as const
 
   return (
     <div className="space-y-4">
@@ -574,8 +575,8 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {tab === 'blocked' && (
-        <div className="card p-4 space-y-3 mt-4">
+      {tab === 'content' && (
+        <div className="card p-4 space-y-3">
           <h3 className="font-semibold">Muted keywords</h3>
           <p className="text-sm text-agora-500">
             Posts containing a muted word or phrase are hidden from your timelines, including posts from the
@@ -627,7 +628,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {tab === 'blocked' && (
+      {tab === 'content' && (
         <div className="card p-4 space-y-3 mt-4">
           <h3 className="font-semibold">Hidden posts</h3>
           <p className="text-sm text-agora-500">

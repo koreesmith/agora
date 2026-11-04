@@ -858,8 +858,14 @@ func (s *Service) buildNoteObject(actor, postID, content string, createdAt time.
 	// since a post could in principle carry both; the compose UI keeps them
 	// mutually exclusive today, but nothing here needs to assume that.
 	if videoURL, thumbURL := s.postVideoURL(postID); videoURL != "" {
+		// AGORA-445: a "Document" with a video mediaType is how Mastodon
+		// sends video and what Loops documents for its own (FEDERATION.md,
+		// Outbound > Create). Agora used to say "Video", which is a valid
+		// ActivityStreams type but not one receivers are known to expect on
+		// an attachment; mediaType is what they read either way, and every
+		// receiver that handles the common shape handles this one.
 		video := map[string]any{
-			"type":      "Video",
+			"type":      "Document",
 			"mediaType": "video/mp4",
 			"url":       videoURL,
 		}
@@ -2094,19 +2100,19 @@ func (s *Service) applyInboundPoll(postID string, poll *apPoll) {
 // somebody else's activity through a struct this version may not fully model.
 func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var note struct {
-		ID           string         `json:"id"`
-		Type         string         `json:"type"` // AGORA-210: "Question" for a poll, "Note" otherwise
-		AttributedTo string         `json:"attributedTo"`
-		Content      string         `json:"content"`
-		InReplyTo    string         `json:"inReplyTo"`
-		Summary      string         `json:"summary"` // AGORA-154: content-warning text, if any
-		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"` // AGORA-213: hashtags (mixed with Mention entries)
-		OneOf        []apPollOption `json:"oneOf"`
-		AnyOf        []apPollOption `json:"anyOf"`
-		EndTime      string         `json:"endTime"`
-		Name         string         `json:"name"` // AGORA-268: set only on a poll-vote Note, never a normal reply
-		Published    string         `json:"published"` // AGORA-270: origin publish time
+		ID           string           `json:"id"`
+		Type         string           `json:"type"` // AGORA-210: "Question" for a poll, "Note" otherwise
+		AttributedTo string           `json:"attributedTo"`
+		Content      string           `json:"content"`
+		InReplyTo    string           `json:"inReplyTo"`
+		Summary      string           `json:"summary"` // AGORA-154: content-warning text, if any
+		Attachment   apAttachmentList `json:"attachment"`
+		Tag          []apTagEntry     `json:"tag"` // AGORA-213: hashtags (mixed with Mention entries)
+		OneOf        []apPollOption   `json:"oneOf"`
+		AnyOf        []apPollOption   `json:"anyOf"`
+		EndTime      string           `json:"endTime"`
+		Name         string           `json:"name"`      // AGORA-268: set only on a poll-vote Note, never a normal reply
+		Published    string           `json:"published"` // AGORA-270: origin publish time
 		// AGORA-337: a friends-only post from another Agora instance is
 		// addressed to named actors with no Public, and says so. to/cc are read
 		// to verify that claim rather than trust it.
@@ -2330,16 +2336,16 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 // reason to retroactively ingest it now.
 func (s *Service) handleInboundUpdate(verifiedActor string, objectRaw json.RawMessage, rawActivity []byte) {
 	var note struct {
-		ID           string         `json:"id"`
-		Type         string         `json:"type"` // AGORA-210
-		AttributedTo string         `json:"attributedTo"`
-		Content      string         `json:"content"`
-		Summary      string         `json:"summary"`
-		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"` // AGORA-213
-		OneOf        []apPollOption `json:"oneOf"`
-		AnyOf        []apPollOption `json:"anyOf"`
-		EndTime      string         `json:"endTime"`
+		ID           string           `json:"id"`
+		Type         string           `json:"type"` // AGORA-210
+		AttributedTo string           `json:"attributedTo"`
+		Content      string           `json:"content"`
+		Summary      string           `json:"summary"`
+		Attachment   apAttachmentList `json:"attachment"`
+		Tag          []apTagEntry     `json:"tag"` // AGORA-213
+		OneOf        []apPollOption   `json:"oneOf"`
+		AnyOf        []apPollOption   `json:"anyOf"`
+		EndTime      string           `json:"endTime"`
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return

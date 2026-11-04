@@ -57,8 +57,9 @@ func TestBuildNoteObjectAttachesVideo(t *testing.T) {
 		t.Fatalf("note[attachment] = %#v, want exactly one video attachment", note["attachment"])
 	}
 	a := attachments[0]
-	if a["type"] != "Video" {
-		t.Errorf("attachment type = %v, want Video", a["type"])
+	// AGORA-445: Document, the shape Mastodon and Loops use for video.
+	if a["type"] != "Document" {
+		t.Errorf("attachment type = %v, want Document", a["type"])
 	}
 	if a["mediaType"] != "video/mp4" {
 		t.Errorf("attachment mediaType = %v, want video/mp4", a["mediaType"])

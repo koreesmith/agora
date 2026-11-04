@@ -335,14 +335,14 @@ type apRemoteNote struct {
 // needing no extra network round trip.
 func (s *Service) ingestRelayForwardedCreate(objectRaw json.RawMessage) {
 	var note struct {
-		ID           string         `json:"id"`
-		AttributedTo string         `json:"attributedTo"`
-		Content      string         `json:"content"`
-		Summary      string         `json:"summary"`
-		InReplyTo    string         `json:"inReplyTo"`
-		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"`       // AGORA-213
-		Published    string         `json:"published"` // AGORA-270
+		ID           string           `json:"id"`
+		AttributedTo string           `json:"attributedTo"`
+		Content      string           `json:"content"`
+		Summary      string           `json:"summary"`
+		InReplyTo    string           `json:"inReplyTo"`
+		Attachment   apAttachmentList `json:"attachment"`
+		Tag          []apTagEntry     `json:"tag"`       // AGORA-213
+		Published    string           `json:"published"` // AGORA-270
 	}
 	if err := json.Unmarshal(objectRaw, &note); err != nil {
 		return
@@ -433,14 +433,14 @@ func (s *Service) fetchRemoteNoteSignedAsInstance(objectURL string) (*apRemoteNo
 	}
 
 	var note struct {
-		ID           string         `json:"id"`
-		AttributedTo string         `json:"attributedTo"`
-		Content      string         `json:"content"`
-		Summary      string         `json:"summary"`
-		InReplyTo    string         `json:"inReplyTo"`
-		Attachment   []apAttachment `json:"attachment"`
-		Tag          []apTagEntry   `json:"tag"`       // AGORA-213
-		Published    string         `json:"published"` // AGORA-270
+		ID           string           `json:"id"`
+		AttributedTo string           `json:"attributedTo"`
+		Content      string           `json:"content"`
+		Summary      string           `json:"summary"`
+		InReplyTo    string           `json:"inReplyTo"`
+		Attachment   apAttachmentList `json:"attachment"`
+		Tag          []apTagEntry     `json:"tag"`       // AGORA-213
+		Published    string           `json:"published"` // AGORA-270
 		// AGORA-419: raw because to/cc may be a single string rather than an
 		// array, and a strict []string would fail the whole note over it.
 		To json.RawMessage `json:"to"`

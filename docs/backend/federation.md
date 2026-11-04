@@ -110,6 +110,49 @@ For servers that don't implement FEP-044f at all, a quote-share still degrades g
 
 Agora never tracks a remote account's actual social graph, so a fediverse profile's follower/following/post counts shown on its profile page are a **live fetch**, not cached columns: `GetRemoteActorStats(actorURL)` dereferences the actor's `followers`/`following`/`outbox` collection URLs and reads each one's `totalItems`, independently and best-effort per collection (AGORA-253). The AT Proto equivalent, `atproto.Service.GetRemoteActorStats(did)`, does the same job with a single `app.bsky.actor.getProfile` call.
 
+## Loops (short-video app) compatibility (AGORA-445)
+
+[Loops](https://joinloops.org) is a federated short-video app (a Laravel server,
+`github.com/joinloops/loops-server`) that federates over ActivityPub, in beta since
+October 2025 and opt-in for an instance. Agora's reels are ordinary video posts, so
+they federate to it the way any video post does. This section records what Loops
+documents (its `FEDERATION.md` and its "Loops Joins the Fediverse" post), what Agora
+does about each point, and what has **not** been checked against a live Loops server.
+
+| Loops documents | Agora |
+|---|---|
+| A video is a `Create` of a **`Note`** (not a `Video` object) with a video attachment | Same: `buildNoteObject` sends a `Note` |
+| The attachment is `{"type":"Document","mediaType":"video/mp4","url":...}` | Same since AGORA-445. Agora used to send `"type":"Video"`; it now sends `Document`, which is also what Mastodon sends. `mediaType` is what receivers read, and Agora's own inbound code reads it first, so Agora-to-Agora is unaffected. The `icon` (thumbnail), `width`, `height` and `duration` (AGORA-437) are extra fields a receiver is free to ignore. |
+| The attachment can be a **single object**, not an array, in its own example | Agora now reads either (`apAttachmentList`). Before AGORA-445 a single-object attachment made the whole note fail to decode, and the post was dropped without a trace. |
+| Several encodings of one video may be attached | Agora keeps the first video attachment, as it does for any post, and treats the rest as unneeded |
+| Replies are Notes with `inReplyTo`; likes are `Like`; shares are `Announce`; follows are `Follow` / `Accept` | All already handled |
+| `HTTP Signatures` required on the shared inbox: draft-cavage-12 and RFC 9421 supported, RSA keys of at least 2048 bits | Agora signs with draft-cavage (`rsa-sha256`, with a `Digest` header) from 2048-bit RSA keys |
+| WebFinger for actors; HTTPS required | Standard; Agora already provides both |
+| Loops **rejects top-level notes without a video** (the blog), and accepts `Note` (FEDERATION.md) | Reels have a video, so they are accepted. Plain text posts are expected to be refused by Loops, which is harmless. |
+
+**What is not known.** Neither source states a maximum video length or aspect ratio
+for what a Loops server will ingest, which attachment fields it requires besides
+`mediaType` and `url`, or whether it checks the attachment's `type`. Agora allows
+reels of up to 2 minutes; Loops' own limit may be shorter, and a video over it might
+be refused or truncated on its side.
+
+### Live test plan
+
+This needs an Agora instance and a Loops instance that can both be reached over
+HTTPS, with federation switched on for the Loops one, which cannot be done from a
+development machine.
+
+1. From a Loops account, follow an Agora account (search its `@name@domain`). Check
+   the follow is accepted.
+2. Post a public reel from that Agora account. Check it appears on the Loops side,
+   plays, and has the right cover and shape. If it doesn't arrive, compare the
+   `Create` Agora sent (the outbox, or the delivery log) with one Loops sends.
+3. Follow the Loops account from Agora. Post a video on Loops and check it reaches the
+   Agora Following tab and plays in Reels. Note whether Loops sends several
+   attachments, and what fields they carry.
+4. Like, reply to and boost the video each way, and check they round trip.
+5. Try a reel longer than Loops' own limit.
+
 ## Fediverse relays
 
 AGORA-219–223 add relay support, modeled on Mastodon's own admin Relays feature: an admin enters a relay's **inbox URL** directly (relay implementations vary too much for actor-URL resolution to be reliable), and Agora subscribes via the same "object: Public collection" convention most relay software (Mastodon's bundled relay, `activityrelay`, `aoderrelay`, ...) expects.

@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -133,4 +134,32 @@ func (s *Service) postVideoShape(postID string) videoMeta {
 	s.db.QueryRow(`SELECT video_width, video_height, video_duration_ms FROM posts WHERE id = $1`, postID).
 		Scan(&m.Width, &m.Height, &m.DurationMs)
 	return m
+}
+
+// apAttachmentList (AGORA-445) decodes an object's "attachment". JSON-LD lets it
+// be a single object as well as an array: Mastodon always sends an array, but
+// Loops' own documentation shows a single object for a video, and a plain
+// []apAttachment fails to decode that, which would drop the whole post.
+type apAttachmentList []apAttachment
+
+func (l *apAttachmentList) UnmarshalJSON(b []byte) error {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*l = nil
+		return nil
+	}
+	if trimmed[0] == '{' {
+		var one apAttachment
+		if err := json.Unmarshal(trimmed, &one); err != nil {
+			return err
+		}
+		*l = apAttachmentList{one}
+		return nil
+	}
+	var many []apAttachment
+	if err := json.Unmarshal(trimmed, &many); err != nil {
+		return err
+	}
+	*l = many
+	return nil
 }

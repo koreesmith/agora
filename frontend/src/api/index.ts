@@ -417,6 +417,14 @@ export const reelsApi = {
   viewed: (id: string) => api.post(`/reels/${id}/viewed`),
 }
 
+// AGORA-431: draft posts. data is the composer's own fields, kept as sent.
+export const draftsApi = {
+  list:   ()                                      => api.get('/drafts'),
+  create: (data: { content: string, data: any }) => api.post('/drafts', data),
+  update: (id: string, data: { content: string, data: any }) => api.put(`/drafts/${id}`, data),
+  remove: (id: string)                            => api.delete(`/drafts/${id}`),
+}
+
 // ── Blocks ────────────────────────────────────────────────────────────────────
 export const blocksApi = {
   list:     ()                 => api.get('/blocks'),

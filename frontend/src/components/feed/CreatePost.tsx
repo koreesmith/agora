@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Image, X, Globe, Users, Lock, AlertTriangle, ExternalLink, BarChart2, Plus, Minus, ChevronDown, Video, Info } from 'lucide-react'
-import { feedApi, friendsApi, previewApi, pagesApi, authApi } from '../../api'
+import { feedApi, friendsApi, previewApi, pagesApi, authApi, draftsApi } from '../../api'
+import DraftsModal, { Draft } from './DraftsModal'
 import api from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { useMentions } from './useMentions'
@@ -33,6 +34,10 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
   const [altEditing, setAltEditing] = useState<string | null>(null)
   const imageAlts = imageUrls.map(u => altByUrl[u] || '')
   const [visibility, setVisibility] = useState('friends')
+  // AGORA-431: the draft this post is being written from, if any, and the drafts list
+  const [draftId, setDraftId] = useState<string | null>(null)
+  const [showDrafts, setShowDrafts] = useState(false)
+  const [draftNotice, setDraftNotice] = useState('')
   // Post-as-page identity selector
   const [selectedPageSlug, setSelectedPageSlug] = useState<string>('')
   const [showPagePicker, setShowPagePicker] = useState(false)
@@ -109,6 +114,7 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
     staleTime: 60_000,
   })
   const myPages: any[] = myPagesData?.pages ?? []
+  const { data: draftsData } = useQuery({ queryKey: ['drafts'], queryFn: () => draftsApi.list().then(r => r.data), staleTime: 60_000 })
   const selectedPage = myPages.find(p => p.slug === selectedPageSlug)
 
   // Debounced URL detection — fires 800ms after user stops typing
@@ -205,6 +211,7 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
         image_alts: imageAlts,
         video_url: videoUrl || undefined,
         video_thumb_url: videoThumbUrl || undefined,
+        draft_id: draftId || undefined, // AGORA-431
         visibility,
         group_id: visibility === 'group' ? friendListId : undefined,
         content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
@@ -229,9 +236,87 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
       setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
       setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
       setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true)
+      setDraftId(null)
       qc.invalidateQueries({ queryKey: ['feed'] })
+      qc.invalidateQueries({ queryKey: ['drafts'] })
     },
   })
+
+  // ── AGORA-431: drafts ────────────────────────────────────────────────────
+  // What the composer holds, as the server keeps it. A link preview isn't stored:
+  // it is found again from the text.
+  const draftData = () => ({
+    visibility,
+    group_id: visibility === 'group' ? friendListId : undefined,
+    content_warning: twEnabled && twLabel.trim() ? twLabel.trim() : '',
+    image_urls: imageUrls,
+    image_alts: imageAlts,
+    video_url: videoUrl || undefined,
+    video_thumb_url: videoThumbUrl || undefined,
+    poll_options: pollEnabled ? pollOptions : [],
+    poll_multiple_choice: pollEnabled ? pollMultipleChoice : false,
+    poll_allows_new_options: pollEnabled ? pollAllowsNewOptions : false,
+    poll_expires_hours: pollEnabled ? pollExpiresHours : 24,
+    agora_enabled: agoraEnabled,
+    federate_activitypub: federateAP,
+    federate_atproto: federateATProto,
+  })
+
+  const resetComposer = () => {
+    setContent(''); setImageUrls([]); setAltByUrl({}); setFriendListId('')
+    stopVideoPolling(); localStorage.removeItem('agora_pending_video_job')
+    setVideoUrl(''); setVideoThumbUrl(''); setVideoProcessing(false)
+    setTwEnabled(false); setTwLabel('')
+    setPollEnabled(false); setPollOptions(['', '']); setPollMultipleChoice(false); setPollAllowsNewOptions(false); setPollExpiresHours(24)
+    setPreview(null); setDetectedUrl(''); setPreviewDismissed(false)
+    setAgoraEnabled(true); setFederateAP(true); setFederateATProto(true)
+    setDraftId(null)
+  }
+
+  const hasSomething = !!content.trim() || imageUrls.length > 0 || !!videoUrl || (pollEnabled && pollOptions.some(o => o.trim()))
+
+  const saveDraft = useMutation({
+    mutationFn: () => {
+      const body = { content, data: draftData() }
+      return draftId ? draftsApi.update(draftId, body) : draftsApi.create(body)
+    },
+    onSuccess: () => {
+      resetComposer()
+      qc.invalidateQueries({ queryKey: ['drafts'] })
+      setDraftNotice('Draft saved')
+      setTimeout(() => setDraftNotice(''), 2500)
+    },
+    onError: (e: any) => alert(e.response?.data?.error || 'Could not save your draft'),
+  })
+
+  const pickDraft = (d: Draft) => {
+    if (hasSomething && !confirm('Replace what you are writing with this draft?')) return
+    const x = d.data || {}
+    resetComposer()
+    setContent(d.content)
+    setImageUrls(x.image_urls ?? [])
+    const alts: Record<string, string> = {}
+    ;(x.image_urls ?? []).forEach((u: string, i: number) => { if (x.image_alts?.[i]) alts[u] = x.image_alts[i] })
+    setAltByUrl(alts)
+    setVideoUrl(x.video_url ?? '')
+    setVideoThumbUrl(x.video_thumb_url ?? '')
+    setVisibility(x.visibility || 'friends')
+    setFriendListId(x.group_id ?? '')
+    if (x.content_warning) { setTwEnabled(true); setTwLabel(x.content_warning) }
+    const opts: string[] = x.poll_options ?? []
+    if (opts.some(o => o?.trim())) {
+      setPollEnabled(true)
+      setPollOptions(opts.length >= 2 ? opts : [...opts, ''])
+      setPollMultipleChoice(!!x.poll_multiple_choice)
+      setPollAllowsNewOptions(!!x.poll_allows_new_options)
+      setPollExpiresHours(x.poll_expires_hours ?? 24)
+    }
+    setAgoraEnabled(x.agora_enabled ?? true)
+    setFederateAP(x.federate_activitypub ?? true)
+    setFederateATProto(x.federate_atproto ?? true)
+    setDraftId(d.id)
+    setShowDrafts(false)
+  }
 
   // Shared image upload helper — accepts File[] from file input or clipboard
   const uploadFiles = async (files: File[]) => {
@@ -773,7 +858,17 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
             : <span className="text-xs text-agora-400">No lists yet — <Link to="/connections?tab=lists" className="underline">create one</Link></span>
         )}
 
-        <button onClick={() => create.mutate()} disabled={!canPost} className="ml-auto btn-primary text-sm">
+        {/* AGORA-431 */}
+        <button onClick={() => setShowDrafts(true)} className="ml-auto btn-ghost text-sm" title="Your saved drafts">
+          Drafts{draftsData?.drafts?.length ? ` (${draftsData.drafts.length})` : ''}
+        </button>
+        <button onClick={() => saveDraft.mutate()}
+          disabled={!hasSomething || saveDraft.isPending || uploading || uploadingVideo || videoProcessing || !!selectedPageSlug}
+          title={selectedPageSlug ? 'Drafts are for your own posts, not page posts' : videoProcessing ? 'Wait for the video to finish processing' : 'Save this to finish later'}
+          className="btn-ghost text-sm">
+          {saveDraft.isPending ? 'Saving…' : 'Save draft'}
+        </button>
+        <button onClick={() => create.mutate()} disabled={!canPost} className="btn-primary text-sm">
           {create.isPending ? 'Posting…' : 'Post'}
         </button>
       </div>
@@ -812,7 +907,12 @@ export default function CreatePost({ autoFocus }: { autoFocus?: boolean } = {}) 
           because a standing warning on every limited post trains people to
           ignore it and costs it its value on the one post that needs it. */}
       <AudienceReach list={selectedList} />
+
+      {/* AGORA-431 */}
+      {draftNotice && <p role="status" className="text-xs text-agora-500 pl-13">{draftNotice}</p>}
+      {draftId && <p className="text-xs text-agora-400 pl-13">Editing a saved draft. Posting it removes the draft; Save draft updates it.</p>}
     </div>
+    {showDrafts && <DraftsModal onPick={pickDraft} onClose={() => setShowDrafts(false)} />}
     </>
   )
 }

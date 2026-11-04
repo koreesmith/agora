@@ -36,6 +36,27 @@ Create a new post.
 ```
 **Response 201:** Post object
 
+## Drafts
+
+Saved drafts of a post, kept on the server so they are the same on every device (AGORA-431). `data` is the composer's own fields as one JSON object, such as `visibility`, `group_id`, `content_warning`, `image_urls`, `image_alts`, `video_url`, `video_thumb_url`, `poll_options` and the network choices. The server doesn't interpret it, except that it records which of this instance's uploaded files it points to (in `image_urls`, `image_url`, `video_url` and `video_thumb_url`) so cleaning up unused media leaves them alone.
+
+### `GET /api/drafts` 🔒
+**Response 200:** `{"drafts": [{"id", "content", "data", "created_at", "updated_at"}], "max_drafts": 25}`, most recently changed first. A draft untouched for 90 days is not listed and is removed by a daily cleanup.
+
+### `POST /api/drafts` 🔒
+**Body:** `{"content": "string", "data": {...}}`. **Response 201:** the draft.
+**Errors:** 400 when there is nothing to save (no text, no media and no poll option), or `data` isn't an object; 413 when it is too big (64 KB of data, 10,000 characters of text); 409 at the limit of 25 drafts.
+
+### `PUT /api/drafts/{id}` 🔒
+Replaces a draft's contents and moves it to the top. **Response 200:** the draft. **Errors:** 400 and 413 as above; 404 for a draft that isn't yours.
+
+### `DELETE /api/drafts/{id}` 🔒
+Idempotent; someone else's draft is left alone. **Response 200:** `{"deleted": true}`.
+
+To post a draft, send `POST /api/posts` as usual with `"draft_id": "<id>"`. The draft is removed in the same request, and only if it is yours.
+
+---
+
 ## `GET /api/posts/{id}`
 **Response 200:** Post object
 **Errors:** `403` no visibility access, `404` not found

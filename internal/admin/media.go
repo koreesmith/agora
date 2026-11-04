@@ -152,6 +152,8 @@ func (s *Service) collectReferencedURLs() (map[string]bool, error) {
 		`SELECT cover_url           FROM community_groups  WHERE cover_url != ''`,
 		`SELECT image_url           FROM messages          WHERE image_url != ''`,
 		`SELECT value               FROM instance_settings WHERE key = 'logo_url' AND value != ''`,
+		// AGORA-431: files a saved draft points to are still wanted.
+		`SELECT unnest(media_urls)  FROM post_drafts`,
 	}
 
 	for _, q := range queries {

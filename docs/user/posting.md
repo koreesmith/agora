@@ -73,6 +73,16 @@ Click the **TW** button to add a content warning label. The post content is hidd
 
 If you own one or more Pages, a dropdown appears above the compose box. Select a Page to post as that Page instead of your personal account.
 
+## Saving a draft
+
+If you're not ready to post, choose **Save draft** and finish later. The compose box clears, and the draft is kept on the server, so a draft you save in the mobile app is there on the web too, and the other way round.
+
+- **Find your drafts:** choose **Drafts** next to the **Post** button. It shows how many you have. Pick one to put it back in the compose box, or use the bin to delete it.
+- **What a draft keeps:** your text, photos and their descriptions, a video, a poll, a content warning, who can see it, and which networks it goes to. A link preview is found again from your text.
+- **Changing a draft:** open it, make your changes and choose **Save draft** again, which updates it. Posting a draft removes it.
+- **Limits:** you can keep up to **25** drafts. A draft you haven't touched for **90 days** is removed. A video has to finish processing before you can save it in a draft.
+- **Not for pages:** drafts are for your own posts, not posts you make as a Page.
+
 ## Hiding a post from your timeline
 
 If you don't want to see one particular post, but don't want to block or unfriend the person who wrote it:

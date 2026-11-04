@@ -264,6 +264,7 @@ func main() {
 	// ── Background jobs ───────────────────────────────────────────────────
 	go fedSvc.StartBackgroundSync(context.Background())
 	go userSvc.StartDeletionCleanup(context.Background())
+	go feedSvc.StartDraftCleanup(context.Background()) // AGORA-431
 	go interactionsSvc.StartPruner(context.Background())
 	go atprotoSvc.StartRelayCrawl(context.Background())
 	go atprotoSvc.StartBlueskyIngestion(context.Background())

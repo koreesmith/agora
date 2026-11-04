@@ -730,6 +730,22 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_pinned_posts_post ON pinned_posts(post_id)`,
 
+	// ── AGORA-431: draft posts. What someone had in the compose box and chose to
+	// save and finish later, on any device. The composer's own fields are kept as
+	// one JSON object, so a new field in the composer needs no migration, and the
+	// uploaded files it points to are listed apart so cleaning up unused media
+	// leaves them alone.
+	`CREATE TABLE IF NOT EXISTS post_drafts (
+		id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+		user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		content    TEXT        NOT NULL DEFAULT '',
+		data       JSONB       NOT NULL DEFAULT '{}',
+		media_urls TEXT[]      NOT NULL DEFAULT '{}',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_post_drafts_user ON post_drafts(user_id, updated_at DESC)`,
+
 	// ── AGORA-438: Reels ───────────────────────────────────────────────────────
 	// Which reels a user has watched, so the feed doesn't show them again.
 	`CREATE TABLE IF NOT EXISTS reel_views (

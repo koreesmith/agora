@@ -181,6 +181,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	registerKeywordMuteRoutes(r, s)                                // AGORA-428
 	registerReelsRoutes(r, s)                                      // AGORA-438
 	registerPinRoutes(r, s)                                        // AGORA-447
+	registerDraftRoutes(r, s)                                      // AGORA-431
 	r.Post("/posts/{id}/comments",                s.CreateComment)
 	r.Delete("/posts/{id}/comments/{commentID}", s.DeleteComment)
 	r.Patch("/posts/{id}/comments/{commentID}",  s.EditComment)
@@ -1096,6 +1097,8 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 		LinkDescription string   `json:"link_description"`
 		LinkImage       string   `json:"link_image"`
 		LinkDomain      string   `json:"link_domain"`
+		// AGORA-431: the draft this post was written from, removed once it is posted.
+		DraftID              string   `json:"draft_id"`
 		PollOptions          []string `json:"poll_options"`
 		PollExpiresHours     int      `json:"poll_expires_hours"`
 		PollMultipleChoice   bool     `json:"poll_multiple_choice"`
@@ -1264,6 +1267,11 @@ func (s *Service) CreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.applyUploadedVideoMeta(id, userID, req.VideoURL) // AGORA-437
+	// AGORA-431: a post written from a draft takes the draft with it, in the same
+	// request, so a failure to clean up afterwards can't leave a stale copy behind.
+	if req.DraftID != "" {
+		s.db.Exec(`DELETE FROM post_drafts WHERE id = $1::uuid AND user_id = $2`, req.DraftID, userID)
+	}
 
 	// Insert poll options if provided
 	for i, opt := range pollOpts {

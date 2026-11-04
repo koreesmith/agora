@@ -156,3 +156,29 @@ func TestMediaStorageReport(t *testing.T) {
 		t.Errorf("max seconds %d, want the default 120", rep.MaxSeconds)
 	}
 }
+
+// AGORA-431: a file a saved draft points to is still wanted, so the cleanup of
+// unused media leaves it alone.
+func TestDraftMediaIsNotOrphaned(t *testing.T) {
+	db := openAdminDB(t)
+	name := fmt.Sprintf("dm431_%d", time.Now().UnixNano())
+	var uid string
+	db.QueryRow(`INSERT INTO users (username, email, password_hash) VALUES ($1, $2, 'x') RETURNING id`, name, name+"@x.invalid").Scan(&uid)
+	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, uid) })
+	url := fmt.Sprintf("/uploads/posts/draft-%d.jpg", time.Now().UnixNano())
+	db.Exec(`INSERT INTO post_drafts (user_id, content, media_urls) VALUES ($1, 'x', ARRAY[$2]::text[])`, uid, url)
+
+	s := &Service{db: db, cfg: &config.Config{}, media: fakeMedia{t.TempDir()}}
+	refs, err := s.collectReferencedURLs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refs[url] {
+		t.Errorf("a draft's photo %s is not counted as in use", url)
+	}
+	db.Exec(`DELETE FROM post_drafts WHERE user_id = $1`, uid)
+	refs, _ = s.collectReferencedURLs()
+	if refs[url] {
+		t.Error("with the draft gone the photo should be unreferenced again")
+	}
+}

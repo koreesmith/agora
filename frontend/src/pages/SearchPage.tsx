@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { searchApi, friendsApi, federationApi, pagesApi, atprotoApi } from '../api'
 import { useAuthStore } from '../store/auth'
 import { handle, isDomainHandle, isFullHandle } from '../utils/handle'
@@ -421,20 +421,35 @@ function BlueskyActorResult({ actor: a, onFollow, followPending }: {
   const [followed, setFollowed] = useState(!!a.following)
   const handleFollow = () => { setFollowed(true); onFollow() }
 
+  // AGORA-455: a Bluesky result is not stored here yet, so opening it looks the
+  // handle up first (as Find Friends does, AGORA-454) and goes to its Agora
+  // profile instead of out to bsky.app.
+  const navigate = useNavigate()
+  const [openError, setOpenError] = useState('')
+  const openProfile = useMutation({
+    mutationFn: () => federationApi.lookupUser(a.handle).then(r => r.data),
+    onMutate: () => setOpenError(''),
+    onSuccess: (data) => {
+      if (data?.user?.username) navigate(`/profile/${data.user.username}`)
+      else setOpenError('Could not open that profile.')
+    },
+    onError: (e: any) => setOpenError(e.response?.data?.error || 'Could not open that profile.'),
+  })
+
   return (
     <div className="card p-3 flex items-center gap-3">
-      <a href={`https://bsky.app/profile/${a.handle}`} target="_blank" rel="noreferrer noopener"
+      <button onClick={() => openProfile.mutate()} disabled={openProfile.isPending} aria-label={`Open ${a.display_name || a.handle}'s profile`}
         className="w-10 h-10 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
         {a.avatar_url
           ? <img src={a.avatar_url} alt="" className="w-full h-full object-cover" />
           : <span className="w-full h-full flex items-center justify-center font-bold text-agora-600">{(a.display_name || a.handle)[0].toUpperCase()}</span>}
-      </a>
+      </button>
       <div className="flex-1 min-w-0">
-        <a href={`https://bsky.app/profile/${a.handle}`} target="_blank" rel="noreferrer noopener"
-          className="font-medium text-sm hover:underline flex items-center gap-1 truncate">
-          <span className="truncate">{a.display_name || a.handle}</span>
-          <ExternalLink size={11} className="text-agora-400 flex-shrink-0" />
-        </a>
+        <button onClick={() => openProfile.mutate()} disabled={openProfile.isPending}
+          className="font-medium text-sm hover:underline block truncate max-w-full text-left">
+          {a.display_name || a.handle}
+        </button>
+        {openError && <p className="text-xs text-red-500">{openError}</p>}
         <p className="text-xs text-agora-400 truncate">@{a.handle} · Bluesky</p>
         {a.description && <p className="text-xs text-agora-500 truncate mt-0.5">{a.description}</p>}
       </div>

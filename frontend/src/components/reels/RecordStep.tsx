@@ -3,12 +3,10 @@ import { Circle, Square, Camera } from 'lucide-react'
 
 // AGORA-441: record a reel with the camera. Offered only where the browser can
 // (getUserMedia and MediaRecorder); elsewhere the picker just uploads a file.
-// Stops by itself at the length limit.
+// Stops by itself at the length limit, which is the instance's own (AGORA-444).
 
 export const canRecord = () =>
   typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
-
-const MAX_SECONDS = 120
 
 function pickMimeType(): string {
   // Safari records MP4; Chrome and Firefox record WebM.
@@ -22,7 +20,7 @@ export function recordingFileName(mime: string): string {
   return mime.includes('mp4') ? 'reel.mp4' : 'reel.webm'
 }
 
-export default function RecordStep({ onRecorded, onCancel }: { onRecorded: (file: File) => void; onCancel: () => void }) {
+export default function RecordStep({ maxSeconds, onRecorded, onCancel }: { maxSeconds: number; onRecorded: (file: File) => void; onCancel: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -90,7 +88,7 @@ export default function RecordStep({ onRecorded, onCancel }: { onRecorded: (file
     tickRef.current = setInterval(() => {
       const s = Math.floor((Date.now() - began) / 1000)
       setSeconds(s)
-      if (s >= MAX_SECONDS) stop()
+      if (s >= maxSeconds) stop()
     }, 250)
   }
 
@@ -105,7 +103,7 @@ export default function RecordStep({ onRecorded, onCancel }: { onRecorded: (file
         )}
         {recording && (
           <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 text-white text-xs rounded-full px-2.5 py-1" role="timer" aria-label="Recording time">
-            <Circle size={10} className="text-red-500" fill="currentColor" /> {mmss(seconds)} / {mmss(MAX_SECONDS)}
+            <Circle size={10} className="text-red-500" fill="currentColor" /> {mmss(seconds)} / {mmss(maxSeconds)}
           </div>
         )}
       </div>

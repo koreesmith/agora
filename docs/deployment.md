@@ -138,6 +138,82 @@ docker compose up -d --build
 
 Migrations run automatically on startup via `db.Migrate()`.
 
+## Upgrading to v5.0.0
+
+v5.0.0 adds Reels: a full-screen feed of short videos and a way to make them.
+Back up `./data/postgres` and `./data/uploads` first, then update as above.
+
+### What it costs you
+
+Video is the most expensive thing an instance hosts, and Reels will make
+people post more of it.
+
+- **Disk.** A transcoded 2-minute video is roughly 20 MB (see
+  [ADR-001](adr/001-video-storage-encoding-delivery.md)). A thousand videos is
+  about 20 GB, ten thousand about 200 GB. Videos are kept after their post is
+  deleted by its author, and are only removed from disk when a moderator or
+  admin takes a post down.
+- **Bandwidth.** A reel loops and is watched repeatedly, and the next one is
+  loaded ahead of time, so a video is served more often than a photo is. nginx
+  serves them straight from `./data/uploads` with range requests. If egress
+  becomes a problem, a CDN or separate media origin can sit in front of
+  `/uploads` without code changes.
+- **CPU while uploading.** Each video is transcoded with `ffmpeg` (H.264, up to
+  720p). At most two transcodes run at once. The runtime image already includes
+  `ffmpeg`; if you run Agora outside Docker, it needs `ffmpeg` and `ffprobe` with
+  the `libx264` and AAC encoders. Distribution builds that leave out `libx264`
+  (for example Fedora and RHEL's `ffmpeg-free`) will transcode nothing.
+
+### New settings
+
+All in Admin, under **Settings**, **Reels and video**. They take effect
+immediately, with no restart.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Reels Discover tab (`reels_discover_enabled`) | on | Offers the Discover tab, which shows public videos from this instance and its peers. Off leaves only the Following tab. |
+| Longest video (`video_max_seconds`) | 120 | The longest video this instance accepts, 5 to 120 seconds. People can trim a longer video down to fit, so it limits what is kept, not what is chosen. |
+| Video storage per account (`video_quota_mb`) | 0 (no limit) | Total video storage each account may use. An account at its limit must delete a video before uploading another. |
+
+Admin, under **Storage**, now shows how much disk uploads use, with video
+apart from images, and the accounts using the most video storage.
+
+### On the first start
+
+- **Two background passes** run once at startup over existing videos: one
+  records each video's size and length, the other how much disk each takes (for
+  storage limits). They run in the background, so startup isn't held up, and
+  they are safe to repeat. On an instance with many thousands of videos they
+  use some CPU for a short while.
+- **A new index** on `posts(repost_of_id)` is built. Every feed counted a
+  post's reposts by scanning the whole posts table, so the home feed, Explore
+  and profiles get faster as well. On a very large posts table the build takes
+  a moment during migration.
+
+### Federation and moderation
+
+- Reels are ordinary video posts, so they federate to the Fediverse and Bluesky
+  exactly like existing video posts. Videos now carry their width, height and
+  duration, and Bluesky videos carry their aspect ratio.
+- A reported video can be played from the report in Admin.
+- When a moderator or admin deletes **someone else's** video post, the video and
+  its thumbnail are removed from disk and the takedown is written to the audit
+  log. A person deleting their own post leaves the files in place.
+- Discover shows the same pool as Explore: this instance and its peered Agora
+  instances. Videos from the wider Fediverse and Bluesky only reach people who
+  follow those accounts, in their Following tab.
+
+### Mobile app
+
+The v5.0.0 app needs a **new build**, not an over-the-air update: recording
+video needs a microphone permission, which is native configuration. An older app
+still works against a v5.0.0 server, and a v5.0.0 app against an older server
+hides Reels.
+
+### Version
+
+The instance now reports version `5.0.0` in NodeInfo.
+
 ## Upgrading to v4.0.0
 
 Back up `./data/postgres` and `./data/uploads` first. Then read the points

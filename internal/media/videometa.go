@@ -126,4 +126,51 @@ func (s *Service) BackfillVideoMeta() {
 	if done > 0 || failed > 0 {
 		log.Printf("media: video meta backfill: %d filled in, %d could not be read", done, failed)
 	}
+	s.BackfillVideoBytes()
+}
+
+// BackfillVideoBytes records how much disk each Agora-hosted video takes, for
+// videos posted before that was tracked (AGORA-444), so per-account storage
+// limits count them. Same shape as BackfillVideoMeta: safe to repeat, small
+// batches, files it can't find are skipped.
+func (s *Service) BackfillVideoBytes() {
+	const batch = 200
+	filled := 0
+	lastID := ""
+	for {
+		rows, err := s.db.Query(
+			`SELECT id, video_url, video_thumb_url FROM posts
+			  WHERE video_bytes = 0 AND video_url LIKE '/uploads/videos/%' AND id::text > $1
+			  ORDER BY id::text LIMIT $2`, lastID, batch)
+		if err != nil {
+			log.Printf("media: video size backfill: %v", err)
+			return
+		}
+		type item struct{ id, video, thumb string }
+		var items []item
+		for rows.Next() {
+			var it item
+			if rows.Scan(&it.id, &it.video, &it.thumb) == nil {
+				items = append(items, it)
+			}
+		}
+		rows.Close()
+		if len(items) == 0 {
+			break
+		}
+		for _, it := range items {
+			lastID = it.id
+			n := fileSize(s.localVideoPath(it.video))
+			if t := s.localVideoPath(it.thumb); t != "" {
+				n += fileSize(t)
+			}
+			if n > 0 {
+				s.db.Exec(`UPDATE posts SET video_bytes = $2 WHERE id = $1`, it.id, n)
+				filled++
+			}
+		}
+	}
+	if filled > 0 {
+		log.Printf("media: video size backfill: %d videos measured", filled)
+	}
 }

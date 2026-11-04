@@ -15,6 +15,7 @@ Welcome to Agora, a private, federated social network built for the people you a
 - [Commenting & reacting](comments.md)
 - [Reposting and sharing](sharing.md)
 - [Polls](polls.md)
+- [Reels](reels.md): watching short videos, making your own, and customizing the mobile bottom bar
 
 ## Friends & Groups
 

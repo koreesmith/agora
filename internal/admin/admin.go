@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -104,6 +105,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 	// Media cleanup
 	r.Get("/admin/media/orphans",    s.ScanOrphans)
 	r.Delete("/admin/media/orphans", s.DeleteOrphans)
+	r.Get("/admin/media/storage",   s.GetMediaStorage) // AGORA-444
 
 	// AGORA-380: remote media cache
 	r.Get("/admin/media/remote-cache",        s.GetRemoteMediaCache)
@@ -122,7 +124,7 @@ func RegisterRoutes(r chi.Router, s *Service) {
 // Shared by GetSettings and UpdateSettings so the two can't drift apart.
 var adminEditableSettings = map[string]bool{
 	"instance_name": true, "instance_description": true, "registration_mode": true,
-	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "reels_discover_enabled": true, "deletion_grace_days": true, "logo_url": true,
+	"federation_enabled": true, "activitypub_enabled": true, "atproto_enabled": true, "reels_discover_enabled": true, "video_max_seconds": true, "video_quota_mb": true, "deletion_grace_days": true, "logo_url": true,
 	"smtp_host": true, "smtp_port": true, "smtp_user": true, "smtp_password": true,
 	"smtp_from": true, "smtp_enabled": true, "user_invites_enabled": true,
 	// AGORA-285: 'auto' or 'manual' — whether a DNS-verified custom domain
@@ -164,12 +166,43 @@ func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settings)
 }
 
+// validateSetting checks the values with a fixed shape (AGORA-444). Anything
+// else is stored as given, as it always was.
+func validateSetting(key, value string) error {
+	switch key {
+	case "reels_discover_enabled":
+		if value != "true" && value != "false" {
+			return fmt.Errorf("reels_discover_enabled must be true or false")
+		}
+	case "video_max_seconds":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 5 || n > 120 {
+			return fmt.Errorf("the longest video must be between 5 and 120 seconds")
+		}
+	case "video_quota_mb":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 0 || n > 10_000_000 {
+			return fmt.Errorf("the video storage limit must be a number of MB, 0 or more (0 means no limit)")
+		}
+	}
+	return nil
+}
+
 func (s *Service) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	actorID := auth.UserIDFromCtx(r.Context())
 	var updates map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		writeError(w, 400, "invalid json")
 		return
+	}
+
+	// AGORA-444: refuse a bad value for the settings that have a shape before
+	// changing anything, so a typo can't leave the instance half updated.
+	for k, v := range updates {
+		if err := validateSetting(k, v); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 	}
 
 	for k, v := range updates {

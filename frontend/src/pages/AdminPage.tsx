@@ -5,6 +5,14 @@ import { adminApi, moderationApi, instanceApi, adminPagesApi, pagesApi } from '.
 import RemoteMediaCacheCard from '../components/common/RemoteMediaCacheCard'
 import { Users, Settings, Flag, Link2, Ticket, BookOpen, List, Clock, ShieldAlert, X, Star, HardDrive, Globe, Cloud, AtSign, ScrollText } from 'lucide-react'
 
+// AGORA-444: a size for people, from a number of bytes.
+function fmtBytes(n?: number): string {
+  if (!n) return '0 MB'
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`
+  if (n >= 1 << 20) return `${Math.round(n / (1 << 20))} MB`
+  return `${Math.max(1, Math.round(n / 1024))} KB`
+}
+
 export default function AdminPage() {
   const [searchParams] = useSearchParams()
   const [tab, setTab] = useState<'overview'|'settings'|'users'|'reports'|'moderation'|'fediverse'|'bluesky'|'domains'|'federation'|'invites'|'rules'|'audit'|'waitlist'|'pages'|'media'>(
@@ -44,6 +52,7 @@ export default function AdminPage() {
   const { data: domainsData } = useQuery({ queryKey:['admin-custom-domains', domainFilter], queryFn: ()=>adminApi.listCustomDomains(domainFilter).then(r=>r.data), enabled: tab==='domains' })
   const { data: invData }  = useQuery({ queryKey:['admin-invites'],  queryFn: ()=>adminApi.listInvites().then(r=>r.data), enabled: tab==='invites' })
   const { data: rulesData } = useQuery({ queryKey:['admin-rules'],   queryFn: ()=>adminApi.listRules().then(r=>r.data),  enabled: tab==='rules' })
+  const { data: storageData, refetch: refetchStorage, isFetching: storageLoading } = useQuery({ queryKey:['admin-storage'], queryFn: ()=>adminApi.mediaStorage().then(r=>r.data), enabled: tab==='media' })
   const { data: waitlistData } = useQuery({ queryKey:['admin-waitlist'], queryFn: ()=>adminApi.listWaitlist().then(r=>r.data), enabled: tab==='waitlist' })
   const { data: adminPagesData, refetch: refetchAdminPages } = useQuery({ queryKey:['admin-pages'], queryFn: ()=>pagesApi.list({}).then(r=>r.data), enabled: tab==='pages' })
   const adminPages: any[] = adminPagesData?.pages ?? []
@@ -52,7 +61,7 @@ export default function AdminPage() {
 
   useEffect(() => { if (settings) setSettingsForm(settings) }, [settings])
 
-  const saveSettings = useMutation({ mutationFn: ()=>adminApi.updateSettings(settingsForm), onSuccess:()=>{ ok('Saved'); qc.invalidateQueries({queryKey:['instance-info']}) } })
+  const saveSettings = useMutation({ mutationFn: ()=>adminApi.updateSettings(settingsForm), onSuccess:()=>{ ok('Saved'); qc.invalidateQueries({queryKey:['instance-info']}); qc.invalidateQueries({queryKey:['admin-storage']}) }, onError:(e:any)=>ok(e.response?.data?.error || 'Could not save settings') })
   const setRole      = useMutation({ mutationFn: ({id,role}:{id:string,role:string})=>adminApi.setRole(id,role), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
   const delUser      = useMutation({ mutationFn: (id:string)=>adminApi.deleteUser(id), onSuccess:()=>qc.invalidateQueries({queryKey:['admin-users']}) })
   const reviewRep    = useMutation({ mutationFn: ({id,action,notes}:{id:string,action:string,notes?:string})=>moderationApi.reviewReport(id,{action,notes}), onSuccess:(_,{action})=>{ ok(`Report ${action}`); qc.invalidateQueries({queryKey:['admin-reports']}) } })
@@ -210,6 +219,24 @@ export default function AdminPage() {
             </button>
           </div>
           <hr className="border-agora-100 dark:border-agora-700"/>
+          {/* AGORA-444: Reels and video. Video is the most expensive thing an instance hosts. */}
+          <h3 className="font-semibold text-sm">Reels and video</h3>
+          <div className="flex items-center justify-between gap-4 py-2">
+            <div><p className="font-medium text-sm">Reels Discover tab</p>
+              <p className="text-xs text-agora-400">Show public videos from this instance and its peers in a Discover tab on Reels. Turning it off leaves the Following tab, which shows videos from people each member follows.</p></div>
+            <button onClick={()=>setSettingsForm(f=>({...f,reels_discover_enabled:f.reels_discover_enabled==='false'?'true':'false'}))}
+              role="switch" aria-checked={settingsForm.reels_discover_enabled!=='false'} aria-label="Reels Discover tab"
+              className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${settingsForm.reels_discover_enabled!=='false'?'bg-agora-700':'bg-agora-200'}`}>
+              <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform m-0.5 ${settingsForm.reels_discover_enabled!=='false'?'translate-x-5':'translate-x-0'}`} />
+            </button>
+          </div>
+          <div><label className="label">Longest video (seconds)</label>
+            <input type="number" min={5} max={120} className="input" autoComplete="off" value={settingsForm.video_max_seconds||'120'} onChange={sf('video_max_seconds')} />
+            <p className="text-xs text-agora-400 mt-1">From 5 to 120. Members can trim a longer video down to fit, so this limits what is kept, not what is chosen.</p></div>
+          <div><label className="label">Video storage per account (MB)</label>
+            <input type="number" min={0} className="input" autoComplete="off" value={settingsForm.video_quota_mb||'0'} onChange={sf('video_quota_mb')} />
+            <p className="text-xs text-agora-400 mt-1">0 means no limit. An account at its limit can't upload another video until it deletes one. The video that takes an account over the line is still allowed, since its size isn't known until it has been processed.</p></div>
+          <hr className="border-agora-100 dark:border-agora-700"/>
           <h3 className="font-semibold text-sm">SMTP (email)</h3>
           {([{k:'smtp_host',label:'Host',type:'text'},{k:'smtp_port',label:'Port',type:'number'},{k:'smtp_user',label:'Username',type:'text'},{k:'smtp_password',label:'Password',type:'password'},{k:'smtp_from',label:'From address',type:'email'}] as {k:string,label:string,type:string}[]).map(({k,label,type})=>(
             <div key={k}><label className="label">{label}</label>
@@ -285,6 +312,10 @@ export default function AdminPage() {
                       <p className="text-xs text-agora-400 font-medium mb-0.5">{r.reported_comment_id ? 'Comment' : 'Post'} content</p>
                       <p className="text-sm text-agora-700 dark:text-agora-200 line-clamp-3">{r.post_content}</p>
                     </div>
+                  )}
+                  {r.post_video_url && (
+                    <video src={r.post_video_url} poster={r.post_video_thumb_url || undefined} controls preload="metadata"
+                      className="w-full max-h-72 rounded bg-black" aria-label="Reported video" />
                   )}
                   {r.details && <p className="text-sm text-agora-600 dark:text-agora-300"><span className="text-xs font-medium text-agora-400">Reporter note: </span>{r.details}</p>}
                 </div>
@@ -681,6 +712,46 @@ export default function AdminPage() {
 
       {tab==='media' && (
         <div className="space-y-4">
+          {/* AGORA-444: what uploads take, video apart from images */}
+          <div className="card p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-semibold">Uploads</h3>
+                <p className="text-sm text-agora-500 mt-0.5">Disk used by files members have uploaded. Video is the part that grows fastest.</p>
+              </div>
+              <button className="btn-secondary text-sm" onClick={()=>refetchStorage()} disabled={storageLoading}>{storageLoading ? 'Measuring…' : 'Refresh'}</button>
+            </div>
+            {storageData ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg bg-agora-50 dark:bg-agora-700/50 p-3">
+                    <p className="text-xs text-agora-400">Video</p>
+                    <p className="text-xl font-semibold">{fmtBytes(storageData.video?.bytes)}</p>
+                    <p className="text-xs text-agora-500">{storageData.video?.count ?? 0} video{storageData.video?.count === 1 ? '' : 's'}</p>
+                  </div>
+                  <div className="rounded-lg bg-agora-50 dark:bg-agora-700/50 p-3">
+                    <p className="text-xs text-agora-400">Images and everything else</p>
+                    <p className="text-xl font-semibold">{fmtBytes(storageData.images?.bytes)}</p>
+                    <p className="text-xs text-agora-500">{storageData.images?.count ?? 0} file{storageData.images?.count === 1 ? '' : 's'}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-agora-400">
+                  Longest video: {storageData.video_max_seconds} seconds. Per-account video limit: {storageData.video_quota_mb > 0 ? `${storageData.video_quota_mb} MB` : 'none'}.
+                  The remote media cache has its own card and isn't counted here.
+                </p>
+                {storageData.top_video_users?.length > 0 && (
+                  <div>
+                    <p className="text-sm font-medium mb-1">Most video storage</p>
+                    <ul className="text-sm divide-y divide-agora-100 dark:divide-agora-700">
+                      {storageData.top_video_users.map((u:any)=>(
+                        <li key={u.username} className="flex justify-between py-1"><span>@{u.username} <span className="text-agora-400">· {u.videos} video{u.videos===1?'':'s'}</span></span><span className="tabular-nums">{fmtBytes(u.bytes)}</span></li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : <p className="text-sm text-agora-400">Measuring…</p>}
+          </div>
           <div className="card p-4 space-y-4">
             <div>
               <h3 className="font-semibold">Orphaned Media</h3>

@@ -249,6 +249,11 @@ var schema = []string{
 		-- AGORA-438: whether the Reels Discover tab is offered. 'true' unless an
 		-- admin turns it off.
 		('reels_discover_enabled', 'true'),
+		-- AGORA-444: the longest video this instance accepts, in seconds (at most
+		-- 120), and how much video storage each account may use, in MB (0 = no
+		-- limit).
+		('video_max_seconds', '120'),
+		('video_quota_mb', '0'),
 		-- AGORA-285: 'manual' or 'auto'. Defaults to manual so the feature
 		-- can't silently start binding handles on an instance that upgrades
 		-- into it — DNS verification already proves the user controls the
@@ -707,6 +712,11 @@ var schema = []string{
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_width       INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_height      INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_duration_ms INTEGER NOT NULL DEFAULT 0`,
+
+	// ── AGORA-444: how much disk a video takes (the video and its thumbnail), for
+	// per-account storage limits. A post's figure is copied from its upload job.
+	`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_bytes BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE video_transcode_jobs ADD COLUMN IF NOT EXISTS video_bytes BIGINT NOT NULL DEFAULT 0`,
 
 	// ── AGORA-438: Reels ───────────────────────────────────────────────────────
 	// Which reels a user has watched, so the feed doesn't show them again.

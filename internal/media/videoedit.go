@@ -102,13 +102,26 @@ func parseVideoEdit(startRaw, endRaw, coverRaw string, rawDur, maxSec float64) (
 	}
 	if length > maxSec {
 		if e.Trimmed {
-			return videoEdit{}, fmt.Errorf("video is too long (max %.0f minutes — the part you kept is %.0f seconds)", maxSec/60, math.Round(length))
+			return videoEdit{}, fmt.Errorf("video is too long (max %s — the part you kept is %.0f seconds)", limitText(maxSec), math.Round(length))
 		}
-		return videoEdit{}, fmt.Errorf("video is too long (max %.0f minutes — this video is %.0f seconds)", maxSec/60, math.Round(length))
+		return videoEdit{}, fmt.Errorf("video is too long (max %s — this video is %.0f seconds)", limitText(maxSec), math.Round(length))
 	}
 
 	if hasCover && cover < length {
 		e.CoverSec, e.HasCover = cover, true
 	}
 	return e, nil
+}
+
+// limitText says a length limit the way a person would: "2 minutes",
+// "90 seconds". The limit is the admin's to set (AGORA-444).
+func limitText(sec float64) string {
+	n := int(math.Round(sec))
+	if n >= 60 && n%60 == 0 {
+		if n == 60 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", n/60)
+	}
+	return fmt.Sprintf("%d seconds", n)
 }

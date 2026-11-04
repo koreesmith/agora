@@ -1506,6 +1506,19 @@ func (s *Service) DeletePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Exec(`UPDATE posts SET deleted_at = NOW() WHERE id = $1`, id)
+	// AGORA-444: a moderator or admin removing someone else's video is a
+	// takedown, and the file has to be gone, not just hidden. The author
+	// deleting their own post is unchanged.
+	if authorID != userID && (role == "admin" || role == "moderator") && s.media != nil {
+		var videoURL, thumbURL string
+		s.db.QueryRow(`SELECT video_url, video_thumb_url FROM posts WHERE id = $1`, id).Scan(&videoURL, &thumbURL)
+		// A remote video, or a Bluesky playlist, has no file here to remove.
+		if n := s.media.RemoveVideoFiles(videoURL, thumbURL); n > 0 {
+			s.db.Exec(`UPDATE posts SET video_bytes = 0 WHERE id = $1`, id)
+			s.db.Exec(`INSERT INTO audit_log (actor_id, action, target_type, details) VALUES ($1, 'takedown_video', 'post', $2)`,
+				userID, fmt.Sprintf("post %s: removed %d video file(s) from disk", id, n))
+		}
+	}
 	if pageID != nil {
 		// Mirrors CreatePost's post_count increment — without this, a page's
 		// displayed post count only ever grows, never reflecting deletions.
@@ -3142,7 +3155,7 @@ func (s *Service) markPrivateAuthors(posts []Post) {
 }
 
 // applyUploadedVideoMeta (AGORA-437) gives a new video post the shape its
-// transcode job measured. It reads the job (scoped to this user and the exact
+// transcode job measured, and (AGORA-444) the disk space it takes. It reads the job (scoped to this user and the exact
 // URL) rather than trusting the request, so clients need no change and can't
 // claim a size the file doesn't have. A post with no video, or one not made
 // by an upload of the user's own, is left alone.
@@ -3151,7 +3164,8 @@ func (s *Service) applyUploadedVideoMeta(postID, userID, videoURL string) {
 		return
 	}
 	s.db.Exec(`
-		UPDATE posts SET video_width = j.video_width, video_height = j.video_height, video_duration_ms = j.video_duration_ms
+		UPDATE posts SET video_width = j.video_width, video_height = j.video_height, video_duration_ms = j.video_duration_ms,
+		                 video_bytes = j.video_bytes
 		FROM video_transcode_jobs j
 		WHERE posts.id = $1 AND j.user_id = $2 AND j.video_url = $3 AND j.status = 'done'
 	`, postID, userID, videoURL)

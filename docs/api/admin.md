@@ -15,6 +15,31 @@ Base path: `/api/admin`
 **Body:** Any subset of setting keys (see [Admin Service](../backend/admin.md) for full list)
 **Response 200:** Updated settings
 
+Settings with a fixed shape are checked before anything is saved, and a bad value refuses the whole request with `400` and a message (AGORA-444):
+
+| Key | Accepted values |
+|---|---|
+| `reels_discover_enabled` | `true` or `false` |
+| `video_max_seconds` | a whole number from 5 to 120 |
+| `video_quota_mb` | a whole number of MB, 0 or more (`0` = no limit) |
+
+### `GET /api/admin/media/storage`
+Disk used by uploads, with video apart from images (AGORA-444). The remote media cache is not counted; it has its own card. The result is cached for a minute; add `?refresh=1` to measure again.
+
+**Response 200:**
+```json
+{
+  "video":  { "name": "video",  "count": 12, "bytes": 245000000 },
+  "images": { "name": "images", "count": 340, "bytes": 910000000 },
+  "categories": [ { "name": "posts", "count": 200, "bytes": 800000000 } ],
+  "top_video_users": [ { "username": "maya", "videos": 5, "bytes": 120000000 } ],
+  "video_quota_mb": 0,
+  "video_max_seconds": 120,
+  "computed_at": "2026-11-03T20:00:00Z"
+}
+```
+A video is counted once: its thumbnail is part of its size but not a second video. `top_video_users` comes from the sizes recorded on posts that still exist.
+
 ### `GET /api/admin/stats`
 **Response 200:**
 ```json

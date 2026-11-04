@@ -129,6 +129,7 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(ru.remote_instance, pa.remote_instance, '') AS remote_instance,
 		       r.reported_post_id, r.reported_comment_id,
 		       p.content AS post_content,
+		       p.video_url AS post_video_url, p.video_thumb_url AS post_video_thumb_url,
 		       r.rule_id, ir.text AS rule_text,
 		       r.reviewed_by, reviewer.username AS reviewer_username, r.reviewed_at
 		FROM reports r
@@ -162,6 +163,9 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 		ReportedPostID       *string `json:"reported_post_id"`
 		ReportedCommentID    *string `json:"reported_comment_id"`
 		PostContent          *string `json:"post_content"`
+		// AGORA-444: a reported video has to be watchable by whoever reviews it.
+		PostVideoURL         *string `json:"post_video_url"`
+		PostVideoThumbURL    *string `json:"post_video_thumb_url"`
 		RuleID               *string `json:"rule_id"`
 		RuleText             *string `json:"rule_text"`
 		ReviewedBy           *string `json:"reviewed_by"`
@@ -177,6 +181,7 @@ func (s *Service) ListReports(w http.ResponseWriter, r *http.Request) {
 			&rp.ReporterUsername, &rp.ReportedUserUsername, &rp.ReportedUserID, &rp.IsSuspended, &bannedAt,
 			&rp.IsRemote, &rp.RemoteInstance,
 			&rp.ReportedPostID, &rp.ReportedCommentID, &rp.PostContent,
+			&rp.PostVideoURL, &rp.PostVideoThumbURL,
 			&rp.RuleID, &rp.RuleText,
 			&rp.ReviewedBy, &rp.ReviewerUsername, &rp.ReviewedAt)
 		rp.IsBanned = bannedAt != nil

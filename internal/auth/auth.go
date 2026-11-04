@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -869,6 +870,12 @@ func (s *Service) InstanceInfo(w http.ResponseWriter, r *http.Request) {
 	info["atproto_enabled"] = s.getSetting("atproto_enabled") == "true"
 	// AGORA-438: on unless an admin turns the Reels Discover tab off.
 	info["reels_discover_enabled"] = s.getSetting("reels_discover_enabled") != "false"
+	// AGORA-444: the longest video this instance accepts, so the apps size their
+	// trim controls to it. 120 unless an admin lowered it.
+	info["video_max_seconds"] = 120
+	if n, err := strconv.Atoi(strings.TrimSpace(s.getSetting("video_max_seconds"))); err == nil && n >= 5 && n <= 120 {
+		info["video_max_seconds"] = n
+	}
 	info["domain"] = domainFromURL(s.cfg.InstanceDomain)
 	writeJSON(w, 200, info)
 }

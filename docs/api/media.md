@@ -23,7 +23,7 @@ Use the returned URL as the `image_url` value in `POST /api/posts` or `POST /api
 
 ### Videos (`category=videos`)
 
-A video is accepted as MP4, MOV, AVI, MKV or WebM, up to 2 GB and 2 minutes, and transcodes in the background. The response is a job to poll, not a URL:
+A video is accepted as MP4, MOV, AVI, MKV or WebM, up to 2 GB, and as long as the instance allows (2 minutes unless an admin lowered it; `GET /api/instance` reports it as `video_max_seconds`). It transcodes in the background. The response is a job to poll, not a URL:
 
 ```json
 { "job_id": "…", "status": "processing" }
@@ -39,12 +39,13 @@ Poll [`GET /api/media/jobs/{id}`](#get-apimediajobsid-) for the result, then use
 | `trim_end_ms` | Where it ends. Default the end of the video. |
 | `cover_ms` | The cover frame's time **within the trimmed clip**, in milliseconds. Default is the frame one second in. |
 
-The 2-minute limit applies to the part that is kept, so a longer video can be uploaded as long as the trimmed range is 2 minutes or less. Without trim fields the whole video has to fit, as before. The trim happens during the one transcode, with audio and video kept in step.
+The length limit applies to the part that is kept, so a longer video can be uploaded as long as the trimmed range is within it. Without trim fields the whole video has to fit, as before. The trim happens during the one transcode, with audio and video kept in step.
 
 A request is refused with 400 and a message when:
 - a field is not a whole number of milliseconds, 0 or more;
 - the trim starts after the end of the video, ends more than half a second past it, ends at or before where it starts, or leaves less than half a second;
-- the part kept is longer than 2 minutes.
+- the part kept is longer than the instance's limit;
+- the account is already at its video storage limit (`video_quota_mb`), which is checked before the upload is read.
 
 A `cover_ms` outside the clip is not an error: the usual frame is used instead. Keeping the whole video (start 0, end at or near the end) is the same as no trim. The job's `width`, `height` and `duration_ms` describe the trimmed result.
 

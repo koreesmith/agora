@@ -7,6 +7,11 @@ Endpoints under `/api/moderation/*` additionally require `role=moderator` or `ro
 
 ## Reports
 
+### `GET /api/moderation/reports?status=pending`
+Lists reports. A report about a post carries `post_content` and, when the post has a video, `post_video_url` and `post_video_thumb_url` (null otherwise), so the video can be played from the report (AGORA-444).
+
+A moderator or admin who deletes **someone else's** video post (`DELETE /api/posts/{id}`) also removes its video and thumbnail from disk, and an entry with the action `takedown_video` is written to the audit log. Only files this instance uploaded are removed; a remote video or a Bluesky playlist has nothing here to delete.
+
 ### `POST /api/reports`
 Any authenticated user can submit a report.
 

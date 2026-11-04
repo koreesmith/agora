@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Camera, Pause, Play, Upload, Volume2, VolumeX, X } from 'lucide-react'
-import { authApi, feedApi, friendsApi } from '../../api'
+import { authApi, feedApi, friendsApi, instanceApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import MentionTextarea from '../feed/MentionTextarea'
 import RecordStep, { canRecord } from './RecordStep'
@@ -12,11 +12,16 @@ import RecordStep, { canRecord } from './RecordStep'
 // the upload (AGORA-439), so the server cuts the clip during its one
 // transcode. The result is an ordinary video post.
 
-const MAX_SECONDS = 120   // matches the server's limit on the part that is kept
+// The longest reel is the instance's own limit (AGORA-444), 2 minutes unless an
+// admin lowered it; it comes from /instance and this is the fallback.
+const DEFAULT_MAX_SECONDS = 120
 const MIN_CLIP = 0.5
 
 type Step = 'pick' | 'record' | 'edit' | 'post'
 type Phase = 'idle' | 'uploading' | 'processing' | 'posting'
+
+// "2 minutes", "90 seconds": a limit the way a person would say it.
+const limitLabel = (sec: number) => sec >= 60 && sec % 60 === 0 ? `${sec / 60} minute${sec === 60 ? '' : 's'}` : `${sec} seconds`
 
 const fmt = (t: number) => {
   const m = Math.floor(t / 60)
@@ -73,6 +78,8 @@ export default function CreateReelModal({ onClose, onPosted }: { onClose: () => 
   const cancelledRef = useRef(false)
   const [confirmClose, setConfirmClose] = useState(false)
 
+  const { data: info } = useQuery({ queryKey: ['instance-info'], queryFn: () => instanceApi.getInfo().then(r => r.data), staleTime: 5 * 60_000 })
+  const MAX_SECONDS: number = info?.video_max_seconds ?? DEFAULT_MAX_SECONDS
   const { data: listsData } = useQuery({ queryKey: ['friend-lists'], queryFn: () => friendsApi.listFriendLists().then(r => r.data) })
   const friendLists: any[] = listsData?.groups || []
   const { data: freshProfile } = useQuery({ queryKey: ['my-profile'], queryFn: () => authApi.me().then(r => r.data), staleTime: 60_000 })
@@ -275,7 +282,7 @@ export default function CreateReelModal({ onClose, onPosted }: { onClose: () => 
           {/* ── Pick ─────────────────────────────────────────────────────── */}
           {step === 'pick' && (
             <div className="space-y-3">
-              <p className="text-sm text-agora-500">Reels are short videos, up to 2 minutes. You can trim a longer one on the next step.</p>
+              <p className="text-sm text-agora-500">Reels are short videos, up to {limitLabel(MAX_SECONDS)}. You can trim a longer one on the next step.</p>
               <label className="flex items-center gap-3 rounded-xl border-2 border-dashed border-agora-300 dark:border-agora-600 hover:border-agora-500 p-5 cursor-pointer">
                 <Upload size={22} className="text-agora-500 flex-shrink-0" />
                 <span className="text-sm"><span className="font-medium">Choose a video</span><br /><span className="text-agora-400">MP4, MOV, WebM, MKV or AVI, up to 2 GB</span></span>
@@ -294,7 +301,7 @@ export default function CreateReelModal({ onClose, onPosted }: { onClose: () => 
 
           {/* ── Record ───────────────────────────────────────────────────── */}
           {step === 'record' && (
-            <RecordStep onCancel={() => setStep('pick')} onRecorded={chooseFile} />
+            <RecordStep maxSeconds={MAX_SECONDS} onCancel={() => setStep('pick')} onRecorded={chooseFile} />
           )}
 
           {/* ── Edit ─────────────────────────────────────────────────────── */}
@@ -322,7 +329,7 @@ export default function CreateReelModal({ onClose, onPosted }: { onClose: () => 
               {!canPreview && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-3 text-sm flex gap-2">
                   <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                  <span>Your browser can't preview this file, so you can't trim it here. You can still post it as it is, if it's under 2 minutes.</span>
+                  <span>Your browser can't preview this file, so you can't trim it here. You can still post it as it is, if it's within the {limitLabel(MAX_SECONDS)} limit.</span>
                 </div>
               )}
 
@@ -347,7 +354,7 @@ export default function CreateReelModal({ onClose, onPosted }: { onClose: () => 
                       <span className="w-14 text-right tabular-nums">{fmt(end)}</span>
                     </label>
                     {duration > MAX_SECONDS && (
-                      <p className="text-xs text-agora-500">This video is {fmt(duration)} long. Reels are up to 2 minutes, so the first 2 minutes are selected. Move the handles to choose another part.</p>
+                      <p className="text-xs text-agora-500">This video is {fmt(duration)} long. Reels are up to {limitLabel(MAX_SECONDS)}, so the first {limitLabel(MAX_SECONDS)} are selected. Move the handles to choose another part.</p>
                     )}
                   </fieldset>
 

@@ -293,6 +293,8 @@ export const adminApi = {
   rejectWaitlist:  (id: string) => api.delete(`/admin/waitlist/${id}`),
   // Media cleanup
   scanOrphans:   () => api.get('/admin/media/orphans'),
+  // AGORA-444: uploads on disk, video apart from images
+  mediaStorage:  (refresh = false) => api.get('/admin/media/storage', { params: refresh ? { refresh: 1 } : undefined }),
   deleteOrphans: () => api.delete('/admin/media/orphans'),
   // Remote media cache (AGORA-380)
   getRemoteMediaCache:    ()          => api.get('/admin/media/remote-cache'),

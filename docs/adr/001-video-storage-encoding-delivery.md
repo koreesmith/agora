@@ -149,3 +149,29 @@ The synchronous transcode approach means uploads block until transcoding complet
 - Should we store the original raw upload for re-transcoding later, or delete it immediately after transcoding? (**Recommendation:** delete immediately to save disk)
 - Should thumbnails/poster frames be generated via ffmpeg? (**Recommendation:** yes, generate a single frame at 1s as poster image; store as `/uploads/videos/{uuid}_thumb.jpg`)
 - Audio-only posts? (**Recommendation:** out of scope for AGORA-119)
+
+---
+
+## Update for v5.0.0 (Reels)
+
+Reels (AGORA-436) builds on this decision rather than changing it: storage,
+encoding and delivery are as above. What changed:
+
+- **Asynchronous transcoding.** Uploads return a job to poll instead of blocking
+  (AGORA-137), as the "Cost model" section anticipated.
+- **The 2-minute limit** is now a ceiling. An admin can lower it (`video_max_seconds`,
+  5 to 120 seconds), and it applies to the part that is kept after trimming, so a
+  longer video can be uploaded and cut down to fit (AGORA-439).
+- **Trim and cover.** The upload accepts `trim_start_ms`, `trim_end_ms` and
+  `cover_ms`. The trim happens during the one transcode, and the thumbnail is
+  taken at the chosen cover time instead of at one second.
+- **Size is recorded.** Each video's width, height and duration (AGORA-437) and its
+  size on disk (AGORA-444) are stored on the post, so players can lay a video out
+  before it loads and an admin can set a per-account storage limit
+  (`video_quota_mb`).
+- **Takedown removes the file.** A moderator or admin deleting someone else's
+  video post deletes the files from disk.
+- **Playback of Bluesky videos** uses HLS, which Agora does not produce itself:
+  the web player loads hls.js on demand, and the mobile player handles it natively.
+  Agora's own uploads remain plain MP4, so adaptive streaming is still deferred.
+

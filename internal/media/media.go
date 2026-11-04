@@ -133,6 +133,12 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 // in a background goroutine. It returns the job ID immediately; the caller polls
 // VideoJobStatus for completion. (AGORA-137)
 func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, err error) {
+	// AGORA-444: an account already at its video storage limit is turned away
+	// before its upload is read.
+	if qerr := s.videoQuotaError(userID); qerr != nil {
+		return "", qerr
+	}
+
 	// 32MB in memory; larger uploads are spooled to disk by the multipart parser
 	r.ParseMultipartForm(32 << 20)
 	file, _, ferr := r.FormFile("file")
@@ -173,7 +179,7 @@ func (s *Service) StartVideoJob(r *http.Request, userID string) (jobID string, e
 	// the part that is kept, so a long video can be cut down to size.
 	edit, eerr := parseVideoEdit(
 		r.FormValue("trim_start_ms"), r.FormValue("trim_end_ms"), r.FormValue("cover_ms"),
-		dur, maxVideoDurationSec,
+		dur, s.maxVideoSeconds(),
 	)
 	if eerr != nil {
 		os.Remove(rawPath)
@@ -290,10 +296,12 @@ func (s *Service) runTranscode(jobID, rawPath, id string, edit videoEdit) {
 	}
 
 	videoURL := fmt.Sprintf("/uploads/videos/%s.mp4", id)
+	// AGORA-444: what this takes on disk, for per-account storage limits.
+	bytes := fileSize(finalOut) + fileSize(thumbPath)
 	s.db.Exec(
 		`UPDATE video_transcode_jobs SET status='done', video_url=$2, video_thumb_url=$3,
-		        video_width=$4, video_height=$5, video_duration_ms=$6, updated_at=NOW() WHERE id=$1`,
-		jobID, videoURL, thumbURL, meta.Width, meta.Height, meta.DurationMs,
+		        video_width=$4, video_height=$5, video_duration_ms=$6, video_bytes=$7, updated_at=NOW() WHERE id=$1`,
+		jobID, videoURL, thumbURL, meta.Width, meta.Height, meta.DurationMs, bytes,
 	)
 }
 

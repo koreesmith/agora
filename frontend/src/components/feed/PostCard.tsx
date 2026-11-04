@@ -261,17 +261,21 @@ function ReactionsModal({ postId, onClose }: { postId: string; onClose: () => vo
             ? <p className="text-center text-sm text-agora-400 py-6">No reactions yet</p>
             : filtered.map((r: any) => (
                 <div key={r.user_id} className="flex items-center gap-3 px-4 py-2 hover:bg-agora-50 dark:hover:bg-agora-700/50">
-                  <div className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  {/* AGORA-452: each person opens their profile. */}
+                  <Link to={`/profile/${r.username}`} onClick={onClose}
+                    className="w-8 h-8 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
                     {r.avatar_url
                       ? <img src={r.avatar_url} alt="" className="w-full h-full object-cover" />
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">
                           {(r.display_name || r.username)[0].toUpperCase()}
                         </span>
                     }
-                  </div>
+                  </Link>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-agora-900 dark:text-agora-100 truncate">
-                      {r.display_name ? renderName(r.display_name, r.emojis) : r.username}
+                      <Link to={`/profile/${r.username}`} onClick={onClose} className="hover:underline">
+                        {r.display_name ? renderName(r.display_name, r.emojis) : r.username}
+                      </Link>
                     </p>
                     <p className="text-xs text-agora-400">@{r.username}</p>
                   </div>

@@ -931,13 +931,13 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
               <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Members</p>
               {members.map((m: any) => (
                 <div key={m.id} className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  <Link to={`/profile/${m.username}`} className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
                     {m.avatar_url
                       ? <img src={m.avatar_url} alt="" className="w-full h-full object-cover" />
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{(m.display_name || m.username)[0].toUpperCase()}</span>}
-                  </div>
+                  </Link>
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm font-medium truncate">{m.display_name ? renderName(m.display_name, m.emojis) : m.username}</span>
+                    <Link to={`/profile/${m.username}`} className="text-sm font-medium truncate hover:underline">{m.display_name ? renderName(m.display_name, m.emojis) : m.username}</Link>
                     <span className="text-xs text-agora-400 ml-1.5">{handle(m.username, m.is_remote, m.remote_instance)}</span>
                   </div>
                   <button onClick={() => onRemove(m.id)} className="btn-ghost p-1 text-agora-300 hover:text-red-500" title="Remove from list">
@@ -954,13 +954,13 @@ function ListCard({ list, connections, expanded, onToggle, onDelete, onAdd, onRe
               <p className="text-xs font-semibold text-agora-500 uppercase tracking-wide">Add people</p>
               {nonMembers.map((f: any) => (
                 <div key={f.id} className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0">
+                  <Link to={`/profile/${f.username}`} className="w-7 h-7 rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden flex-shrink-0 block">
                     {f.avatar_url
                       ? <img src={f.avatar_url} alt="" className="w-full h-full object-cover" />
                       : <span className="w-full h-full flex items-center justify-center text-xs font-bold text-agora-600">{(f.display_name || f.username)[0].toUpperCase()}</span>}
-                  </div>
+                  </Link>
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm font-medium truncate">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</span>
+                    <Link to={`/profile/${f.username}`} className="text-sm font-medium truncate hover:underline">{f.display_name ? renderName(f.display_name, f.emojis) : f.username}</Link>
                     <span className="text-xs text-agora-400 ml-1.5">{handle(f.username, f.is_remote, f.remote_instance)}</span>
                   </div>
                   <button onClick={() => onAdd(f.id)} className="btn-ghost p-1 text-agora-400 hover:text-agora-600 dark:hover:text-agora-200" title="Add to list">

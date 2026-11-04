@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { Clapperboard } from 'lucide-react'
+import { Clapperboard, Plus } from 'lucide-react'
 import { instanceApi, reelsApi } from '../api'
 import ReelSlide from '../components/reels/ReelSlide'
+import CreateReelModal from '../components/reels/CreateReelModal'
 import { useReelsStore } from '../store/reels'
 import type { Post } from '../components/feed/PostCard'
 
@@ -29,6 +30,9 @@ export default function ReelsPage() {
   const discoverOn = info?.reels_discover_enabled !== false
   const tab: Tab = params.get('tab') === 'discover' && discoverOn ? 'discover' : 'following'
   const setTab = (t: Tab) => setParams(t === 'following' ? {} : { tab: t }, { replace: true })
+
+  const [creating, setCreating] = useState(false)
+  const [notice, setNotice] = useState('')
 
   // "Watch older videos" after being caught up asks the server for everything.
   const [includeViewed, setIncludeViewed] = useState(false)
@@ -91,6 +95,15 @@ export default function ReelsPage() {
     const clamped = Math.max(0, Math.min(i, posts.length))
     root.scrollTo({ top: clamped * root.clientHeight, behavior: reduced ? 'auto' : 'smooth' })
   }, [posts.length, reduced])
+
+  // A new reel is posted: say so, and go back to the top, where it will be.
+  const onPosted = useCallback(() => {
+    setCreating(false)
+    setNotice('Your reel is posted')
+    setTimeout(() => setNotice(''), 3000)
+    setActive(0)
+    scroller.current?.scrollTo({ top: 0 })
+  }, [])
 
   // Start from the top whenever the list changes underneath (tab switch,
   // "watch older videos").
@@ -155,6 +168,14 @@ export default function ReelsPage() {
         {tabBtn('following', 'Following')}
         {discoverOn && tabBtn('discover', 'Discover')}
       </div>
+      <button onClick={() => setCreating(true)} aria-label="Make a reel" title="Make a reel"
+        className="absolute top-3 right-3 z-30 w-11 h-11 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center hover:bg-black/60 transition-colors">
+        <Plus size={22} />
+      </button>
+      {notice && (
+        <div role="status" className="absolute top-16 left-1/2 -translate-x-1/2 z-30 bg-black/70 text-sm px-3 py-1.5 rounded-full">{notice}</div>
+      )}
+      {creating && <CreateReelModal onClose={() => setCreating(false)} onPosted={onPosted} />}
 
       <div ref={scroller} key={`${tab}-${includeViewed}`}
         className="h-full overflow-y-scroll snap-y snap-mandatory no-scrollbar overscroll-contain">
@@ -192,11 +213,13 @@ export default function ReelsPage() {
                 <p className="font-semibold">No reels from the people you follow yet</p>
                 <p className="text-sm text-white/70">Videos from your friends and the accounts you follow show up here.</p>
                 {discoverOn && <button onClick={() => setTab('discover')} className="text-sm border border-white/40 rounded-lg px-4 py-2 hover:bg-white/10">See what's on Discover</button>}
+                <button onClick={() => setCreating(true)} className="text-sm border border-white/40 rounded-lg px-4 py-2 hover:bg-white/10">Make a reel</button>
               </>
             ) : (
               <>
                 <p className="font-semibold">No public reels to show right now</p>
                 <p className="text-sm text-white/70">Public videos from this instance and its peers show up here.</p>
+                <button onClick={() => setCreating(true)} className="text-sm border border-white/40 rounded-lg px-4 py-2 hover:bg-white/10">Make a reel</button>
               </>
             )}
             {!includeViewed && (

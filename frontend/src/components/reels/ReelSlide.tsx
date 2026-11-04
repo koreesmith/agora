@@ -209,7 +209,7 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
       <div className="absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/70 to-transparent pointer-events-none" />
 
       {/* Top right: sound and more */}
-      <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+      <div className="absolute top-16 right-3 z-20 flex items-center gap-2">
         <button onClick={() => setMuted(!muted)} className={round}
           aria-label={muted ? 'Turn sound on' : 'Turn sound off'} title={muted ? 'Sound off' : 'Sound on'}>
           {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
@@ -301,7 +301,7 @@ export default function ReelSlide({ post, index, active, near, buffer, autoplay,
       </div>
 
       {toast && (
-        <div role="status" className="absolute top-16 left-1/2 -translate-x-1/2 z-30 bg-black/70 text-sm px-3 py-1.5 rounded-full">{toast}</div>
+        <div role="status" className="absolute top-28 left-1/2 -translate-x-1/2 z-30 bg-black/70 text-sm px-3 py-1.5 rounded-full">{toast}</div>
       )}
 
       {showReport && (

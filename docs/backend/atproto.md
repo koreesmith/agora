@@ -74,6 +74,7 @@ Before this, every write path ran as a detached goroutine doing an unsynchronize
 | Post delete | `repo.DeleteRecord` | No Tombstone object; the firehose commit itself records the deletion |
 | Comment/reply | `app.bsky.feed.post` with `Reply.Parent` **and** `Reply.Root` strong-refs | Unlike ActivityPub's single `inReplyTo`, AT Proto requires both the immediate parent and the thread root on every reply |
 | Like / repost | `app.bsky.feed.like` / `app.bsky.feed.repost`, `Subject` = strong-ref | `deliverInteraction` |
+| Repost of a Bluesky post with a trigger warning or the sharer's own comment (AGORA-459) | An `app.bsky.feed.post` quote post: `app.bsky.embed.record` strong-ref to the original, text = `CW: <warning>` then the comment, plus the `agora-content-warning` label. A native repost record has no text or labels, so it can only carry a bare repost. Not public, or neither a warning nor a comment: the plain repost record, as before | `broadcastQuoteRepost` (`repost_quote.go`); undone by `DeliverUnannounce` like any post |
 | Unlike / unrepost | `repo.DeleteRecord` | `undoInteraction` — not gated on the opt-out toggle |
 | Native Bluesky follow | `app.bsky.graph.follow` | `followBlueskyActor` — unilateral, no accept/reject the way ActivityPub Follow has |
 | Profile | `app.bsky.actor.profile`, fixed rkey `"self"` | `SyncProfile` — a singleton, needs `PutRecord` on first write and `UpdateRecord` thereafter since neither call is a true upsert |
@@ -81,6 +82,8 @@ Before this, every write path ran as a detached goroutine doing an unsynchronize
 | Avatar / banner | Same blob path, into the profile record's `Avatar`/`Banner` | Cover photos have no field on the lightweight `ProfileViewBasic` shape most read paths see — only the detailed `getProfile` response carries a banner, so `followBlueskyActor` opportunistically caches it at follow time, the one point a detailed profile is fetched |
 | Content warning | A custom self-label `agora-content-warning` | `labels.go` — deliberately not one of Bluesky's built-in adult-content categories, since Agora's CW is free text unrelated to those fixed categories |
 | Over-length post | Truncated, with `"…\n\n" + permalink` appended | Bluesky's AppView silently drops (never indexes) any `app.bsky.feed.post.text` over 300 graphemes, with no error surfaced back — `truncateForBluesky` avoids that fate entirely rather than erroring (AGORA-256) |
+
+Bluesky shows no custom label, so the label alone makes a warning invisible there. Reposts that are sent as text (a repost of a post that is not on Bluesky, and a quote post of a Bluesky one, AGORA-459) therefore also start with a `CW: <warning>` line (`warningLine`/`withWarning` in `labels.go`). Ordinary posts still carry the label only.
 
 ## Inbound: AT Proto → Agora posts
 

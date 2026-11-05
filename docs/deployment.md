@@ -203,6 +203,40 @@ apart from images, and the accounts using the most video storage.
   instances. Videos from the wider Fediverse and Bluesky only reach people who
   follow those accounts, in their Following tab.
 
+### Rebuild, don't just restart
+
+The compose file changed in v5.0.0 (AGORA-458): the backend's health check now
+calls `/health`, which checks the database, instead of only testing that the
+port is open. Pull and run `docker compose up -d --build` so the new backend
+image and the new health check both take effect; `docker compose restart` alone
+keeps the old ones.
+
+* **`/health`** now returns JSON (`ok`, `ping_ms` and the database connection
+  pool's numbers) and answers `503` if the database does not reply within three
+  seconds. If you point a monitor or a load balancer at it, expect a JSON body
+  where it used to say `ok`. A stuck server now shows as `(unhealthy)` in
+  `docker compose ps`.
+* **`HEALTH_WATCHDOG`** (optional, in `.env`, off by default): set it to a number
+  such as `4` and the server exits after that many failed database checks in a
+  row (one every 15 seconds), so Docker's `restart: unless-stopped` starts it
+  again. See [If the instance freezes](#if-the-instance-freezes-v500) below for
+  what to capture first.
+
+### Database changes
+
+Nothing to run. The startup migration adds, among others, a `comment_id`
+column on notifications (AGORA-460), which is what lets a notification about a
+comment open the post at that comment. Notifications made before the upgrade
+for reactions, replies and new comments have no comment recorded and open the
+post at the top, as before.
+
+### Quote-shares from other instances
+
+A quote-share (a repost with commentary) made on another Agora instance now
+shows here as a quote card instead of the comment followed by a bare
+`RE: <link>` line (AGORA-453). It applies to posts that arrive after the
+upgrade; ones already stored keep their link.
+
 ### Mobile app
 
 The v5.0.0 app needs a **new build**, not an over-the-air update: recording

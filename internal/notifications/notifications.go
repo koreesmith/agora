@@ -40,6 +40,7 @@ type rawNotification struct {
 	ActorAvatarURL   *string
 	ActorEmojis      string
 	PostID           *string
+	CommentID        *string // AGORA-460
 	Data             string
 	Read             bool
 	CreatedAt        string
@@ -60,6 +61,9 @@ type NotificationItem struct {
 	IDs       []string `json:"ids"`
 	Type      string   `json:"type"`
 	PostID    *string  `json:"post_id"`
+	// AGORA-460: the comment this is about, for the types that concern one, so
+	// a client can open the post at it. Nil for everything else.
+	CommentID *string  `json:"comment_id,omitempty"`
 	Data      string   `json:"data,omitempty"`
 	Read      bool     `json:"read"`
 	CreatedAt string   `json:"created_at"`
@@ -117,7 +121,8 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT n.id, n.type,
 		       n.actor_id, u.username, u.display_name, u.avatar_url, COALESCE(u.emojis::text,'{}'),
-		       n.post_id, n.data, n.read, n.created_at
+		       n.post_id, n.data, n.read, n.created_at,
+		       n.comment_id
 		FROM notifications n
 		LEFT JOIN users u ON u.id = n.actor_id
 		WHERE n.user_id = $1 AND `+notBlockedActor+`
@@ -133,13 +138,21 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var n rawNotification
 		rows.Scan(&n.ID, &n.Type, &n.ActorID, &n.ActorUsername, &n.ActorDisplayName,
-			&n.ActorAvatarURL, &n.ActorEmojis, &n.PostID, &n.Data, &n.Read, &n.CreatedAt)
+			&n.ActorAvatarURL, &n.ActorEmojis, &n.PostID, &n.Data, &n.Read, &n.CreatedAt, &n.CommentID)
 		raw = append(raw, n)
 	}
 
 	// Resolve post_id upward for comment-type notifications so the client
 	// navigates to the root post rather than the comment itself.
 	for i, n := range raw {
+		// AGORA-460: a like on a comment is stored against the comment itself
+		// (its post_id is the comment), so before the post is resolved upward
+		// that id is the comment to open. Rows made before comment_id existed
+		// get it this way too.
+		if n.Type == "comment_like" && n.CommentID == nil && n.PostID != nil {
+			c := *n.PostID
+			raw[i].CommentID = &c
+		}
 		if n.PostID != nil && (n.Type == "comment_reaction" || n.Type == "comment_reply" || n.Type == "comment_like") {
 			var parentID *string
 			s.db.QueryRow(`SELECT parent_id FROM posts WHERE id = $1`, *n.PostID).Scan(&parentID)
@@ -155,14 +168,20 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type groupKey struct{ typ, postID string }
+	// AGORA-460: likes and reactions on different comments are not one
+	// notification, since each opens a different comment. Replies and new
+	// comments on a post still collapse, and open the newest.
+	type groupKey struct{ typ, postID, commentID string }
 	groupMap := map[groupKey]*NotificationItem{}
 	var items []*NotificationItem
 
 	for i := range raw {
 		n := &raw[i]
 		if groupableTypes[n.Type] && n.PostID != nil {
-			key := groupKey{n.Type, *n.PostID}
+			key := groupKey{typ: n.Type, postID: *n.PostID}
+			if (n.Type == "comment_like" || n.Type == "comment_reaction") && n.CommentID != nil {
+				key.commentID = *n.CommentID
+			}
 			if g, exists := groupMap[key]; exists {
 				g.IDs = append(g.IDs, n.ID)
 				g.Count++
@@ -193,6 +212,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 					IDs:       []string{n.ID},
 					Type:      n.Type,
 					PostID:    n.PostID,
+					CommentID: n.CommentID,
 					Data:      n.Data,
 					Read:      n.Read,
 					CreatedAt: n.CreatedAt,
@@ -217,6 +237,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 				IDs:              []string{n.ID},
 				Type:             n.Type,
 				PostID:           n.PostID,
+				CommentID:        n.CommentID,
 				Data:             n.Data,
 				Read:             n.Read,
 				CreatedAt:        n.CreatedAt,
@@ -328,6 +349,16 @@ func (s *Service) UpdateEmailPrefs(w http.ResponseWriter, r *http.Request) {
 // ── Create (called by other packages) ────────────────────────────────────────
 
 func (s *Service) Create(userID, actorID, notifType, postID, data string) {
+	s.CreateOnComment(userID, actorID, notifType, postID, "", data)
+}
+
+// CreateOnComment is Create for a notification that is about one comment
+// (AGORA-460): postID is the post it is on (or, for a like on a comment, the
+// comment itself, as before) and commentID the comment to open, "" if none.
+func (s *Service) CreateOnComment(userID, actorID, notifType, postID, commentID, data string) {
+	if commentID == "" && notifType == "comment_like" {
+		commentID = postID // a like on a comment is stored against the comment
+	}
 	// AGORA-426: nothing from an account on either side of a block: no row, no
 	// email, no push.
 	if actorID != "" && actorID != userID {
@@ -340,13 +371,15 @@ func (s *Service) Create(userID, actorID, notifType, postID, data string) {
 	if postID != "" { pID = &postID }
 	var aID *string
 	if actorID != "" { aID = &actorID }
-	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, data) VALUES ($1,$2,$3,$4,$5)`,
-		userID, aID, notifType, pID, data)
+	var cID *string
+	if commentID != "" { cID = &commentID }
+	s.db.Exec(`INSERT INTO notifications (user_id, actor_id, type, post_id, comment_id, data) VALUES ($1,$2,$3,$4,$5,$6)`,
+		userID, aID, notifType, pID, cID, data)
 	go s.maybeEmailNotif(userID, actorID, notifType, postID, data)
-	go s.maybePushNotif(userID, actorID, notifType, postID, data)
+	go s.maybePushNotif(userID, actorID, notifType, postID, commentID, data)
 }
 
-func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData string) {
+func (s *Service) maybePushNotif(userID, actorID, notifType, postID, commentID, extraData string) {
 	tokens := s.pushTokens(userID)
 	if len(tokens) == 0 { return }
 
@@ -368,6 +401,7 @@ func (s *Service) maybePushNotif(userID, actorID, notifType, postID, extraData s
 	data := map[string]string{
 		"type":           notifType,
 		"post_id":        s.rootPostID(postID),
+		"comment_id":     commentID, // AGORA-460: the app opens the post at it
 		"actor_username": actorUsername,
 		"data":           extraData,
 	}

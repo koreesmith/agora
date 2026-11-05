@@ -1606,7 +1606,10 @@ func (s *Service) LikePost(w http.ResponseWriter, r *http.Request) {
 		if parentID != nil {
 			notifType = "comment_like"
 		}
-		go s.notif.Create(authorID, userID, notifType, postID, "")
+		// AGORA-460: a like on a comment is about that comment.
+		commentID := ""
+		if parentID != nil { commentID = postID }
+		go s.notif.CreateOnComment(authorID, userID, notifType, postID, commentID, "")
 	}
 	// AGORA-158: federate the like if the target is a remote post. The
 	// plain heart button is always exactly a "like" reaction (AGORA-360).
@@ -1697,7 +1700,10 @@ func (s *Service) ReactPost(w http.ResponseWriter, r *http.Request) {
 			}
 			notifPostID = rootID
 		}
-		go s.notif.Create(authorID, userID, notifType, notifPostID, req.Type)
+		// AGORA-460: a reaction on a comment is about that comment.
+		commentID := ""
+		if parentID != nil { commentID = postID }
+		go s.notif.CreateOnComment(authorID, userID, notifType, notifPostID, commentID, req.Type)
 	}
 
 	if prevType != req.Type {
@@ -2647,11 +2653,11 @@ func (s *Service) CreateComment(w http.ResponseWriter, r *http.Request) {
 
 	// Notify post author (if not self)
 	if postAuthorID != userID {
-		go s.notif.Create(postAuthorID, userID, "post_comment", postID, "")
+		go s.notif.CreateOnComment(postAuthorID, userID, "post_comment", postID, id, "") // AGORA-460
 	}
 	// Notify comment author when someone replies to their comment (if different from post author and self)
 	if replyToAuthorID != "" && replyToAuthorID != userID && replyToAuthorID != postAuthorID {
-		go s.notif.Create(replyToAuthorID, userID, "comment_reply", postID, "")
+		go s.notif.CreateOnComment(replyToAuthorID, userID, "comment_reply", postID, id, "") // AGORA-460
 	}
 	go s.notifyMentions(req.Content, userID, postID)
 

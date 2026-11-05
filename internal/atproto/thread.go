@@ -201,7 +201,7 @@ func (s *Service) ingestThreadReplies(ctx context.Context, node *bsky.FeedDefs_T
 		s.storeHashtagsFromFacets(commentID, rec.Facets) // AGORA-213
 
 		if s.notif != nil && parentAuthorID != "" && parentAuthorID != authorID {
-			s.notif.Create(parentAuthorID, authorID, "post_comment", localParentID, "")
+			s.notif.CreateOnComment(parentAuthorID, authorID, "post_comment", localParentID, commentID, "") // AGORA-460
 		}
 
 		log.Printf("atproto: ingested reply %s from %s (%s)", commentID, handle, post.Uri)

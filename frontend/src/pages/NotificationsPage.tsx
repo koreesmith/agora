@@ -115,14 +115,17 @@ function notifTarget(n: any): string | null {
     case 'fediverse_follow':
     case 'atproto_follow':
       return n.actor_username ? `/profile/${n.actor_username}` : null
-    case 'post_like':
+    // AGORA-460: a notification about a comment opens the post at that comment.
     case 'comment_like':
-    case 'post_reaction':
     case 'comment_reaction':
-    case 'post_repost':
     case 'post_comment':
-    case 'post_mention':
     case 'comment_reply':
+      if (!n.post_id) return null
+      return n.comment_id ? `/post/${n.post_id}?comment=${n.comment_id}` : `/post/${n.post_id}`
+    case 'post_like':
+    case 'post_reaction':
+    case 'post_repost':
+    case 'post_mention':
     case 'user_post':
     case 'wall_post':
     case 'wall_post_pending':

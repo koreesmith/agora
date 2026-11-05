@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { feedApi } from '../../api'
 import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
@@ -248,6 +248,25 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
     queryKey: ['comments', postId],
     queryFn: () => feedApi.getComments(postId).then(r => r.data),
   })
+
+  // AGORA-460: a notification links to /post/<id>?comment=<comment id>. Once
+  // the comments are in, centre that comment and flash it so it can be found in
+  // a long thread. Done once per link, and again a moment later because images
+  // above it can still be loading and shift it.
+  const [searchParams] = useSearchParams()
+  const targetComment = searchParams.get('comment')
+  const jumpedTo = useRef('')
+  useEffect(() => {
+    if (!targetComment || !data || jumpedTo.current === `${postId}:${targetComment}`) return
+    const el = document.getElementById(`comment-${targetComment}`)
+    if (!el) return // deleted, or not on this post: the post is shown as usual
+    jumpedTo.current = `${postId}:${targetComment}`
+    const go = () => el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    setTimeout(go, 100)
+    setTimeout(go, 800)
+    el.classList.add('comment-flash')
+    setTimeout(() => el.classList.remove('comment-flash'), 3200)
+  }, [targetComment, data, postId])
 
   const create = useMutation({
     mutationFn: () => feedApi.createComment(postId, { content: text, image_url: imageUrl }),
@@ -502,7 +521,7 @@ function CommentRow({ comment: c, postId, postAuthorId, currentUserId, currentUs
   const reactionCount: number = c.reaction_count || 0
 
   return (
-    <div className="flex gap-2">
+    <div id={`comment-${c.id}`} className="flex gap-2 scroll-mt-24 rounded-xl">
       <Link to={`/profile/${c.username}`} className="flex-shrink-0">
         <div className={`${avatarSize} rounded-full bg-agora-200 dark:bg-agora-700 overflow-hidden`}>
           {c.avatar_url

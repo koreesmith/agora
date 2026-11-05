@@ -95,3 +95,13 @@
 }
 .no-scrollbar { scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* AGORA-460: the comment a notification opened the post at. */
+@keyframes comment-flash {
+  0%, 60% { box-shadow: 0 0 0 3px rgb(var(--comment-flash-rgb, 59 130 246) / 0.55); background-color: rgb(var(--comment-flash-rgb, 59 130 246) / 0.12); }
+  100%    { box-shadow: 0 0 0 3px transparent; background-color: transparent; }
+}
+.comment-flash { animation: comment-flash 3.2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .comment-flash { animation: none; box-shadow: 0 0 0 3px rgb(59 130 246 / 0.55); }
+}

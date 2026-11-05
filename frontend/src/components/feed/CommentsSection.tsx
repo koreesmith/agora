@@ -6,6 +6,7 @@ import { useAuthStore } from '../../store/auth'
 import { formatDistanceToNow } from 'date-fns'
 import { Trash2, Send, Pencil, Reply, Image, X as XIcon, MoreHorizontal, Flag, ThumbsUp, BadgeCheck } from 'lucide-react'
 import { useMentions } from './useMentions'
+import { setReactionInCache } from '../../utils/reactionCache'
 import MentionDropdown from './MentionDropdown'
 import { isGifUrl } from '../../utils/gif'
 import { URL_TOKEN, linkHref, trimUrl } from '../../utils/linkify'
@@ -283,21 +284,32 @@ export default function CommentsSection({ postId, postAuthorId }: { postId: stri
     onSuccess: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
   })
 
+  // AGORA-461: as for posts (AGORA-456), the reaction shows at once and the
+  // thread is not fetched again; if the server does not take it, it goes back.
+  const [reactionError, setReactionError] = useState('')
   const reactComment = useMutation({
-    mutationFn: ({ id, type }: { id: string; type: string | null }) =>
+    mutationFn: ({ id, type }: { id: string; type: string | null; prev: string }) =>
       type ? feedApi.reactPost(id, type) : feedApi.unreactPost(id),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['comments', postId] }),
+    onError: (_e, vars) => {
+      setReactionInCache(qc, vars.id, vars.prev)
+      setReactionError("Couldn't save your reaction. Check your connection.")
+      setTimeout(() => setReactionError(''), 3500)
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['comments', postId], refetchType: 'none' }),
   })
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['comments', postId] })
   const comments = data?.comments || []
 
   const handleReact = (id: string, myReaction: string, type: string) => {
-    reactComment.mutate({ id, type: myReaction === type ? null : type })
+    const next = myReaction === type ? '' : type
+    setReactionInCache(qc, id, next)
+    reactComment.mutate({ id, type: next || null, prev: myReaction || '' })
   }
 
   return (
     <div className="mt-4 pt-4 border-t border-agora-100 dark:border-agora-700 space-y-3">
+      {reactionError && <p role="status" className="text-xs text-red-500">{reactionError}</p>}
       {comments.map((c: any) => (
         <div key={c.id}>
           <CommentRow

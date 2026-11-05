@@ -197,6 +197,8 @@ var schema = []string{
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read, created_at DESC)`,
+	// AGORA-460: the comment a notification is about, so the apps can open the post at it.
+	`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS comment_id UUID REFERENCES posts(id) ON DELETE SET NULL`,
 
 	// ── Reports ────────────────────────────────────────────────────────────
 	`CREATE TABLE IF NOT EXISTS reports (

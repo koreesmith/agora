@@ -2325,7 +2325,7 @@ func (s *Service) handleInboundCreate(verifiedActor string, objectRaw json.RawMe
 
 	if s.notif != nil {
 		if postAuthorID != remoteUserID {
-			s.notif.Create(postAuthorID, remoteUserID, "post_comment", rootPostID, "")
+			s.notif.CreateOnComment(postAuthorID, remoteUserID, "post_comment", rootPostID, commentID, "") // AGORA-460
 		}
 	}
 }
